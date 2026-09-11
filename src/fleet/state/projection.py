@@ -478,6 +478,7 @@ class Projector:
             try:
                 await project_once(self._db_path, run_id=self._run_id, path=self._path)
                 self.writes += 1
+                self.last_error = None  # a later success resolves an earlier failure
             except Exception as exc:  # a stale projection is survivable; a silent one is not
                 self.last_error = exc
             finally:

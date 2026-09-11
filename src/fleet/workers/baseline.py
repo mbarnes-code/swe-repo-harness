@@ -202,11 +202,19 @@ class BaselineWorker(BaseWorker[BaselineInput, BaselineOutput]):
             # nothing, so `repos.baseline_ok` stays NULL -- exactly what "genuinely disabled"
             # must mean (ADR-0135's own exemption-set ruling depends on this).
             return WorkerResult[BaselineOutput](status="ok", completed_units=[UNIT])
-        if ctx.cancelled() or ctx.expired(loop_now()):
+        now = loop_now()
+        if ctx.cancelled() or ctx.expired(now):
+            # A genuine `ctx.cancelled()` is an operator decision and stays `cancelled` (not an
+            # attempt); `ctx.expired()` is a real timeout and must be a chargeable `timeout`
+            # result (§11) -- conflating the two would let a repo that times out on every attempt
+            # never escalate to REQUIRES_HUMAN_INTERVENTION.
+            timed_out = ctx.expired(now)
             return WorkerResult[BaselineOutput](
-                status="cancelled",
+                status="timeout" if timed_out else "cancelled",
                 error=WorkerError(
-                    failure_class=FailureClass.TIMEOUT,
+                    failure_class=(
+                        FailureClass.TIMEOUT if timed_out else FailureClass.TRANSIENT_INFRA
+                    ),
                     retryable=True,
                     stderr_tail="cancelled before the native baseline was dispatched",
                 ),

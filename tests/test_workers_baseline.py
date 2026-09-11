@@ -262,7 +262,9 @@ def test_cancelled_before_dispatch_reports_status_cancelled(tmp_path: Path) -> N
     result = _run(worker, ctx, _payload())
     assert result.status == "cancelled"
     assert result.error is not None
-    assert result.error.failure_class == FailureClass.TIMEOUT
+    # A genuine `ctx.cancelled()` is an operator decision, not a timeout — TRANSIENT_INFRA,
+    # matching the TRANSFORM-phase workers' convention (rewrite.py/relocate.py/buildgen.py).
+    assert result.error.failure_class == FailureClass.TRANSIENT_INFRA
     assert runner.calls == []
 
 

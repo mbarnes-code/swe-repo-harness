@@ -28,7 +28,6 @@ mismatch to *name* the differing component instead of merely reporting disagreem
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -36,6 +35,8 @@ from typing import Final
 from uuid import UUID
 
 import aiosqlite
+
+from fleet.util.hashing import sha256_text
 
 __all__ = [
     "DIGEST_SECTIONS",
@@ -81,7 +82,7 @@ def canonical_json(value: JsonValue) -> str:
 
 
 def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return sha256_text(text)
 
 
 def digest_sections(sections: Mapping[str, JsonValue]) -> RunDigest:

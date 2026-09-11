@@ -76,7 +76,12 @@ from fleet.orchestrator.budgets import (
 from fleet.orchestrator.retry import LadderState, RetryAction, RetryPolicy
 from fleet.orchestrator.scheduler import Admission, WaveScheduler, WaveState
 from fleet.state import checkpoints
-from fleet.state.repository import LeaseStolenError
+from fleet.state.repository import (
+    BudgetRefusedError,
+    LeaseStolenError,
+    ReservationRefusedError,
+)
+from fleet.util.errors import exception_type_name
 from fleet.workers.base import (
     BaseWorker,
     WorkerContext,
@@ -320,7 +325,7 @@ class _Dispatched[O: WorkerOutput]:
     """
 
     execution: WorkerExecution[O] | None = None
-    breach: LedgerBreach | None = None
+    breach: LedgerBreach | BudgetRefusedError | None = None
     re_entry: ReEntry = ReEntry.FRESH
 
 
@@ -512,6 +517,11 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
         ladder = LadderState(
             attempts=0 if row is None else row.attempts,
             max_attempts=MAX_ATTEMPTS if row is None else row.max_attempts,
+            # D-closing: reload the durable counter so a crash/restart or a later wave's
+            # re-admission of a still-PENDING phase resumes the budget instead of resetting it —
+            # this is the persisted value `_record_diagnostics` exists to survive a SIGKILL for
+            # (see `workers/base.py`'s module docstring and `docs/PROGRESS.md`).
+            transient_retries=0 if row is None else row.transient_retries,
             # §9/§10, D-closing: the CONFIGURED ladder (`FleetSettings.config.transform.ladder`,
             # already carrying any per-run `--context-policy` override `cli.py` applied) rather
             # than `LadderState`'s hardcoded `DEFAULT_LADDER` default. One `ContextPolicy | None`
@@ -581,7 +591,9 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
             outcome = replace(outcome, dispatches=outcome.dispatches + 1)
 
             if breach is not None:
-                return await self._on_breach(repo_id, breach, fence=fence, outcome=outcome)
+                return await self._on_breach(
+                    repo_id, breach, fence=fence, outcome=outcome, ladder=ladder
+                )
 
             if execution is None or execution.fence_stale:
                 # §11.5: the lease was reclaimed while the worker ran. DISCARD — not merged, not
@@ -731,7 +743,7 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                         "backend_unavailable_finding_not_written",
                         repo_id=repo_id,
                         phase=int(self.phase),
-                        exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+                        exception_type=exception_type_name(exc),
                         error=str(exc),
                     )
                 raise RunHalted(
@@ -875,6 +887,31 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
             # Raised by `reserve()` BEFORE the body ran, so nothing was dispatched and nothing
             # was spent. Which ceiling broke is the exception's TYPE, and `exit_code` says
             # whether it stops the run or only this repo (§11.2).
+            return _Dispatched(breach=breach)
+        except ReservationRefusedError:
+            # `ledger.dispatch()`'s own `finally` calls `settle()` on the way OUT of the `async
+            # with` above, including on the success path — AFTER `execution` was already
+            # computed. `ReservationRefusedError` means the HOLD itself is gone (already
+            # settled, or the reaper flipped it to EXPIRED because this worker's lease/fence was
+            # reclaimed): its own docstring is explicit that this is "deliberately NOT a
+            # `RepoBudgetRefusedError`: no ceiling refused here". That is exactly the reclaimed-
+            # lease scenario `execution.fence_stale` exists to catch, and the reaped worker's
+            # result is correctly discarded via `_isolated`'s generic handler, not reported as a
+            # budget failure it never had (`tests/test_runner.py::
+            # test_a_runner_minted_reservation_names_its_owner_so_the_reaper_can_fence_it`).
+            raise
+        except BudgetRefusedError as breach:
+            # Every OTHER settle-time refusal — `RepoBudgetRefusedError` (the repo ledger's own
+            # settlement guard refused) or the bare `BudgetRefusedError` (the run ledger's) — IS
+            # a ceiling actually refusing, unlike the case above. `settle()` has no backpressure/
+            # interpretation loop of its own (unlike `reserve()`, which always converts a refusal
+            # into a typed `LedgerBreach` or waits), so without this clause it falls through to
+            # `_isolated`'s generic `except Exception`, discarding a real completed result as
+            # `FailureClass.UNKNOWN`/`PENDING` instead of the budget-related failure it actually
+            # is. Routed through `_on_breach` exactly like a `LedgerBreach`: `exit_code` is
+            # absent here (settle-time refusals are never the run- or wave-halting kind), so it
+            # takes that method's human-intervention branch, same as any other repo-scoped
+            # ceiling.
             return _Dispatched(breach=breach)
         finally:
             heartbeat.cancel()
@@ -1109,7 +1146,7 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                 repo_id=repo_id,
                 phase=int(self.phase),
                 pending=self.ctx.llm_findings.pending,
-                exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+                exception_type=exception_type_name(exc),
                 error=str(exc),
             )
 
@@ -1166,7 +1203,13 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
         return True
 
     async def _on_breach(
-        self, repo_id: str, breach: LedgerBreach, *, fence: int, outcome: RepoOutcome
+        self,
+        repo_id: str,
+        breach: LedgerBreach | BudgetRefusedError,
+        *,
+        fence: int,
+        outcome: RepoOutcome,
+        ladder: LadderState,
     ) -> RepoOutcome:
         """A ceiling refused the dispatch. Whether the fleet stops is the breach's `exit_code`.
 
@@ -1174,19 +1217,26 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
         wave-scoped breach is a property of the RUN and raises `RunHalted`, which cancels the
         wave; a repo- or task-scoped one leaves the repo to a human and the fleet keeps going
         (§11.2).
+
+        `breach` is not always a `LedgerBreach`: a raw `BudgetRefusedError` reaches here from
+        `_dispatch`'s settle-time catch too (see its comment), and that hierarchy carries no
+        `exit_code` at all — `getattr` reads it as absent rather than guessing, which is right,
+        because a settle-time refusal is never the run- or wave-halting kind (§11.2's exit codes
+        are reserved for ceilings `reserve()` itself enforces before a call is ever dispatched).
         """
-        if breach.exit_code is not None:
+        exit_code = getattr(breach, "exit_code", None)
+        if exit_code is not None:
             raise RunHalted(
                 HaltReason.WAVE_BUDGET
-                if breach.exit_code == _EXIT_CODES[HaltReason.WAVE_BUDGET]
+                if exit_code == _EXIT_CODES[HaltReason.WAVE_BUDGET]
                 else HaltReason.RUN_BUDGET,
                 f"{type(breach).__name__} refused {repo_id}: {breach}",
-                exit_code=breach.exit_code,
+                exit_code=exit_code,
             )
         error = WorkerError(
             failure_class=FailureClass.BUDGET_EXHAUSTED, retryable=False, stderr_tail=str(breach)
         )
-        await self._record_diagnostics(repo_id, fence, error, LadderState())
+        await self._record_diagnostics(repo_id, fence, error, ladder)
         written = await self._complete(
             repo_id, fence, RepoStatus.REQUIRES_HUMAN_INTERVENTION, str(breach)
         )

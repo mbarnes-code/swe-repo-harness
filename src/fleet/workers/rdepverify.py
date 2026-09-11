@@ -54,6 +54,7 @@ from fleet.models.tasks import VerificationReport
 from fleet.orchestrator.registry import register_worker
 from fleet.sandbox.container import ContainerSandbox
 from fleet.sandbox.worktree import sandbox_name
+from fleet.util.errors import exception_type_name
 from fleet.util.proc import CommandRunner, run
 from fleet.workers.base import (
     BaseWorker,
@@ -241,7 +242,7 @@ class RdepverifyWorker(BaseWorker[RdepverifyInput, RdepverifyOutput]):
                     artifact_ref=(
                         None if exc.result.stderr_path is None else str(exc.result.stderr_path)
                     ),
-                    exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+                    exception_type=exception_type_name(exc),
                 ),
                 evidence=[payload.integration_ref],
             )

@@ -185,7 +185,19 @@ class ContainerStatsReader:
         if not names:
             return ContainerMemoryTotal(readings=(), total_bytes=0)
 
-        result = await self._stats(names, timeout_s=timeout_s)
+        # A container in `names` can legitimately exit and be removed (`--rm`) between the
+        # `docker ps` above and the `docker stats` call below -- an ordinary verify container
+        # finishing mid-build, not a sign the host is unreadable. `docker stats` fails its whole
+        # batch on any one missing name, so on a first failure re-list (dropping any container
+        # that has since exited) and retry once against the survivors; only a SECOND failure --
+        # against a freshly re-listed set -- is treated as a genuinely unreadable host.
+        try:
+            result = await self._stats(names, timeout_s=timeout_s)
+        except ContainerStatsUnavailableError:
+            names = await self._list_running(prefix, timeout_s=timeout_s)
+            if not names:
+                return ContainerMemoryTotal(readings=(), total_bytes=0)
+            result = await self._stats(names, timeout_s=timeout_s)
         readings: list[ContainerMemoryReading] = []
         for raw_line in result.stdout_tail.splitlines():
             line = raw_line.strip()

@@ -84,7 +84,22 @@ TRUNCATED_INDEX_CAP: Final = 0.6
 edges are capped at confidence 0.6". Applied to the SYMBOL-DERIVED kinds only: a manifest join
 is not read out of the symbol index, so a truncated index is no evidence against it."""
 
-TEST_SCOPES: Final[frozenset[str]] = frozenset({"test", "dev", "devDependencies", "optional"})
+TEST_SCOPES: Final[frozenset[str]] = frozenset(
+    {
+        "test",
+        "dev",
+        "devDependencies",
+        "optional",
+        # Gradle's `RawDependency.scope` is the configuration name "as written" (its own
+        # docstring), not a normalized token — `manifests/gradle.py`'s `_CONFIGURATIONS` names
+        # these five as its test-related configurations, none of which equal the literal "test".
+        "testAnnotationProcessor",
+        "testCompile",
+        "testCompileOnly",
+        "testImplementation",
+        "testRuntimeOnly",
+    }
+)
 
 API_SYMBOL_KINDS: Final[frozenset[SymbolKind]] = frozenset(
     {SymbolKind.GRPC_SERVICE, SymbolKind.PROTO_MESSAGE, SymbolKind.HTTP_OPERATION}
@@ -505,6 +520,9 @@ def _dynamic_ref_edges(inp: InferenceInput) -> list[DependencyEdge]:
         for owner in targets:
             if owner == sym.repo_id:
                 continue
+            factors = _evidence_factors(sym.path, inp)
+            if len(targets) > 1:
+                factors["ambiguous"] = MODIFIERS["ambiguous"]
             out.append(
                 _repo_edge(
                     src_id=sym.repo_id,
@@ -514,7 +532,7 @@ def _dynamic_ref_edges(inp: InferenceInput) -> list[DependencyEdge]:
                     kind=EdgeKind.DYNAMIC_REF,
                     evidence_path=sym.path,
                     evidence_line=sym.line,
-                    factors=_evidence_factors(sym.path, inp),
+                    factors=factors,
                     candidates=targets if len(targets) > 1 else (),
                     truncated=sym.repo_id in inp.truncated_repo_ids,
                 )

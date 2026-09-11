@@ -32,6 +32,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
@@ -2666,18 +2667,86 @@ def test_gc_refuses_to_evict_under_live_work(workspace: Path) -> None:
     assert forced.exit_code == ExitCode.SUCCESS, forced.output
 
 
-def test_abort_checkpoints_and_regenerates_the_projection(workspace: Path) -> None:
+ABORT_DRAIN_YAML = (
+    "run:\n  monorepo_path: ../acme-monorepo\n"
+    "preflight:\n  min_free_bytes: 1048576\n"
+    "concurrency:\n  docker: 1\n"
+    "verify:\n  container_memory: 64m\n"
+    "budgets:\n  max_rss_mb: 512\n  wave_drain_timeout_s: 1\n"
+)
+"""`FLEET_YAML` with `budgets.wave_drain_timeout_s` cut to 1s, so a test whose RUNNING row never
+naturally resolves (no live worker is ever going to write it) waits out a real, but short, drain
+rather than either hanging on the shipped 900s default or being unable to tell a real wait from
+none at all."""
+
+
+def _abort_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, fleet: str) -> Path:
+    write_config(tmp_path, fleet=fleet)
+    fresh_db(tmp_path / "state" / "fleet.db")
+    seed_run(tmp_path / "state" / "fleet.db")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def test_abort_checkpoints_and_regenerates_the_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`fleet abort` exits 0, resets RUNNING rows and rewrites `migration_state.json` (§10).
 
     Why: "any non-zero exit leaves a valid checkpoint and a regenerated `migration_state.json`" —
     the deliberate stop must uphold the same invariant, or a clean abort is worse than a crash.
-    """
-    _put_in_flight(workspace / "state" / "fleet.db", "acme-commons", "RUNNING")
-    result = runner.invoke(app, [*base_args(workspace), "abort", "--reason", "operator"])
-    assert result.exit_code == ExitCode.SUCCESS, result.output
-    assert (workspace / "migration_state.json").exists()
 
-    conn = sqlite3.connect(workspace / "state" / "fleet.db")
+    Also proves `--drain` (the default) actually WAITS rather than resetting on the spot: the
+    RUNNING row here never naturally resolves, so a real drain must burn roughly
+    `budgets.wave_drain_timeout_s` (1s, via `ABORT_DRAIN_YAML`) before the reset lands — the
+    defect this guards against is `--drain` behaving exactly like `--now`.
+    """
+    ws = _abort_workspace(tmp_path, monkeypatch, fleet=ABORT_DRAIN_YAML)
+    _put_in_flight(ws / "state" / "fleet.db", "acme-commons", "RUNNING")
+
+    started = time.monotonic()
+    result = runner.invoke(app, [*base_args(ws), "abort", "--reason", "operator"])
+    elapsed = time.monotonic() - started
+
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert (ws / "migration_state.json").exists()
+    assert elapsed >= 1.0, f"a real drain of 1s must be observed, took {elapsed:.3f}s"
+
+    conn = sqlite3.connect(ws / "state" / "fleet.db")
+    try:
+        status, fence = conn.execute(
+            "SELECT status, lease_fence FROM phases WHERE run_id = ? AND repo_id = 'acme-commons'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert status == "PENDING"
+    assert fence == 1
+
+
+def test_abort_now_skips_the_drain_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`fleet abort --now` cancels immediately, with NO drain wait at all.
+
+    The fixture deliberately keeps the shipped `wave_drain_timeout_s` default (900s, `FLEET_YAML`
+    does not override it): `--now` returning in well under that proves the immediate-reset path is
+    reached without waiting out any part of the drain budget, rather than merely picking a short
+    timeout that happens to elapse quickly.
+    """
+    ws = _abort_workspace(tmp_path, monkeypatch, fleet=FLEET_YAML)
+    _put_in_flight(ws / "state" / "fleet.db", "acme-commons", "RUNNING")
+
+    started = time.monotonic()
+    result = runner.invoke(app, [*base_args(ws), "abort", "--now", "--reason", "operator"])
+    elapsed = time.monotonic() - started
+
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert elapsed < 5.0, (
+        f"--now must not wait out any part of the drain budget, took {elapsed:.3f}s"
+    )
+
+    conn = sqlite3.connect(ws / "state" / "fleet.db")
     try:
         status, fence = conn.execute(
             "SELECT status, lease_fence FROM phases WHERE run_id = ? AND repo_id = 'acme-commons'",

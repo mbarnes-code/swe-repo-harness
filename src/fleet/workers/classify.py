@@ -49,6 +49,7 @@ from fleet.models.enums import Ecosystem, FailureClass, Phase
 from fleet.models.repo import RepoId
 from fleet.obs.redact import redact_text
 from fleet.orchestrator.registry import register_worker
+from fleet.util.errors import exception_type_name
 from fleet.workers.base import (
     BaseWorker,
     WorkerContext,
@@ -141,11 +142,19 @@ class ClassifyWorker(BaseWorker[ClassifyInput, ClassifyOutput]):
         if payload.remaining_units is not None and UNIT not in payload.remaining_units:
             # Already landed under an earlier attempt: re-running would buy the same answer twice.
             return WorkerResult[ClassifyOutput](status="ok", completed_units=[UNIT])
-        if ctx.cancelled() or ctx.expired(loop_now()):
+        now = loop_now()
+        if ctx.cancelled() or ctx.expired(now):
+            # A genuine `ctx.cancelled()` is an operator decision and stays `cancelled` (not an
+            # attempt); `ctx.expired()` is a real timeout and must be a chargeable `timeout`
+            # result (§11) -- conflating the two would let a repo that times out on every attempt
+            # never escalate to REQUIRES_HUMAN_INTERVENTION.
+            timed_out = ctx.expired(now)
             return WorkerResult[ClassifyOutput](
-                status="cancelled",
+                status="timeout" if timed_out else "cancelled",
                 error=WorkerError(
-                    failure_class=FailureClass.TIMEOUT,
+                    failure_class=(
+                        FailureClass.TIMEOUT if timed_out else FailureClass.TRANSIENT_INFRA
+                    ),
                     retryable=True,
                     stderr_tail="cancelled before the classification was dispatched",
                 ),
@@ -260,6 +269,6 @@ def _error_for(exc: BaseException) -> WorkerError:
         failure_class=failure_class,
         retryable=retryable,
         stderr_tail=redact_text(str(exc)),
-        exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+        exception_type=exception_type_name(exc),
         tier=exc.tier if isinstance(exc, TierUnavailable) else None,
     )

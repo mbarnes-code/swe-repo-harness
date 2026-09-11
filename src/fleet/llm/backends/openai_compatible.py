@@ -51,7 +51,6 @@ from openai import (
 
 from fleet.llm.client import (
     BackendReply,
-    FailoverTrigger,
     FinishReason,
     LlmError,
     Message,
@@ -144,6 +143,23 @@ class MissingApiKey(TargetMisconfigured):
         self.env_name = env_name
 
 
+class UnmappedFinishReason(LlmError):
+    """The transport reported a stop reason this adapter version does not know, with no text or
+    tool content to fall back on reading as `stop`.
+
+    A dedicated type, NOT `MalformedReply`. `MalformedReply` documents itself as "repairable
+    exactly like a `ValidationError`", and `client.py` earns that by catching it around `_validate`
+    — but an exception raised from `invoke` never reaches that catch. Raising it here would promise
+    a repair that structurally cannot happen, so a reader tracing the failure would look for a
+    repair budget that was never consulted.
+
+    Not a `TransportError` either: failing over would have every target in the tier reproduce the
+    same unreadable answer before reporting an outage, when the real defect is that this adapter is
+    out of date. Loud, typed, terminal — and greppable when the vocabulary next changes (Rule 11),
+    matching `bedrock.py`/`vertex.py`'s identical type for the identical condition.
+    """
+
+
 # ---------------------------------------------------------------------------------------------
 # Transport seam
 # ---------------------------------------------------------------------------------------------
@@ -218,17 +234,18 @@ class _SdkTransport:
         except RateLimitError as exc:
             raise TransportError(f"{base_url}: {exc}", trigger="RATE_LIMIT") from exc
         except APIStatusError as exc:
-            # 5xx is the endpoint's fault and worth failing over; a 4xx that is not a 429 is this
-            # request's fault, but it is still this TARGET that rejected the shape we sent — a
-            # sibling target may well accept it, so both stay failover triggers and neither is
-            # swallowed.
-            trigger: FailoverTrigger = (
-                "SERVER_ERROR" if exc.status_code >= 500 else "CONNECTION"
-            )
-            raise TransportError(
-                f"{base_url}: HTTP {exc.status_code}: {exc}",
-                trigger=trigger,
-            ) from exc
+            if exc.status_code >= 500:
+                raise TransportError(
+                    f"{base_url}: HTTP {exc.status_code}: {exc}",
+                    trigger="SERVER_ERROR",
+                ) from exc
+            # Everything else in the 4xx range is OUR request being wrong (a bad model id, a
+            # schema the endpoint rejected, an invalid key) — the next target reproduces it
+            # exactly, so it fails the task loudly instead of spending the tier's ladder (Rule 11),
+            # matching `anthropic.py::_from_status`/`vertex.py::_from_status`/
+            # `bedrock.py::_from_client_error`'s identical rule and this module's own
+            # `TargetMisconfigured` docstring: "a config error, never a failover trigger."
+            raise LlmError(f"{base_url}: HTTP {exc.status_code}: {exc}") from exc
         finally:
             await client.close()
         dumped: object = response.model_dump()
@@ -518,12 +535,14 @@ def _finish_reason(
     text: object,
     tool_arguments: dict[str, object] | None,
 ) -> FinishReason:
-    """Transport vocabulary → the five members, or a loud failover.
+    """Transport vocabulary → the five members, or a loud terminal failure.
 
     A body with an unrecognised stop signal AND no content is an endpoint we cannot read; guessing
     `stop` there would hand the client an empty reply and burn the repair budget re-asking a
-    server that never answered. A recognised-shaped body with content but a null signal is the
-    ordinary llama.cpp/TGI case and is read as `stop`.
+    server that never answered, and failing over would only have every other target reproduce the
+    same unmapped vocabulary before reporting an outage (Rule 11) — so this raises
+    `UnmappedFinishReason`, not `TransportError`. A recognised-shaped body with content but a null
+    signal is the ordinary llama.cpp/TGI case and is read as `stop`.
     """
     reported = _choice(raw, target).get("finish_reason")
     if isinstance(reported, str):
@@ -532,10 +551,9 @@ def _finish_reason(
             return mapped
     if (isinstance(text, str) and text) or tool_arguments is not None:
         return "stop"
-    raise TransportError(
+    raise UnmappedFinishReason(
         f"{target.base_url}: finish_reason {reported!r} is unrecognised and the turn carried "
         "no content",
-        trigger="SERVER_ERROR",
     )
 
 

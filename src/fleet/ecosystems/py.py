@@ -177,6 +177,7 @@ class PyAdapter(EcosystemAdapter):
                 },
             )
             for coordinate in sorted(unit.external_coordinates, key=lambda c: c.key)
+            if coordinate.ecosystem is Ecosystem.PYPI
         ]
 
     def workspace_files(self, units: Sequence[BuildUnit]) -> list[SupportFile]:
@@ -231,7 +232,11 @@ class PyAdapter(EcosystemAdapter):
         unit's specs is the same silent drop one step further down.
         """
         contributors = sorted(
-            (unit for unit in units if unit.external_coordinates),
+            (
+                unit
+                for unit in units
+                if any(c.ecosystem is Ecosystem.PYPI for c in unit.external_coordinates)
+            ),
             key=lambda u: (u.dest, str(u.unit_id)),
         )
         if not contributors:
@@ -246,7 +251,12 @@ class PyAdapter(EcosystemAdapter):
                     else []
                 ),
                 content=_requirements_text(
-                    [c for unit in contributors for c in unit.external_coordinates]
+                    [
+                        c
+                        for unit in contributors
+                        for c in unit.external_coordinates
+                        if c.ecosystem is Ecosystem.PYPI
+                    ]
                 ),
             )
         ]
@@ -273,7 +283,12 @@ class PyAdapter(EcosystemAdapter):
         empty input would write an empty file that is indistinguishable from a failed one. A unit
         that declares none simply contributes no lines.
         """
-        coordinates = [c for unit in units for c in unit.external_coordinates]
+        coordinates = [
+            c
+            for unit in units
+            for c in unit.external_coordinates
+            if c.ecosystem is Ecosystem.PYPI
+        ]
         if not coordinates:
             return None
         return Resolution(

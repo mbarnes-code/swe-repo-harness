@@ -210,6 +210,21 @@ def test_valid_reply_is_returned_as_a_validated_typed_response() -> None:
     assert response.usage.cost_usd == pytest.approx((1.0 * 100 + 2.0 * 40) / 1e6)
 
 
+def test_an_explicit_zero_max_output_tokens_is_honoured_not_replaced_by_the_policy_default() -> (
+    None
+):
+    """WHY: `max_output_tokens: int | None = None` distinguishes "caller did not say" from "caller
+    said 0". A falsy-OR (`max_output_tokens or default`) cannot tell those apart and silently
+    replaces an explicit 0 with `CallPolicy.default_max_output_tokens`, exactly the bug `timeout_s
+    is None` next to it does not have."""
+    backend = FakeBackend([ok_reply()])
+    client = build(backend, [target("m1")])
+
+    call(client, max_output_tokens=0)
+
+    assert int(backend.calls[0]["max_output_tokens"]) == 0  # type: ignore[call-overload]
+
+
 def test_truncation_retries_the_same_target_and_never_fails_over() -> None:
     """WHY (§13 row 47 — the regression this file exists for): `finish_reason == "length"` used to
     be misdiagnosed as a schema violation, so the identical oversized call was re-issued across

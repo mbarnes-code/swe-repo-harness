@@ -105,6 +105,7 @@ class JvmAdapter(EcosystemAdapter):
                 repo_name="maven",
             )
             for coordinate in sorted(unit.external_coordinates, key=lambda c: c.key)
+            if coordinate.ecosystem in self.ecosystems
         ]
 
     def generate_targets(self, unit: BuildUnit) -> list[BuildTarget]:

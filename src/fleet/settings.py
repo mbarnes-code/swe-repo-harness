@@ -29,7 +29,6 @@ declared price `budget_ledger.spent_usd` stays `0.00`, `run_max_cost_usd` never 
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -45,6 +44,7 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 
 from fleet.models.enums import ContextPolicy, Ecosystem, EdgeKind, ModelTier, TransformTier
 from fleet.models.tasks import BackendTarget, ModelCapabilities, Price
+from fleet.util.hashing import sha256_text
 from fleet.vcs.forge import FORGE_NAMES
 
 __all__ = [
@@ -1018,12 +1018,19 @@ def target_price_usd(target: BackendTarget, *, in_tokens: int, out_tokens: int) 
 
 
 def canonical_json(value: JsonValue) -> str:
-    """Deterministic serialization: sorted keys, no incidental whitespace, no `hash()`, no clock."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """Deterministic serialization: sorted keys, no incidental whitespace, no `hash()`, no clock.
+
+    `allow_nan=False` (matching `state/digest.py`'s own `canonical_json`) refuses the one float
+    family JSON cannot round-trip, rather than silently emitting a non-standard `NaN`/`Infinity`
+    literal into what is supposed to be a canonical, portable digest input (Rule 11).
+    """
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
 
 
 def _digest(value: JsonValue) -> str:
-    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+    return sha256_text(canonical_json(value))
 
 
 def _read_yaml_mapping(path: Path) -> tuple[dict[str, Any], str]:

@@ -327,8 +327,16 @@ class SymbolindexWorker(BaseWorker[SymbolIndexInput, SymbolIndexOutput]):
         loop = asyncio.get_running_loop()
 
         for index, rel in enumerate(owed):
-            if ctx.cancelled() or ctx.expired(loop_now()):
-                return self._interrupted(payload, landed, owed[index:], symbols, findings)
+            now = loop_now()
+            if ctx.cancelled() or ctx.expired(now):
+                return self._interrupted(
+                    payload,
+                    landed,
+                    owed[index:],
+                    symbols,
+                    findings,
+                    timed_out=ctx.expired(now),
+                )
             if payload.symbols_already_indexed + len(symbols) >= payload.max_symbols_per_repo:
                 findings.append("SymbolBudgetExceeded")
                 truncated = True
@@ -390,18 +398,25 @@ class SymbolindexWorker(BaseWorker[SymbolIndexInput, SymbolIndexOutput]):
         remaining: Sequence[str],
         symbols: Sequence[SymbolRef],
         findings: Sequence[str],
+        *,
+        timed_out: bool = False,
     ) -> WorkerResult[SymbolIndexOutput]:
         """Stopped between files: deadline, cancel, or a full batch.
 
         The rows already extracted travel WITH the `partial` — they are the checkpoint's whole
-        point. Nothing landed means nothing to resume from, and that is `cancelled`, because
-        `partial` with an empty `completed_units` is `failed` under a friendlier name.
+        point. Nothing landed means nothing to resume from: a genuine `ctx.cancelled()` is an
+        operator decision and stays `cancelled` (not an attempt), but `ctx.expired()` is a real
+        timeout and must be a chargeable `timeout` result (§11, retried up to 3 attempts before
+        REQUIRES_HUMAN_INTERVENTION) — conflating the two into `cancelled` would let a repo that
+        times out on every attempt never escalate.
         """
         if not landed:
             return WorkerResult[SymbolIndexOutput](
-                status="cancelled",
+                status="timeout" if timed_out else "cancelled",
                 error=WorkerError(
-                    failure_class=FailureClass.TIMEOUT,
+                    failure_class=(
+                        FailureClass.TIMEOUT if timed_out else FailureClass.TRANSIENT_INFRA
+                    ),
                     retryable=True,
                     stderr_tail="stopped before any file was indexed",
                 ),

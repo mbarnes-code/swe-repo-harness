@@ -41,6 +41,7 @@ from fleet.settings import (
     ConfigValidationError,
     FleetSettings,
     LadderRung,
+    RedactionSection,
     SecretInConfigError,
     TransformSection,
     UnpricedTargetError,
@@ -642,6 +643,57 @@ def test_backend_extras_matches_pyproject(tmp_path: Path) -> None:
     }
     for backend, distribution in sorted(core_backend_distributions.items()):
         assert distribution in required, f"{backend} claims a core dep on absent {distribution!r}"
+
+
+def test_redaction_defaults_match_obs_redact_patterns() -> None:
+    """`RedactionSection.patterns` hand-copies the plain (non-structural, non-entropy-gated)
+    entries of `obs.redact.PATTERNS` for `_refuse_secret_material`'s config-file scan — a
+    different mechanism from `obs.redact.redact()`'s runtime egress redaction, so it cannot
+    simply import the same object, but nothing else ties the two lists together. Without this
+    test, a leak pattern widened in `obs.redact.PATTERNS` (a real vendor token format changing
+    shape) leaves this copy silently narrower, and a `fleet.yaml` containing the newly-recognized
+    secret loads clean instead of being refused at startup.
+
+    Both directions are pinned: every kind this section declares must exist in `obs.redact`'s
+    canonical list, and a REALISTIC sample of each kind's secret must be recognized identically by
+    both — not just "some kind of match", but the same secret substring.
+    """
+    from fleet.obs.redact import PATTERNS as REDACT_PATTERNS
+
+    redact_by_kind = {p.kind: p for p in REDACT_PATTERNS}
+    settings_patterns = RedactionSection().patterns
+
+    samples: dict[str, str] = {
+        "github_pat": "github_pat_" + "A" * 24,
+        "github_classic": "ghp_" + "A" * 20,
+        "slack": "xoxb-" + "A" * 12,
+        "aws_key": "AKIA" + "A" * 16,
+        "anthropic": "sk-ant-" + "A" * 24,
+        "openai_style": "sk-" + "A" * 40,
+        "gcp_sa_key": '"private_key_id": "' + "a" * 40 + '"',
+        "private_key": "-----BEGIN RSA PRIVATE KEY-----",
+        "url_userinfo": "https://oauth2:github_pat_" + "A" * 24 + "@example.com/repo.git",
+    }
+
+    assert set(settings_patterns) <= set(redact_by_kind)
+    assert set(settings_patterns) == set(samples)  # this test covers every declared kind
+
+    for kind, text in samples.items():
+        redact_pattern = redact_by_kind[kind]
+        redact_match = redact_pattern.regex.search(text)
+        settings_match = re.search(settings_patterns[kind], text)
+        assert redact_match is not None, f"{kind}: obs.redact's own pattern missed its sample"
+        assert settings_match is not None, f"{kind}: settings.py's pattern missed the same sample"
+        redact_secret = redact_match.group(redact_pattern.group or 0)
+        # `url_userinfo` is the one kind where the two patterns disagree on span by DESIGN, not by
+        # drift: `obs.redact` anchors with a zero-width `(?<=://)` lookbehind so the scheme
+        # separator is never part of the replaced span (its docstring: leaving the `@` out would
+        # recreate the leaked pattern), while `settings.py`'s plain-`dict[str, str]` shape has no
+        # lookbehind and matches the `://` literally. Both still name the SAME userinfo text.
+        assert redact_secret in settings_match.group(0), (
+            f"{kind}: obs.redact matched {redact_secret!r} but settings.py's pattern matched "
+            f"{settings_match.group(0)!r} — these have drifted apart"
+        )
 
 
 def test_a_role_routed_to_an_empty_tier_is_a_startup_error(tmp_path: Path) -> None:

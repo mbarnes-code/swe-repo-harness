@@ -32,13 +32,13 @@ module owns the three mechanical things every step would otherwise re-implement 
 
 from __future__ import annotations
 
-import hashlib
 import re
 import sqlite3
 from collections.abc import Iterator, Mapping
 from typing import Final
 
 from fleet.models.graph import EDGE_KEY_COLUMNS, edge_key_from_row
+from fleet.util.hashing import sha256_text
 
 __all__ = [
     "EDGE_KEY_COLUMNS",
@@ -87,7 +87,7 @@ def sha256_nul(*parts: object) -> str:
     row already carries, which is what makes the back-fill deterministic and re-runnable.
     """
     joined = NUL.join("" if p is None else str(p) for p in parts)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    return sha256_text(joined)
 
 
 def _normalized_command_sha256(command: object) -> str:
@@ -100,7 +100,7 @@ def _normalized_command_sha256(command: object) -> str:
     column is internally consistent whatever the runtime writer later chooses.
     """
     text = "" if command is None else str(command)
-    return hashlib.sha256(re.sub(r"\s+", "", text).encode("utf-8")).hexdigest()
+    return sha256_text(re.sub(r"\s+", "", text))
 
 
 def _edge_key(*values: object) -> str:

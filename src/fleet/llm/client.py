@@ -605,7 +605,11 @@ class LadderModelClient:
         schema: dict[str, object] = dict(response_model.model_json_schema())
         targets = route.targets[: self._policy.max_targets_per_call]
         timeout = self._policy.default_timeout_s if timeout_s is None else timeout_s
-        requested = max_output_tokens or self._policy.default_max_output_tokens
+        requested = (
+            self._policy.default_max_output_tokens
+            if max_output_tokens is None
+            else max_output_tokens
+        )
 
         tried: list[str] = []
         last: LlmError | None = None

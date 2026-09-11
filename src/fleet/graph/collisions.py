@@ -48,7 +48,7 @@ type Severity = Literal["warn", "error"]
 
 _WARN_NAME = re.compile(r"^(licen[sc]e|copying|notice|authors)(\.[a-z]+)?$", re.IGNORECASE)
 _WARN_DIR = re.compile(r"(^|/)(\.github|\.circleci|\.gitlab|ci|\.buildkite)(/|$)")
-_VERSION_ATOM = re.compile(r"^(==|>=|<=|=|>|<|\^|~>|~)?\s*v?(\d+(?:\.\d+)*)")
+_VERSION_ATOM = re.compile(r"^(==|>=|<=|~=|=|>|<|\^|~>|~)?\s*v?(\d+(?:\.\d+)*)")
 
 
 # =======================================================================================
@@ -512,7 +512,8 @@ def _bounds(spec: str) -> tuple[_Bound | None, _Bound | None] | None:
         match = _VERSION_ATOM.match(atom)
         if match is None:
             return None
-        op, version = match.group(1) or "==", _parse(match.group(2))
+        op = match.group(1) or "=="
+        version, precision = _parse(match.group(2))
         if op in ("==", "="):
             low, high = (version, True), (version, True)
         elif op == ">=":
@@ -525,14 +526,24 @@ def _bounds(spec: str) -> tuple[_Bound | None, _Bound | None] | None:
             high = (version, False)
         elif op == "^":
             low, high = (version, True), (_caret_ceiling(version), False)
-        else:  # ~ / ~>
-            low, high = (version, True), (_tilde_ceiling(version), False)
+        elif op == "~=":
+            # PEP 440 compatible-release: `~=V.N` means `>=V.N, ==V.*` — every specified
+            # component except the last is locked, the last is free to increase.
+            low, high = (version, True), (_compatible_release_ceiling(version, precision), False)
+        else:  # ~ / ~> (this module's own tilde convention, distinct from PEP 440's `~=`)
+            low, high = (version, True), (_tilde_ceiling(version, precision), False)
     return low, high
 
 
-def _parse(text: str) -> tuple[int, ...]:
+def _parse(text: str) -> tuple[tuple[int, ...], int]:
+    """A version string → its (3-component-padded) parts, alongside `precision`: how many
+    components the string ACTUALLY specified (capped at 3), before padding. Padding alone loses
+    that distinction — `~1` and `~1.0.0` both pad to `(1, 0, 0)` — and the tilde-family operators
+    below need it to know which component is free to increase."""
     parts = tuple(int(p) for p in text.split("."))
-    return parts + (0,) * (3 - len(parts)) if len(parts) < 3 else parts
+    precision = min(len(parts), 3)
+    padded = parts + (0,) * (3 - len(parts)) if len(parts) < 3 else parts
+    return padded, precision
 
 
 def _caret_ceiling(version: tuple[int, ...]) -> tuple[int, ...]:
@@ -544,6 +555,26 @@ def _caret_ceiling(version: tuple[int, ...]) -> tuple[int, ...]:
     return (0, 0, version[2] + 1)
 
 
-def _tilde_ceiling(version: tuple[int, ...]) -> tuple[int, ...]:
+def _widen_ceiling(
+    version: tuple[int, ...], precision: int, *, floor_precision: int
+) -> tuple[int, ...]:
+    """Shared shape for the tilde-family ceilings: widen the minor component, unless the spec
+    named too few components to have a minor to lock (`precision <= floor_precision`), in which
+    case there is nothing to lock there and the major widens instead."""
     major, minor, *_ = version
+    if precision <= floor_precision:
+        return (major + 1, 0, 0)
     return (major, minor + 1, 0)
+
+
+def _tilde_ceiling(version: tuple[int, ...], precision: int) -> tuple[int, ...]:
+    """This module's own `~` / `~>` convention. A bare major-only spec (`~1`) has no minor
+    component to lock, so the major widens instead (`<2.0`); `~1.5`-shaped specs are unaffected
+    (`<1.6`, as before)."""
+    return _widen_ceiling(version, precision, floor_precision=1)
+
+
+def _compatible_release_ceiling(version: tuple[int, ...], precision: int) -> tuple[int, ...]:
+    """PEP 440 `~=`: `~=2.28` (2 components) allows `2.x`, ceiling `3.0`; `~=2.28.1` (3
+    components) allows `2.28.x`, ceiling `2.29.0`."""
+    return _widen_ceiling(version, precision, floor_precision=2)

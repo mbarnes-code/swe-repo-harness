@@ -30,5 +30,12 @@ def sha256_file(path: str | os.PathLike[str]) -> str:
 
 
 def cache_key(*parts: str) -> str:
-    """Join key components with a separator that cannot appear in a hex digest or a role name."""
-    return sha256_text("|".join(parts))
+    """Join key components with a length-prefixed encoding, so no boundary can shift.
+
+    Each part is joined as `str(len(part)) + ":" + part` before hashing. This is unambiguous for
+    ANY part content — unlike a bare separator-joined string, which collides whenever a part can
+    itself contain the separator (`cache_key("a|b", "c")` == `cache_key("a", "b|c")` under a plain
+    `"|".join`). Some callers' parts are free-text config data (e.g. `BackendTarget.model_id`,
+    documented as "opaque to the harness"), so that collision is reachable, not merely theoretical.
+    """
+    return sha256_text("".join(f"{len(part)}:{part}" for part in parts))

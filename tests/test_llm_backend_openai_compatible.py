@@ -36,6 +36,7 @@ from fleet.llm.client import (
     BackendReply,
     CallPolicy,
     LadderModelClient,
+    LlmError,
     Message,
     TierRoute,
     TransportError,
@@ -310,17 +311,18 @@ def test_a_null_finish_reason_with_content_reads_as_stop() -> None:
     assert invoke(backend).finish_reason == "stop"
 
 
-def test_an_unreadable_body_is_a_loud_failover_not_an_empty_reply() -> None:
+def test_an_unreadable_body_is_a_loud_terminal_failure_not_an_empty_reply() -> None:
     """WHY (Rule 11): guessing `stop` on a body with no recognisable stop signal AND no content
     hands the client an empty reply, which it spends its repair budget re-asking a server that
-    never answered. `SERVER_ERROR` moves to the next target instead."""
+    never answered. Failing over would only have every other target reproduce the same unmapped
+    vocabulary before reporting an outage, so this raises `UnmappedFinishReason` — terminal, not a
+    §11.8 failover trigger — matching `bedrock.py`/`vertex.py`'s identical type for the identical
+    condition."""
     backend = oc.OpenAICompatibleBackend(
         FakeTransport(body(content=None, finish_reason="who-knows")),
     )
-    with pytest.raises(TransportError) as excinfo:
+    with pytest.raises(oc.UnmappedFinishReason):
         invoke(backend)
-
-    assert excinfo.value.trigger == "SERVER_ERROR"
 
 
 def test_missing_usage_does_not_lose_an_otherwise_good_reply() -> None:
@@ -716,9 +718,10 @@ def test_the_json_schema_rung_does_not_assert_strict_on_the_wire() -> None:
     """WHY: strict mode is a SUBSET of JSON Schema — every property must be `required` — and the
     schema is whatever `response_model.model_json_schema()` produced, which we do not control.
     9 of the 12 §9 roles declare optional fields somewhere in their schema TREE (HEAVY 5/5,
-    WORKHORSE 3/4, CHEAP 1/3) — strict applies to `$defs` too. A hosted endpoint that
-    enforces strict answers 400, which this backend maps to `CONNECTION`, which walks the tier and
-    ends in a permanent `TierUnavailable` for that role.
+    WORKHORSE 3/4, CHEAP 1/3) — strict applies to `$defs` too. A hosted endpoint that enforces
+    strict answers 400, which this backend raises as a loud, non-retryable `LlmError` (the next
+    target would reproduce the same 400 for the same malformed request, so failing over would
+    only spend the tier's ladder for nothing).
 
     vLLM ignores the flag entirely, which is exactly why a local-only fake-transport suite stayed
     green over it. Asserting on the wire is what makes this catchable at all."""
@@ -763,7 +766,7 @@ def test_constrained_extra_body_is_merged_into_the_wire_body() -> None:
 
 @pytest.mark.parametrize(
     ("status", "trigger"),
-    [(500, "SERVER_ERROR"), (503, "SERVER_ERROR"), (429, "RATE_LIMIT"), (400, "CONNECTION")],
+    [(500, "SERVER_ERROR"), (503, "SERVER_ERROR"), (429, "RATE_LIMIT")],
 )
 def test_http_failures_map_to_the_documented_failover_triggers(
     status: int, trigger: str,
@@ -779,6 +782,24 @@ def test_http_failures_map_to_the_documented_failover_triggers(
         wire(handler)
 
     assert excinfo.value.trigger == trigger
+
+
+@pytest.mark.parametrize("status", [400, 401, 404])
+def test_a_bad_request_fails_the_task_instead_of_walking_the_tier(status: int) -> None:
+    """A 4xx that is not a 429 is OUR request being wrong (a bad model id, a schema the endpoint
+    rejected, an invalid key) — the next target reproduces it exactly, so failing loudly beats
+    spending the tier's whole ladder (Rule 11, §11.8), matching `anthropic.py`/`vertex.py`/
+    `bedrock.py`'s identical rule and this module's own `TargetMisconfigured` docstring: "a config
+    error, never a failover trigger.\""""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": {"message": "nope"}})
+
+    with pytest.raises(LlmError) as excinfo:
+        wire(handler)
+
+    assert not isinstance(excinfo.value, TransportError)
+    assert str(status) in str(excinfo.value)
 
 
 def test_a_broken_socket_is_a_connection_trigger() -> None:

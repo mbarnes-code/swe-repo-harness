@@ -613,31 +613,32 @@ def test_off_neither_reads_nor_writes() -> None:
 
 def test_the_key_is_the_documented_component_list_in_order() -> None:
     """§6 spells the formula out; a component quietly dropped is a whole class of wrong answers,
-    and every one of them looks like a legitimate hit."""
-    import hashlib
+    and every one of them looks like a legitimate hit.
+
+    Goes through `fleet.util.hashing.cache_key` (the one join primitive `compute()` calls) rather
+    than reimplementing the join here, so this test pins the *component order* — what `compute()`
+    is documented to build — without also hard-coding `cache_key`'s internal encoding, which is
+    that function's own concern and covered by its own tests."""
+    from fleet.util.hashing import cache_key
 
     parts = _parts(
         context_policy=ContextPolicy.EVIDENCE_ONLY,
         adapter_versions=("maven:3", "npm:2"),
         prompt_template_version=4,
     )
-    expected = hashlib.sha256(
-        "|".join(
-            [
-                ROLE,
-                "CHEAP",
-                PRIMARY.backend,
-                PRIMARY.model_id,
-                "low",
-                "EVIDENCE_ONLY",
-                EMPTY_SHA256,
-                prompt_sha256(MESSAGES),
-                "4",
-                response_schema_sha256(RepoClassification),
-                "maven:3,npm:2",
-            ]
-        ).encode()
-    ).hexdigest()
+    expected = cache_key(
+        ROLE,
+        "CHEAP",
+        PRIMARY.backend,
+        PRIMARY.model_id,
+        "low",
+        "EVIDENCE_ONLY",
+        EMPTY_SHA256,
+        prompt_sha256(MESSAGES),
+        "4",
+        response_schema_sha256(RepoClassification),
+        "maven:3,npm:2",
+    )
     assert parts.compute() == expected
 
 

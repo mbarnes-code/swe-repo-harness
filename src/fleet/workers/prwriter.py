@@ -57,6 +57,7 @@ from fleet.models.enums import (
 )
 from fleet.models.tasks import PullRequestDraft, TokenUsage, VerificationReport
 from fleet.orchestrator.registry import register_worker
+from fleet.util.errors import exception_type_name
 from fleet.util.proc import CommandRunner
 from fleet.vcs import build_forge
 from fleet.vcs.forge import Forge, ForgeError, PrStatus, PrSyncItem
@@ -183,6 +184,12 @@ class PrwriterOutput(WorkerOutput):
     merge_commits: dict[str, str] = Field(default_factory=dict)
     draft: bool = True
     body_path: str = ""
+    ready_failed: bool = Field(
+        default=False,
+        description="`gh.create_pr` succeeded (so `pr` is set, and is a REAL forge PR) but the "
+        "subsequent `gh.mark_ready` call failed — the caller must still persist `pr` (the PR "
+        "exists whether or not this flag is set) but must not report the unit as a clean success.",
+    )
 
 
 @register_worker
@@ -316,17 +323,14 @@ class PrwriterWorker(BaseWorker[PrwriterInput, PrwriterOutput]):
 
         completed = [SYNC_UNIT, CREATE_UNIT]
         state = PrState.DRAFTED if draft else PrState.OPEN
-        if READY_UNIT in units:
-            try:
-                await gh.mark_ready(url)
-            except ForgeError as exc:
-                return self._gh_failure(
-                    output, exc, FailureClass.TRANSIENT_INFRA, [READY_UNIT], completed=completed,
-                    usage=usage,
-                )
-            completed.append(READY_UNIT)
-            state = PrState.OPEN
 
+        # `gh.create_pr` above already succeeded — a real PR exists on the forge from this point
+        # on. `output.pr` is built HERE, before `mark_ready` is attempted, so a `mark_ready`
+        # failure below still returns a `PullRequestDraft` carrying the real `url`: without this,
+        # the harness lost track of a PR that genuinely existed (no record persisted => the next
+        # `fleet pr --ready` treated the repo as still eligible and called `gh.create_pr` again
+        # for the same branch, which the forge then refuses with a misleading "already exists"
+        # error classified as retryable).
         output.pr = PullRequestDraft(
             run_id=ctx.run_id,
             repo_id=ctx.repo_id,
@@ -350,6 +354,19 @@ class PrwriterWorker(BaseWorker[PrwriterInput, PrwriterOutput]):
             state=state,
             url=url,
         )
+
+        if READY_UNIT in units:
+            try:
+                await gh.mark_ready(url)
+            except ForgeError as exc:
+                output.ready_failed = True
+                return self._gh_failure(
+                    output, exc, FailureClass.TRANSIENT_INFRA, [READY_UNIT], completed=completed,
+                    usage=usage,
+                )
+            completed.append(READY_UNIT)
+            output.pr.state = PrState.OPEN
+
         return WorkerResult[PrwriterOutput](
             status="ok",
             output=output,
@@ -459,7 +476,7 @@ class PrwriterWorker(BaseWorker[PrwriterInput, PrwriterOutput]):
                 failure_class=failure_class,
                 retryable=True,
                 stderr_tail=str(exc),
-                exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+                exception_type=exception_type_name(exc),
             ),
         )
 

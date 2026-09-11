@@ -56,7 +56,7 @@ from fleet.graph.collisions import (
     ownership_rank,
 )
 from fleet.models.base import FleetModel
-from fleet.models.enums import ContractKind, ContractStatus, Phase, SymbolKind
+from fleet.models.enums import ContractKind, ContractStatus, FailureClass, Phase, SymbolKind
 from fleet.models.graph import CollisionFinding, ContractId, ContractNode, SymbolRef
 from fleet.models.repo import RepoId
 from fleet.orchestrator.registry import register_worker
@@ -65,9 +65,11 @@ from fleet.util.hashing import sha256_text
 from fleet.workers.base import (
     BaseWorker,
     WorkerContext,
+    WorkerError,
     WorkerInput,
     WorkerOutput,
     WorkerResult,
+    loop_now,
 )
 from fleet.workers.interrogate import is_ignored, walk_files
 
@@ -278,6 +280,23 @@ class ContractExtractionWorker(BaseWorker[ContractsInput, ContractsOutput]):
     async def run(
         self, ctx: WorkerContext, payload: ContractsInput
     ) -> WorkerResult[ContractsOutput]:
+        now = loop_now()
+        if ctx.cancelled() or ctx.expired(now):
+            # A genuine `ctx.cancelled()` is an operator decision and stays `cancelled` (not an
+            # attempt); `ctx.expired()` is a real timeout and must be a chargeable `timeout`
+            # result (§11) -- conflating the two would let a repo that times out on every attempt
+            # never escalate to REQUIRES_HUMAN_INTERVENTION.
+            timed_out = ctx.expired(now)
+            return WorkerResult[ContractsOutput](
+                status="timeout" if timed_out else "cancelled",
+                error=WorkerError(
+                    failure_class=(
+                        FailureClass.TIMEOUT if timed_out else FailureClass.TRANSIENT_INFRA
+                    ),
+                    retryable=True,
+                    stderr_tail="cancelled before contract discovery was dispatched",
+                ),
+            )
         listings = await asyncio.to_thread(_path_universe, payload)
         output = discover_contracts(payload, listings)
         ctx.log.info(

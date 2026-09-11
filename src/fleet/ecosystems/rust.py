@@ -111,6 +111,7 @@ class RustAdapter(EcosystemAdapter):
                 },
             )
             for coordinate in sorted(unit.external_coordinates, key=lambda c: c.key)
+            if coordinate.ecosystem in self.ecosystems
         ]
 
     def workspace_files(self, units: Sequence[BuildUnit]) -> list[SupportFile]:
@@ -157,7 +158,11 @@ class RustAdapter(EcosystemAdapter):
         was keeping.
         """
         contributors = sorted(
-            (unit for unit in units if unit.external_coordinates),
+            (
+                unit
+                for unit in units
+                if any(c.ecosystem in self.ecosystems for c in unit.external_coordinates)
+            ),
             key=lambda u: (u.dest, str(u.unit_id)),
         )
         if not contributors:
@@ -178,7 +183,7 @@ class RustAdapter(EcosystemAdapter):
         decides which repo's lock seeds the root (cargo extends it from there). The manifest above
         cannot be expressed this way at all, which is why it is no longer here.
         """
-        if not unit.external_coordinates:
+        if not any(c.ecosystem in self.ecosystems for c in unit.external_coordinates):
             return []
         dest = unit.dest.strip("/")
         return [
@@ -204,7 +209,7 @@ class RustAdapter(EcosystemAdapter):
         on, so the set of member manifests and the set of members are the same set by construction:
         a floor written for a directory no `members` entry names is a file nothing reads.
         """
-        if not unit.external_coordinates:
+        if not any(c.ecosystem in self.ecosystems for c in unit.external_coordinates):
             return []
         path = f"{unit.dest.strip('/')}/{_CARGO_MANIFEST_FILE}"
         return [SupportFile(path=path, carry_from=[path], content=_member_manifest(unit))]

@@ -62,7 +62,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from hashlib import sha256
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 from uuid import UUID
 
@@ -80,6 +79,8 @@ from fleet.models.enums import (
 )
 from fleet.models.repo import RepoId
 from fleet.models.tasks import DEFAULT_LADDER, MAX_ATTEMPTS, TokenUsage
+from fleet.util.errors import exception_type_name
+from fleet.util.hashing import sha256_text
 
 if TYPE_CHECKING:  # imported for types only; none of these modules is needed at runtime here
     from structlog.stdlib import BoundLogger
@@ -621,7 +622,7 @@ def error_from_exception(exc: BaseException) -> WorkerError:
         failure_class=failure_class,
         retryable=is_retryable(failure_class),
         stderr_tail=str(exc),
-        exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+        exception_type=exception_type_name(exc),
         tier=tier,
     )
 
@@ -722,9 +723,9 @@ class BaseWorker[I: WorkerInput, O: WorkerOutput](ABC):
         care — is what makes a partial re-run free. Override only to widen the key, never to
         narrow it.
         """
-        return sha256(
-            f"{ctx.run_id}|{ctx.repo_id}|{self.phase}|{payload.model_dump_json()}".encode()
-        ).hexdigest()
+        return sha256_text(
+            f"{ctx.run_id}|{ctx.repo_id}|{self.phase}|{payload.model_dump_json()}"
+        )
 
     async def on_cancel(self, ctx: WorkerContext) -> None:
         """Called by the runner once `ctx.cancel` is set and run() has not returned inside the

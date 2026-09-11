@@ -321,8 +321,15 @@ class InterrogateWorker(BaseWorker[InterrogateInput, InterrogateOutput]):
         findings: list[str] = []
 
         for index, rel in enumerate(owed):
-            if ctx.cancelled() or ctx.expired(loop_now()):
-                return self._interrupted(completed, owed[index:], manifests, dependencies)
+            now = loop_now()
+            if ctx.cancelled() or ctx.expired(now):
+                return self._interrupted(
+                    completed,
+                    owed[index:],
+                    manifests,
+                    dependencies,
+                    timed_out=ctx.expired(now),
+                )
             parsed = await asyncio.to_thread(self._parse_one, root, rel, payload.repo_id)
             if parsed is None:
                 continue
@@ -434,14 +441,24 @@ class InterrogateWorker(BaseWorker[InterrogateInput, InterrogateOutput]):
         remaining: Sequence[str],
         manifests: Sequence[ManifestRef],
         dependencies: Sequence[ManifestDependency],
+        *,
+        timed_out: bool = False,
     ) -> WorkerResult[InterrogateOutput]:
         """Out of deadline or cancelled between manifests. Whatever parsed is real output, so it
-        travels with the `partial` and re-entry starts at the manifest that did not."""
+        travels with the `partial` and re-entry starts at the manifest that did not.
+
+        Nothing completed means nothing to resume from: a genuine `ctx.cancelled()` is an
+        operator decision and stays `cancelled` (not an attempt), but `ctx.expired()` is a real
+        timeout and must be a chargeable `timeout` result (§11) — conflating the two into
+        `cancelled` would let a repo that times out on every attempt never escalate.
+        """
         if not completed:
             return WorkerResult[InterrogateOutput](
-                status="cancelled",
+                status="timeout" if timed_out else "cancelled",
                 error=WorkerError(
-                    failure_class=FailureClass.TIMEOUT,
+                    failure_class=(
+                        FailureClass.TIMEOUT if timed_out else FailureClass.TRANSIENT_INFRA
+                    ),
                     retryable=True,
                     stderr_tail="cancelled before any manifest was parsed",
                 ),

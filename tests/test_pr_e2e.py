@@ -118,6 +118,9 @@ class FakeForge:
         self.cwds: list[Path | None] = []
         self.state: dict[str, str] = {}
         self._seq = 0
+        self.fail_ready: set[str] = set()
+        """URLs whose `gh pr ready` call fails once, then succeeds — a real `create_pr` that
+        genuinely landed, followed by a transient `mark_ready` failure."""
 
     # -- the forge side, driven by the test --------------------------------------------
 
@@ -163,7 +166,10 @@ class FakeForge:
                 return self._create(call)
             case ("pr", "view", url, "--json", _fields):
                 return self._result(call, stdout=self._view(url))
-            case ("pr", "ready", _url):
+            case ("pr", "ready", url):
+                if url in self.fail_ready:
+                    self.fail_ready.discard(url)
+                    return self._result(call, exit_code=1, stderr_tail="transient: try again")
                 return self._result(call)
             case ("pr", "edit", _url, "--body-file", _body_file, *_rest):
                 # `Forge.edit_body` (`vcs/github.py:250-255`) — the §12.38/D94 promotion path's
@@ -190,12 +196,19 @@ class FakeForge:
             payload["mergeCommit"] = {"oid": "f" * 40}
         return json.dumps(payload)
 
-    def _result(self, call: tuple[str, ...], *, stdout: str = "") -> ProcResult:
+    def _result(
+        self,
+        call: tuple[str, ...],
+        *,
+        stdout: str = "",
+        exit_code: int = 0,
+        stderr_tail: str = "",
+    ) -> ProcResult:
         return ProcResult(
             argv=call,
-            exit_code=0,
+            exit_code=exit_code,
             stdout_tail=stdout,
-            stderr_tail="",
+            stderr_tail=stderr_tail,
             duration_ms=3,
             timed_out=False,
         )
@@ -751,6 +764,38 @@ def test_pr_ready_succeeds_once_a_stub_is_genuinely_resolved(
         "the READY_UNIT must fire: a genuinely resolved stub is the positive half of §12.38"
     )
     assert pr_states(fleet)["acme-lib-py"] == PrState.OPEN.value, pr_states(fleet)
+
+
+def test_a_failed_mark_ready_does_not_lose_the_pr_or_recreate_it(
+    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+) -> None:
+    """`gh pr create` landing followed by a `gh pr ready` that fails must not lose the PR:
+    `PrwriterWorker.run()` used to return with `output.pr` still `None` after `create_pr` had
+    already succeeded, so no `PullRequestDraft` record was persisted and the next `fleet pr
+    --ready` called `gh pr create` again for the same branch — which the real forge would refuse
+    ("a pull request already exists"), stranding the repo permanently. `create_pr` was called with
+    `draft=False` (READY_UNIT only ever dispatches when the verification does not force a draft),
+    so the PR the forge holds really is OPEN regardless of the redundant `mark_ready` call's own
+    outcome — the record must say so, and a retry must not touch the forge again.
+    """
+    verified(fleet)
+    resolve_stub(fleet, "acme-lib-py")
+    forge.fail_ready.add(forge.url_for("acme-lib-py"))
+
+    result = run_pr(fleet, "--ready", "--repo", "acme-lib-py")
+    assert result.exit_code == ExitCode.UNEXPECTED_ERROR, result.output
+    assert payload(result)["failed"], payload(result)
+
+    # The PR really was created on the forge, exactly once, and must be tracked as such — never
+    # silently forgotten.
+    assert len(forge.commands("pr", "create")) == 1, forge.commands("pr", "create")
+    assert pr_states(fleet)["acme-lib-py"] == PrState.OPEN.value, pr_states(fleet)
+
+    # A retry must not call `gh pr create` again for a PR the harness already knows is OPEN.
+    result2 = run_pr(fleet, "--ready", "--repo", "acme-lib-py")
+    assert result2.exit_code == ExitCode.SUCCESS, result2.output
+    assert len(forge.commands("pr", "create")) == 1, "gh pr create must not fire twice"
+    assert payload(result2)["already_open"] == ["acme-lib-py"], payload(result2)
 
 
 # ---------------------------------------------------------------------------------------

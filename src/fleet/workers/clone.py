@@ -53,6 +53,7 @@ from fleet.models.repo import RepoId
 from fleet.obs.redact import redact_text
 from fleet.orchestrator.registry import register_worker
 from fleet.sandbox.worktree import slug
+from fleet.util.errors import exception_type_name
 from fleet.util.fs import DiskFloorBreached, require_free_space, scoped_tempdir
 from fleet.util.proc import CommandRunner, ProcResult
 from fleet.util.proc import no_verdict as _proc_no_verdict
@@ -493,8 +494,18 @@ class CloneWorker(BaseWorker[CloneInput, CloneOutput]):
         )
 
     async def _default_branch(self, git: Git, payload: CloneInput) -> tuple[str, str]:
-        """`symbolic-ref` → the configured fallbacks → the first `refs/heads/*`, in that order."""
+        """`symbolic-ref` → the configured fallbacks → the first `refs/heads/*`, in that order.
+
+        A `symbolic-ref` that never started or was killed at its deadline has not established
+        that HEAD is not a branch (D42): raise rather than silently fall through to the
+        fallback/first-ref paths, which can both succeed independently and would then report the
+        WRONG default branch with no error anywhere to say the authoritative probe never ran.
+        """
         head = await git.exec(["symbolic-ref", "--short", "HEAD"], check=False)
+        reason = _no_verdict(head)
+        if reason is not None:
+            raise _indeterminate(head, f"resolving the default branch produced no answer — "
+                                  f"{reason}", cwd=git.path)
         name = head.stdout_tail.strip()
         if head.ok and name:
             return name, "symbolic-ref"
@@ -681,7 +692,7 @@ class CloneWorker(BaseWorker[CloneInput, CloneOutput]):
                 failure_class=FailureClass.DISK_EXHAUSTED,
                 retryable=False,
                 stderr_tail=redact_text(str(exc)),
-                exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+                exception_type=exception_type_name(exc),
             )
         exit_code = getattr(exc, "exit_code", None)
         # `started` and `timed_out` are read TOGETHER and handed to the one function that owns the
@@ -711,7 +722,7 @@ class CloneWorker(BaseWorker[CloneInput, CloneOutput]):
             retryable=True,
             exit_code=exit_code if isinstance(exit_code, int) else None,
             stderr_tail=redact_text(str(exc)),
-            exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+            exception_type=exception_type_name(exc),
         )
 
 

@@ -490,14 +490,22 @@ class GiteaForge:
         reviewer only discovers by not finding the PR in their filter. Only reached when `labels`
         is non-empty, so the default path costs nothing (Rule 2).
         """
-        known = json.loads(await self._exec("GET", f"/repos/{owner}/{name}/labels?limit=100"))
-        if not isinstance(known, list):
-            raise GiteaError(f"Gitea returned a non-list label index for {owner}/{name}")
-        by_name = {
-            str(row["name"]): int(row["id"])
-            for row in known
-            if isinstance(row, dict) and "name" in row and "id" in row
-        }
+        # Paginated: a repo with more than one page of labels would otherwise have its later
+        # labels silently absent from `by_name`, misreporting a real label as "does not exist".
+        by_name: dict[str, int] = {}
+        page = 1
+        while True:
+            known = json.loads(
+                await self._exec("GET", f"/repos/{owner}/{name}/labels?limit=100&page={page}")
+            )
+            if not isinstance(known, list):
+                raise GiteaError(f"Gitea returned a non-list label index for {owner}/{name}")
+            for row in known:
+                if isinstance(row, dict) and "name" in row and "id" in row:
+                    by_name[str(row["name"])] = int(row["id"])
+            if len(known) < 100:
+                break
+            page += 1
         missing = [label for label in labels if label not in by_name]
         if missing:
             raise GiteaError(

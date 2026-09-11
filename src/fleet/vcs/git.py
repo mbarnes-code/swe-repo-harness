@@ -34,6 +34,7 @@ because `user.email` is unset is a Phase 2 outage with a confusing message.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -364,6 +365,7 @@ class Git:
         """Branch name, or None in a detached worktree (which is the normal case here: worktrees
         are cut `--detach` by `sandbox/worktree.py`)."""
         result = await self.exec(["symbolic-ref", "--quiet", "--short", "HEAD"], check=False)
+        self._require_settled(result)
         name = result.stdout_tail.strip()
         return name if result.ok and name else None
 
@@ -384,6 +386,7 @@ class Git:
         obtainable through this class — nothing in the harness needs it, and everything that
         prints it would leak it."""
         result = await self.exec(["remote", "get-url", remote], check=False)
+        self._require_settled(result)
         if not result.ok:
             return None
         return redact_text(result.stdout_tail.strip()) or None
@@ -561,6 +564,7 @@ class Git:
         `rev`, so it cannot be fooled by what merely sits in the worktree.
         """
         result = await self.exec(["rev-parse", "--verify", "-q", f"{rev}:{path}"], check=False)
+        self._require_settled(result)
         if not result.ok:
             return None
         return result.stdout_tail.strip()
@@ -782,13 +786,31 @@ def _parse_log(out: str, keys: Sequence[str]) -> tuple[CommitInfo, ...]:
     return tuple(commits)
 
 
+_RENAME_BRACE_RE: Final = re.compile(r"\{([^{}]*) => ([^{}]*)\}")
+
+
+def _resolve_numstat_path(raw: str) -> str:
+    """`git diff --numstat`'s rename notation, resolved to the path the file has NOW.
+
+    A renamed file is not always a plain path: git compresses a shared prefix/suffix into
+    `common/{old => new}/tail`, and falls back to a bare `old/path => new/path` when there is no
+    common affix at all. Taking the field verbatim (as `parts[-1]`) leaves either form as a bogus
+    compound string instead of a real path."""
+    match = _RENAME_BRACE_RE.search(raw)
+    if match is not None:
+        return raw[: match.start()] + match.group(2) + raw[match.end() :]
+    if " => " in raw:
+        return raw.split(" => ", 1)[1]
+    return raw
+
+
 def _parse_numstat(out: str) -> DiffStat:
     files: list[FileStat] = []
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) < 3:
             continue
-        added, removed, path = parts[0], parts[1], parts[-1]
+        added, removed, path = parts[0], parts[1], _resolve_numstat_path(parts[-1])
         binary = added == "-" or removed == "-"
         files.append(
             FileStat(

@@ -288,6 +288,7 @@ from fleet.state.repository import (
     insert_revalidation_task_row,
 )
 from fleet.util.cgroup import read_process_tree_memory_bytes
+from fleet.util.errors import exception_type_name
 from fleet.util.fs import atomic_write, scoped_tempdir
 from fleet.util.fs import free_bytes as disk_free_bytes
 from fleet.util.hashing import sha256_text
@@ -1183,7 +1184,8 @@ def scan(
             result,
             [
                 f"run {result['run_id']}: {result['succeeded']} scanned, "
-                f"{result['skipped']} skipped, {result['failed']} needing a human "
+                f"{len(cast('list[str]', result['skipped']))} skipped, "
+                f"{result['failed']} needing a human "
                 f"({result['edges']} edges over {result['repos']} repos)"
             ],
         )
@@ -2169,7 +2171,7 @@ async def _close_wave_projector(projector: Projector, ctx: RunContext) -> None:
         ctx.log.error(  # noqa: TRY400 - §11.4: no formatted traceback in a durable record
             "wave_projection_failed",
             run_id=str(ctx.run_id),
-            exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+            exception_type=exception_type_name(exc),
             error=str(exc),
         )
 
@@ -2191,6 +2193,29 @@ def _host_memory_sampler(settings: FleetSettings, run_id: str) -> HostMemorySamp
         cgroup_reader=CGROUP_MEMORY_READER or read_process_tree_memory_bytes,
         rss_reader=RSS_READER or read_own_rss_bytes,
     )
+
+
+def _ledger_estimate(
+    router: LlmRouter, *, role: Role, tier: ModelTier
+) -> Callable[[str], CostEstimate]:
+    """A `PhaseRunner.estimate` priced off `role`'s real routed target at `tier`, via the same
+    `TokenEstimator` §11.2 uses everywhere else (see the REVALIDATE dispatch below) -- so a
+    phase's pre-dispatch reservation is no longer `PhaseRunner`'s own `ZERO_COST` default, which
+    defeats `budgets.py`'s admission check by reserving $0/0 tokens against every real dispatch.
+
+    `role`/`tier` name the rung each phase's worker is documented to spend the most through
+    (`classify` for SCAN at CHEAP, `propose_repair`/`diagnose_build` for TRANSFORM/BUILD/VERIFY
+    at WORKHORSE, per `docs/SPEC.md`'s `roles:` table and `llm/calls.py`'s per-call docstrings) --
+    not a per-attempt judgement, because `estimate` is called with only `repo_id` and cannot see
+    which rung is about to run (Rule 11: reservations are reconciled to the ACTUAL cost on
+    `settle()`, so this is a pre-check, never the final word)."""
+    role_name = str(role)
+    target = router.resolve(role_name).targets[0]
+
+    def _estimate(_repo_id: str) -> CostEstimate:
+        return TokenEstimator().estimate(target, role=role_name, tier=tier)
+
+    return _estimate
 
 
 async def _run_scan_wave(
@@ -2220,6 +2245,7 @@ async def _run_scan_wave(
         run_id=run_id,
         ceilings=Ceilings.from_settings(settings.config.budgets, settings.config.stubs),
         clock=_now,
+        reservation_ttl_s=float(settings.config.run.lease_ttl_s),
     )
     concurrency = settings.config.concurrency.model_copy(
         update={
@@ -2263,6 +2289,7 @@ async def _run_scan_wave(
         sink=_ScanSink(
             writer=writer, repository=repository, run_id=run_id, evidence=evidence
         ),
+        estimate=_ledger_estimate(ctx.llm, role=Role.REPO_CLASSIFY, tier=ModelTier.CHEAP),
         resource_guard=sampler.guard,
     )
     sampler.start()
@@ -6648,6 +6675,7 @@ async def _run_transform_wave(
         run_id=run_id,
         ceilings=Ceilings.from_settings(settings.config.budgets, settings.config.stubs),
         clock=_now,
+        reservation_ttl_s=float(settings.config.run.lease_ttl_s),
     )
     projector = Projector(db_path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
     ctx = RunContext(
@@ -6709,6 +6737,7 @@ async def _run_transform_wave(
             evidence=evidence,
         ),
         pre_dispatch=claim_hook,
+        estimate=_ledger_estimate(ctx.llm, role=Role.TRANSFORM_REPAIR, tier=ModelTier.WORKHORSE),
         resource_guard=sampler.guard,
     )
     sampler.start()
@@ -7183,10 +7212,15 @@ async def _transform_impl(
             "§3.2's success criterion does not hold for "
             f"{len(violations)} repo(s) whose phase says SUCCEEDED: {'; '.join(violations)}"
         )
+    # Includes DEGRADED alongside REQUIRES_HUMAN_INTERVENTION, unlike `_needs_human_attention`'s
+    # docstring's general "RHI-only per site" rule: an exit-7 run whose only qualifying repo is
+    # DEGRADED must still name it here, or the `HumanInterventionError` raised from this result's
+    # `attention`/`failed` (below the exit-7 check further down this file) reports "0 repo(s)"
+    # while the exit code correctly fires.
     attention = sorted(
         repo
         for repo, status in statuses.items()
-        if status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+        if status in (RepoStatus.REQUIRES_HUMAN_INTERVENTION, RepoStatus.DEGRADED)
     )
     halt = next((r.exit_code for r in reports if r.exit_code is not None), None)
     exit_code = (
@@ -8300,7 +8334,7 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
                 failure_class=FailureClass.TRANSIENT_INFRA,
                 retryable=True,
                 stderr_tail=str(exc),
-                exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+                exception_type=exception_type_name(exc),
             )
         return None
 
@@ -11727,6 +11761,7 @@ async def _run_build_wave(
         run_id=run_id,
         ceilings=Ceilings.from_settings(config.budgets, config.stubs),
         clock=_now,
+        reservation_ttl_s=float(config.run.lease_ttl_s),
     )
     projector = Projector(db_path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
     ctx = RunContext(
@@ -11791,6 +11826,7 @@ async def _run_build_wave(
             run_id=run_id,
             evidence=evidence,
         ),
+        estimate=_ledger_estimate(ctx.llm, role=Role.BUILD_DIAGNOSIS, tier=ModelTier.WORKHORSE),
         resource_guard=sampler.guard,
     )
     sampler.start()
@@ -11830,6 +11866,7 @@ async def _run_verify_wave(
         run_id=run_id,
         ceilings=Ceilings.from_settings(config.budgets, config.stubs),
         clock=_now,
+        reservation_ttl_s=float(config.run.lease_ttl_s),
     )
     projector = Projector(db_path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
     ctx = RunContext(
@@ -11893,6 +11930,7 @@ async def _run_verify_wave(
             writer=writer,
             run_id=run_id,
         ),
+        estimate=_ledger_estimate(ctx.llm, role=Role.BUILD_DIAGNOSIS, tier=ModelTier.WORKHORSE),
         resource_guard=sampler.guard,
     )
     sampler.start()
@@ -14894,6 +14932,7 @@ async def _run_revalidation_claims_impl(
                     run_id=run_id,
                     ceilings=Ceilings.from_settings(settings.config.budgets, settings.config.stubs),
                     clock=_now,
+                    reservation_ttl_s=float(settings.config.run.lease_ttl_s),
                 )
                 run_ctx = RunContext(
                     run_id=UUID(run_id),
@@ -15570,7 +15609,7 @@ async def _drain_llm_findings(ctx: RunContext) -> None:
             "llm_findings_flush_failed",
             run_id=str(ctx.run_id),
             pending=ctx.llm_findings.pending,
-            exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+            exception_type=exception_type_name(exc),
             error=str(exc),
         )
 
@@ -15612,6 +15651,7 @@ async def _emit_prs(
                     run_id=run_id,
                     ceilings=Ceilings.from_settings(config.budgets, config.stubs),
                     clock=_now,
+                    reservation_ttl_s=float(config.run.lease_ttl_s),
                 )
                 ctx = RunContext(
                     run_id=UUID(run_id),
@@ -15669,6 +15709,12 @@ async def _emit_prs(
                             opened[repo_id] = outcome.pr.url or ""
                             if outcome.draft:
                                 drafted.append(repo_id)
+                            if outcome.ready_failed:
+                                # `create_pr` succeeded (persisted above, so a re-run will not
+                                # call it again for this branch) but `mark_ready` did not — report
+                                # the unit as failed so the operator knows §3.4 step 4 is not done,
+                                # instead of a silent success that hides the still-draft PR.
+                                failed[repo_id] = "PR created but mark_ready failed (see logs)"
                 finally:
                     # `finally`, not "after the loop": `_write_pr_record` and `_emit_one_pr` can
                     # both raise, and a drain placed after the loop would discard the buffer on
@@ -15800,6 +15846,13 @@ async def _emit_one_pr(
     error = result.error
     if error is None:  # pragma: no cover - a non-ok result always carries its error
         return f"forge {payload.forge!r} failed with no error attached"
+    if output.pr is not None:
+        # `gh.create_pr` succeeded before a later unit (`mark_ready`) failed — a real PR exists
+        # on the forge. Returning it (rather than collapsing to a bare string) lets `_emit_prs`
+        # persist its url, so the next `fleet pr --ready` sees an existing record instead of
+        # calling `gh.create_pr` again for the same branch (`output.ready_failed` tells it to
+        # still report the unit as failed rather than a clean success).
+        return output
     return f"{error.exception_type}: {error.stderr_tail}"
 
 
@@ -16425,12 +16478,23 @@ async def _quarantine_impl(
                 (run_id, repo, _fingerprint(run_id, repo, reason), redact_text(payload), stamp),
             )
             if movable:
-                await db.executemany(
-                    "UPDATE phases SET status = 'SKIPPED', updated_at = ? "
-                    " WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                # `transition()` above validated each phase's status as read moments earlier via
+                # a separate read-only connection — a worker can have claimed the lease and moved
+                # a phase to RUNNING in between. RUNNING has no SKIPPED edge in ALLOWED_TRANSITIONS
+                # (only a crash sweep may move it, to PENDING), so this excludes it rather than
+                # trusting the stale read, and bumps `lease_fence` so a live worker's own later
+                # fenced write (`_complete`/`_record_diagnostics`) is invalidated instead of
+                # silently overwriting this operator verdict — the same protection every other
+                # cross-writer mutation in this file gives itself (`_RESET_RUNNING_TO_PENDING_SQL`,
+                # `demote_to_floor`, `clear_blocked_by`, `_raise_run_ceiling`).
+                cursor = await db.executemany(
+                    "UPDATE phases SET status = 'SKIPPED', lease_owner = NULL, "
+                    "       lease_expires_at = NULL, lease_fence = lease_fence + 1, "
+                    "       updated_at = ? "
+                    " WHERE run_id = ? AND repo_id = ? AND phase = ? AND status != 'RUNNING'",
                     [(stamp, run_id, repo, phase) for phase, _ in movable],
                 )
-                return len(movable)
+                return int(cursor.rowcount)
             # No phase row yet: "out of the fleet" still has to be durable somewhere, and §10
             # names RepoStatus.SKIPPED as where. Phase 1 is where a repo enters the run.
             await db.execute(
@@ -16716,6 +16780,25 @@ _LIVE_SANDBOX_PREDICATE: Final = (
     " AND status = 'RUNNING' AND NOT (1" + _STALE_HEARTBEAT_PREDICATE + ")"
 )
 
+_ABORT_DRAIN_POLL_S: Final = 2.0
+"""How often `fleet abort --drain` re-checks RUNNING phases while it waits out
+`budgets.wave_drain_timeout_s` for in-flight work to finish naturally on its own -- capped by
+whatever time actually remains, so a short timeout (as a test configures) is never overshot."""
+
+
+async def _count_running_phases(path: Path, run_id: str) -> int:
+    """How many `phases` rows are still `RUNNING` for `run_id`, read fresh each poll."""
+    conn = await connect_ro(path)
+    try:
+        rows = await _rows(
+            conn,
+            "SELECT COUNT(*) FROM phases WHERE run_id = ? AND status = 'RUNNING'",
+            (run_id,),
+        )
+    finally:
+        await conn.close()
+    return 0 if not rows else int(rows[0][0])
+
 
 async def _abort_impl(
     opts: GlobalOptions,
@@ -16735,7 +16818,7 @@ async def _abort_impl(
     detail = reason or "operator abort"
     async with StateWriter(path, owner="fleet-abort") as writer:
 
-        async def unit(db: aiosqlite.Connection) -> int:
+        async def record_abort(db: aiosqlite.Connection) -> None:
             await db.execute(
                 "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload,"
                 "                      created_at) "
@@ -16758,6 +16841,26 @@ async def _abort_impl(
                     stamp,
                 ),
             )
+
+        await writer.submit(record_abort)
+
+    # `--drain` (default): give in-flight RUNNING phases up to `budgets.wave_drain_timeout_s` to
+    # finish naturally before reclaiming whatever is left. `--now` skips straight to the
+    # immediate reset below -- no wait at all.
+    if drain:
+        deadline = time.monotonic() + settings.config.budgets.wave_drain_timeout_s
+        # ASYNC110: `asyncio.Event` doesn't fit here -- the condition being awaited is external
+        # DB state (another process's write), not something an in-process coroutine can `.set()`.
+        while (  # noqa: ASYNC110
+            await _count_running_phases(path, run_id) > 0 and time.monotonic() < deadline
+        ):
+            await asyncio.sleep(
+                min(_ABORT_DRAIN_POLL_S, max(0.0, deadline - time.monotonic()))
+            )
+
+    async with StateWriter(path, owner="fleet-abort") as writer:
+
+        async def unit(db: aiosqlite.Connection) -> int:
             # Roll uncommitted tasks back onto `phases.base_ref`: the row returns to PENDING with
             # its `attempts` retained (§11.5 crash sweep), and the fence bump invalidates the old
             # holder's next write.
@@ -17882,7 +17985,7 @@ async def _apply_stub_decisions(
     for decision in decisions:
         original = records[(decision.consumer_repo_id, decision.coord_key)]
         updated = apply_stub_decision(original, decision, now=now)
-        await conn.execute(
+        cursor = await conn.execute(
             "UPDATE stubs SET state = ?, revalidation_round = ?, state_changed_at = ?, "
             "       abandon_reason = ?, resolved_at = COALESCE(resolved_at, ?) "
             " WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ? "
@@ -17900,6 +18003,14 @@ async def _apply_stub_decisions(
                 decision.from_state.value,
             ),
         )
+        if cursor.rowcount == 0:
+            # `records` was read moments earlier over a separate connection; a concurrent writer
+            # (another `fleet resume`/`--sync`, or a REVALIDATE claim) can have already moved this
+            # exact (consumer, coord_key) row's `revalidation_round`/`state` in between, so the CAS
+            # matched nothing. The transition did not happen — do not write the finding, do not
+            # clear the paired UnmergedDependency finding, and do not report this consumer as
+            # touched (Rule 11: no silent skip disguised as success).
+            continue
         if decision.finding is not None:
             await conn.execute(
                 "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, "
@@ -19871,13 +19982,25 @@ def _gc_disk(settings: FleetSettings, *, dry_run: bool) -> dict[str, object]:
     for candidate, stat in files:
         if total - freed <= limit:
             break
-        if not dry_run:
-            with suppress(OSError):
-                candidate.unlink()
+        if dry_run:
+            freed += stat.st_size
+            continue
+        try:
+            candidate.unlink()
+        except OSError:
+            # A file that failed to delete (permissions, an open handle, a read-only mount) is
+            # NOT freed — counting it anyway would understate `remaining` and overstate
+            # `free_bytes` below, exactly the ENOSPC guard this function's docstring says must be
+            # "detected before the write, not reported after it" (§11.3, §13 row 42).
+            continue
         freed += stat.st_size
 
     remaining = total - freed
-    free_bytes = disk_free_bytes(cache_dir) + (0 if dry_run else freed)
+    # `disk_free_bytes` is read AFTER the loop above, so on a real run (dry_run=False) the files
+    # are already unlinked and it already reflects the reclaimed space — adding `freed` again would
+    # double-count it. On a dry run nothing was unlinked, so `freed` (the hypothetical eviction) is
+    # added to simulate what free space WOULD be after a real eviction.
+    free_bytes = disk_free_bytes(cache_dir) + (freed if dry_run else 0)
     if remaining > limit or free_bytes < settings.config.preflight.min_free_bytes:
         raise DiskExhaustedError(
             f"{cache_dir}: {remaining} bytes remain against budgets.max_disk_gb "

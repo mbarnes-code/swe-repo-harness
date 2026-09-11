@@ -275,6 +275,7 @@ class PhaseRow:
     status: RepoStatus
     attempts: int
     max_attempts: int
+    transient_retries: int
     lease_owner: str | None
     lease_fence: int
     lease_expires_at: str | None
@@ -1116,8 +1117,8 @@ class SqliteStateRepository:
 
     async def get_phase(self, run_id: str, repo_id: str, phase: Phase) -> PhaseRow | None:
         sql = (
-            "SELECT run_id, repo_id, phase, status, attempts, max_attempts, lease_owner, "
-            "       lease_fence, lease_expires_at, last_error, updated_at "
+            "SELECT run_id, repo_id, phase, status, attempts, max_attempts, transient_retries, "
+            "       lease_owner, lease_fence, lease_expires_at, last_error, updated_at "
             "  FROM phases WHERE run_id = ? AND repo_id = ? AND phase = ?"
         )
         async with self._read.execute(sql, (run_id, repo_id, int(phase))) as cursor:
@@ -1131,11 +1132,12 @@ class SqliteStateRepository:
             status=RepoStatus(str(row[3])),
             attempts=int(row[4]),
             max_attempts=int(row[5]),
-            lease_owner=_opt_str(row[6]),
-            lease_fence=int(row[7]),
-            lease_expires_at=_opt_str(row[8]),
-            last_error=_opt_str(row[9]),
-            updated_at=str(row[10]),
+            transient_retries=int(row[6]),
+            lease_owner=_opt_str(row[7]),
+            lease_fence=int(row[8]),
+            lease_expires_at=_opt_str(row[9]),
+            last_error=_opt_str(row[10]),
+            updated_at=str(row[11]),
         )
 
     async def get_budget(self, run_id: str) -> BudgetLedgerRow | None:

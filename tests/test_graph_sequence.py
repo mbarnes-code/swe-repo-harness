@@ -825,6 +825,42 @@ def test_an_unsatisfiable_version_set_blocks_the_run() -> None:
     assert blocking.resolution is None
 
 
+def test_a_pep440_compatible_release_spec_is_parsed_and_can_conflict() -> None:
+    """`~=2.28` (PEP 440 compatible-release) means `>=2.28, <3.0`. Before `_VERSION_ATOM`
+    recognized `~=`, this spec was unparseable, and `_intersects` deliberately drops an
+    unparseable spec ("ignore rather than guess") — so it silently contributed no bound and a
+    real conflict against `>=3.0` went undetected."""
+    report = audit_collisions(
+        CollisionInput(
+            versions=[
+                VersionRequirement(coord_key=LIB, repo_id="acme-a", version_spec="~=2.28"),
+                VersionRequirement(coord_key=LIB, repo_id="acme-b", version_spec=">=3.0"),
+            ]
+        )
+    )
+    assert not report.ok
+    blocking = report.blocking[0]
+    assert blocking.kind == "DEP_VERSION"
+    assert blocking.resolution is None
+
+
+def test_a_bare_major_only_tilde_widens_the_major_not_the_minor() -> None:
+    """`~1` (only a major component) means `>=1, <2` under this module's tilde convention.
+    `_parse` pads `~1` to `(1, 0, 0)` — indistinguishable, once padded, from an explicit
+    `~1.0.0` — so without tracking the original precision, `_tilde_ceiling` widened the minor
+    (`<1.1`) instead of the major (`<2.0`), spuriously conflicting with a satisfiable `>=1.5`."""
+    report = audit_collisions(
+        CollisionInput(
+            versions=[
+                VersionRequirement(coord_key=LIB, repo_id="acme-a", version_spec="~1"),
+                VersionRequirement(coord_key=LIB, repo_id="acme-b", version_spec=">=1.5"),
+            ]
+        )
+    )
+    assert report.ok
+    assert report.collisions[0].severity == "warn"
+
+
 def test_a_coordinate_published_by_two_repos_is_recorded_with_its_owner() -> None:
     """§3.1 step 8 `COORDINATE`: two repos publishing one `coord_key`, resolved by step 3's
     ownership rules — the same `owns:` hint mechanism the `CONTRACT` detector uses."""

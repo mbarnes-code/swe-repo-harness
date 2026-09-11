@@ -58,7 +58,6 @@ rename cannot leave the report naming a type that no longer exists.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -71,6 +70,7 @@ from fleet.models.repo import RepoId
 from fleet.models.tasks import StubRecord, VerificationReport
 from fleet.orchestrator.budgets import RevalidationBudgetExhausted
 from fleet.orchestrator.reentry import BlockerState
+from fleet.util.hashing import sha256_text
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -292,7 +292,7 @@ def revalidation_key(round_index: int, provider_repo_ids: Iterable[RepoId]) -> s
     ids = sorted(set(provider_repo_ids))
     if not ids:
         raise ValueError("a revalidation round covers at least one provider")
-    digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
+    digest = sha256_text("\n".join(ids))
     return f"r{round_index}:{digest}"
 
 

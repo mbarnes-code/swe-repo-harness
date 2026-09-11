@@ -151,7 +151,12 @@ class BackendHealth:
             self._transition(target, tier, state, "DOWN", "probe failed; cooldown restarts")
             return
         state.consecutive_failures += 1
-        if state.consecutive_failures >= self.open_after_failures:
+        if state.consecutive_failures >= self.open_after_failures and state.state != "DOWN":
+            # Only the UP -> DOWN transition may (re)start the cooldown clock. A target that is
+            # already DOWN can keep receiving qualifying failures from calls that started before
+            # the trip (concurrent in-flight calls, since `may_call` only blocks NEW calls) — those
+            # must not push `down_since` forward, or the cooldown would never elapse under a
+            # sustained trickle of late-arriving failures for an already-tripped target.
             state.down_since = self.clock()
             self._transition(
                 target,

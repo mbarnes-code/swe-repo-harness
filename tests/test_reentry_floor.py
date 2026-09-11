@@ -55,6 +55,7 @@ def _row(phase: Phase, status: RepoStatus) -> PhaseRow:
         status=status,
         attempts=0,
         max_attempts=3,
+        transient_retries=0,
         lease_owner=None,
         lease_fence=0,
         lease_expires_at=None,

@@ -135,6 +135,7 @@ class FakeDb:
             status=self.phase_status,
             attempts=1,
             max_attempts=3,
+            transient_retries=0,
             lease_owner=OWNER,
             lease_fence=FENCE,
             lease_expires_at=None,

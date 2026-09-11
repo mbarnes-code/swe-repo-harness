@@ -62,6 +62,7 @@ from fleet.models.build import (
 from fleet.models.enums import FailureClass, Phase
 from fleet.models.tasks import TokenUsage
 from fleet.orchestrator.registry import register_worker
+from fleet.util.errors import exception_type_name
 from fleet.util.fs import DiskFloorBreached, require_free_space
 from fleet.util.proc import CommandRunner
 from fleet.vcs.filter_repo import IngestError, IntegrationMutex, SourceProvenance, ingest
@@ -457,7 +458,7 @@ class BuildgenWorker(BaseWorker[BuildgenInput, BuildgenOutput]):
                 failure_class=FailureClass.TRANSIENT_INFRA,
                 retryable=True,
                 stderr_tail=str(exc),
-                exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+                exception_type=exception_type_name(exc),
             )
         output.merge_sha = result.merge_sha
         output.already_ingested = result.already_present

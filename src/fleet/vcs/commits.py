@@ -39,7 +39,6 @@ Writes no SQL (§11.5 single-writer rule): the runner persists what these helper
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -48,6 +47,7 @@ from pathlib import Path
 from typing import Final, Protocol
 from uuid import UUID
 
+from fleet.util.hashing import sha256_text
 from fleet.vcs.filter_repo import HOISTED_CONTRACT_TRAILER, SOURCE_REPO_TRAILER
 from fleet.vcs.git import Git, GitCommandError, GitError
 
@@ -158,11 +158,8 @@ def patch_id(patches: Sequence[PatchLike]) -> str:
     Sorted so that a model re-proposing the same edits in a different order is recognised as the
     same work; hashing the diff rather than embedding it so the key is fixed-width in a trailer.
     """
-    lines = sorted(
-        f"{patch.path}\x1f{hashlib.sha256(patch.diff.encode('utf-8')).hexdigest()}"
-        for patch in patches
-    )
-    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+    lines = sorted(f"{patch.path}\x1f{sha256_text(patch.diff)}" for patch in patches)
+    return sha256_text("\n".join(lines))
 
 
 @dataclass(frozen=True, slots=True)

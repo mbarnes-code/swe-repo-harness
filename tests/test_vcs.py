@@ -389,6 +389,25 @@ async def test_diff_stat_is_structured_not_a_string(git: Git) -> None:
     assert not stat.is_empty
 
 
+async def test_diff_stat_resolves_a_renamed_files_real_path(git: Git) -> None:
+    """`git diff --numstat` compresses a rename into `common/{old => new}` (shared affix) or a
+    bare `old => new` (no common affix) — not a plain path. Taking the trailing tab-separated
+    field verbatim would leave `FileStat.path` a bogus compound string instead of the file's real,
+    current path (the defect this test pins)."""
+    await _sh(git.path, "mv", "a.txt", "renamed.txt")
+    (git.path / "renamed.txt").write_text("v1\nv2\n")  # keep it a rename, not a delete+add
+    stat = await git.diff_stat()
+    assert stat.paths == ("renamed.txt",)
+
+    # No common prefix/suffix at all: git falls back to a bare `old => new`, no braces. `git mv`
+    # alone stages the rename with nothing left in the worktree-vs-index diff `diff_stat()` reads
+    # by default, so — as with `renamed.txt` above — the file is touched again to keep it visible.
+    await _sh(git.path, "mv", "b.txt", "elsewhere.md")
+    (git.path / "elsewhere.md").write_text("keep\nmore\n")
+    stat = await git.diff_stat()
+    assert set(stat.paths) == {"renamed.txt", "elsewhere.md"}
+
+
 async def test_apply_check_reverse_distinguishes_applied_from_not_applied(
     git: Git, tmp_path: Path
 ) -> None:

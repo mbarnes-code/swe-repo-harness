@@ -112,6 +112,7 @@ class FakeDb:
             status=RepoStatus.RUNNING,
             attempts=0,
             max_attempts=3,
+            transient_retries=0,
             lease_owner=self.owner,
             lease_fence=fence,
             lease_expires_at=None,
