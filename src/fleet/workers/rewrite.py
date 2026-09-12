@@ -49,8 +49,9 @@ from uuid import UUID, uuid5
 
 from pydantic import Field, JsonValue
 
+from fleet.llm.cache import EMPTY_SHA256, ScopedModelClient
 from fleet.llm.calls import escalate_repair, propose_repair
-from fleet.llm.client import LlmError
+from fleet.llm.client import LlmError, ModelClient
 from fleet.llm.schemas import ProposedFileEdit
 from fleet.models.base import FleetModel
 from fleet.models.enums import ContextPolicy, FailureClass, Phase, TransformTier
@@ -61,6 +62,7 @@ from fleet.rewrite.approach import compute_approach_signature
 from fleet.rewrite.pipeline import DEFAULT_MAX_PASSES, RewriteOutcome, RewritePipeline
 from fleet.rewrite.rules import EngineRegistry, RewriteRule
 from fleet.util.fs import DiskFloorBreached, require_free_space, scoped_tempdir
+from fleet.util.hashing import cache_key
 from fleet.vcs.commits import (
     CommitOutcome,
     FleetTrailers,
@@ -686,6 +688,33 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
             known = known | {signature}
             extra_signatures = [*extra_signatures, signature]
 
+    def _scoped_client(
+        self,
+        ctx: WorkerContext,
+        payload: RewriteInput,
+        extra_rejected_signatures: Sequence[str],
+    ) -> ModelClient:
+        """ADR-0021/D137: bind this rung's `context_policy` and the digest of every approach
+        signature actually rendered by `_evidence()` — `payload.rejected_approaches` (gated the
+        same way `_evidence()` gates them) union `extra_rejected_signatures` (rendered
+        unconditionally) — into the `llm_cache` key, so two rungs that render the same prompt
+        text under two *different* declared policies do not collide on a shared cache entry.
+
+        `ctx.llm` is a bare `ModelClient` in most unit tests; only the shipped
+        `CachingModelClient` exposes `.scoped()`, so this degrades to the unscoped client when it
+        doesn't — callers must not be required to grow a method they don't need.
+        """
+        if not isinstance(ctx.llm, ScopedModelClient):
+            return ctx.llm
+        signatures: set[str] = set(extra_rejected_signatures)
+        if ctx.context_policy in (
+            ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES,
+            ContextPolicy.EVIDENCE_PLUS_PRIORS,
+        ):
+            signatures |= {p.approach_signature for p in payload.rejected_approaches}
+        digest = EMPTY_SHA256 if not signatures else cache_key(*sorted(signatures))
+        return ctx.llm.scoped(context_policy=ctx.context_policy, rejected_approach_digest=digest)
+
     async def _repair(
         self,
         ctx: WorkerContext,
@@ -704,10 +733,15 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
         raises; it can no longer report a wiring failure that silently makes rung 1 the whole
         ladder. A call that fails is `WorkerRepairError` below — loud, and never a second retry
         policy (§11.8 owns that).
+
+        The client is bound to this rung's `context_policy`/`rejected_approach_digest` via
+        `_scoped_client` (ADR-0021/D137) before either helper below calls it — `ctx.llm` itself
+        is never called directly here, because `CachingModelClient.scoped()` is the only place
+        that fixes the anti-anchoring cache-key components to what this rung actually rendered.
         """
         if ctx.tier is TransformTier.DETERMINISTIC or evidence is None:
             return None
-        client = ctx.llm
+        client = self._scoped_client(ctx, payload, extra_rejected_signatures)
         failure, probe, stderr = evidence
         rendered = self._evidence(
             ctx, payload, unit=unit, source=source, failure=failure, probe=probe, stderr=stderr,
