@@ -110,6 +110,7 @@ from fleet.models.build import BuildUnit, SupportFile
 from fleet.models.enums import Ecosystem
 from fleet.models.repo import Coordinate
 from fleet.models.state import MigrationState
+from fleet.sandbox.container import ContainerSandbox
 from fleet.sandbox.worktree import slug
 from fleet.settings import (
     BCR_DEFAULT_REGISTRY,
@@ -8930,14 +8931,42 @@ def _add_local_repo(root: Path, name: str, files: dict[str, str]) -> None:
     )
 
 
+def _docker_daemon_usable() -> tuple[bool, str]:
+    """`test_sandbox.py::_docker_usable`'s shape, restated here rather than imported --
+    `test_baseline_container.py::_baseline_image_usable` gives the same reasoning for not
+    importing a test helper across modules for a few lines: the gates share no code today, and
+    coupling their skip messages would buy nothing.
+
+    Binary presence alone is not this test's real precondition -- Phase B needs a REACHABLE
+    daemon, not merely an installed CLI, and every other live-daemon test in this suite already
+    skips honestly (naming why) rather than run and fail loudly with a production-facing status
+    when the daemon is down. This test's own skip guard used to check only `shutil.which
+    ("docker")`, so it ran and failed as `REQUIRES_HUMAN_INTERVENTION` in exactly the daemon-
+    unreachable-but-binary-present environment its siblings already skip in.
+    """
+    if shutil.which("docker") is None:
+        return False, "docker CLI not on PATH"
+
+    async def probe() -> tuple[bool, str]:
+        if not await ContainerSandbox().available():
+            return False, "docker daemon not reachable"
+        return True, ""
+
+    return asyncio.run(probe())
+
+
+_DOCKER_DAEMON_OK, _DOCKER_DAEMON_WHY = _docker_daemon_usable()
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(
     shutil.which("bazel") is None,
     reason="bazel is not installed on this host; §12.11 Task B needs a real bazel end to end",
 )
 @pytest.mark.skipif(
-    shutil.which("docker") is None,
-    reason="docker is not installed on this host; §12.11 Task B needs a real sandboxed run",
+    not _DOCKER_DAEMON_OK,
+    reason=f"docker sandbox unavailable: {_DOCKER_DAEMON_WHY}; §12.11 Task B needs a real "
+    "sandboxed run",
 )
 def test_a_real_bazel_lock_publish_and_a_real_sandboxed_build_happen_in_the_same_run(
     fleet: Path,  # noqa: F811
