@@ -13168,6 +13168,26 @@ drift file (`src/fleet/util/errors.py`, from `334edeb`, reformatted) landing the
 comment trail immediately above `_RUFF_FORMAT_DIRTY_BASELINE` for the full, dated history — not
 reproduced here to avoid a second copy that can drift out of sync with the first.
 
+**Second addendum, added 2026-09-13 (round VIII, worker-ruff-drift-2 follow-up, controller
+ruling):** 125 above drifted to 126 within the same round, twice, both times via a
+`.superpowers/sdd/round-VIII-qa-qc/` round-ledger report file whose own illustrative Python code
+fence tripped `ruff format --check` — first `worker-citation-drift-fix-report.md` (fixed by
+reformatting it), then, in the same commit as that fix, `worker-ruff-drift-2-report.md` itself
+(the fix's own report, quoting the pre-fix unformatted snippet to document it), net-cancelling the
+fix back to 126. This is the third time a round-ledger report has interacted with this pin (after
+round VI task 116's 3 permanently-excluded historical-quotation files). Rather than continue
+reformatting reports one at a time, the controller ruled: add `.superpowers/` to `pyproject.toml`'s
+`[tool.ruff]` `exclude` — these are coordination scratch files, never project source, and were
+never meant to participate in the lint/format gate. This is a SCOPE change, not a drift fix: it
+also removes round VI task 116's 3 permanently-excluded historical-quotation files
+(`.superpowers/sdd/round-VI-criteria-closure/task-{78,80,105}-report.md`) from `ruff format`'s
+scan entirely, since they too live under `.superpowers/`. Re-measured directly post-exclude:
+`ruff format --check --no-cache --output-format=concise .` → **122**, with the per-file dirty set
+confirmed (via `comm`-diff both directions against the prior 125-file list) to be exactly the
+125-file set minus those 3 files and nothing else — no new drift, no other file's status changed.
+**122, not 125, is this pin's true current value**; `tests/test_lint_gate.py`'s own comment trail
+carries the same correction immediately above `_RUFF_FORMAT_DIRTY_BASELINE`.
+
 ## ADR-0117 — §12.29's divergent-modifier clause: worker-level proof accepted as satisfying intent, real-scan reachability not required for DONE
 
 **Decision (2026-09-03, round VI controller).** `docs/SPEC.md` item 29's literal text includes: "a

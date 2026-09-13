@@ -134,6 +134,13 @@ exclude_lines = [
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
+# `.superpowers/` holds round-ledger coordination scratch (worker/review briefs and reports) --
+# never project source, not meant to participate in the lint/format gate. Controller ruling,
+# round VIII Wave 14 (worker-ruff-drift-2 follow-up): a report's own illustrative code fence
+# tripped `ruff format --check` and net-cancelled a same-round drift fix, the third time a
+# round-ledger report has interacted with this pin -- excluding the whole tree closes the class
+# rather than reformatting one file at a time.
+exclude = [".superpowers"]
 
 [tool.ruff.lint]
 select = [
