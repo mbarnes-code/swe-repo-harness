@@ -321,6 +321,37 @@ def test_jvm_maps_a_maven_module_to_java_targets() -> None:
     assert adapter.contract_bindings[ContractKind.PROTO] == "java_proto_library"
 
 
+def test_jvm_workspace_deps_excludes_a_coordinate_from_another_ecosystem() -> None:
+    """A stray non-JVM coordinate on a Maven unit's `external_coordinates` must not reach
+    `maven.install` — matching `go.py`'s existing filter and the D137 fix (`334edeb`) applied here.
+
+    **Why:** Phase 1 records every declared dependency on the unit as a flat
+    `external_coordinates` list; nothing about that list guarantees every entry shares the unit's
+    own ecosystem. Before the fix, `workspace_deps` emitted a `WorkspaceDep` for EVERY coordinate
+    regardless of `coordinate.ecosystem`, so one non-matching manifest entry would poison the
+    fleet-wide `@maven` hub with an artifact `maven.install` cannot resolve. Both MAVEN and GRADLE
+    coordinates are asserted through (the adapter serves both — `self.ecosystems`, not a single
+    literal), which is why this filter is `in self.ecosystems` rather than `is Ecosystem.MAVEN`.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.MAVEN)
+    unit = _unit(
+        "acme-commons",
+        Ecosystem.MAVEN,
+        "java/com/acme/commons",
+        srcs=["src/main/java/com/acme/commons/Widget.java"],
+        external=[
+            Coordinate(ecosystem=Ecosystem.MAVEN, group="com.google.guava", name="guava"),
+            Coordinate(ecosystem=Ecosystem.GRADLE, group="org.slf4j", name="slf4j-api"),
+            Coordinate(ecosystem=Ecosystem.NPM, name="left-pad"),
+        ],
+    )
+    deps = adapter.workspace_deps(unit)
+    names = {dep.coordinate.name for dep in deps}
+    assert names == {"guava", "slf4j-api"}, (
+        f"the stray npm coordinate reached maven.install: {names}"
+    )
+
+
 def test_gradle_resolves_to_the_same_adapter_as_maven() -> None:
     """**Why (§7.5):** Gradle and Maven are two manifest formats with one build story. Two
     adapters would mean two copies of the same rule names, and the copies drift — a `gradle` repo
@@ -2045,6 +2076,127 @@ def test_py_contradictory_specs_from_two_units_reach_the_resolver_unmerged() -> 
     assert "urllib3<2" in lock.content and "urllib3>=2.2" in lock.content, lock.content
 
 
+def test_py_workspace_deps_excludes_a_coordinate_from_another_ecosystem() -> None:
+    """A stray non-PyPI coordinate on a Python unit must not reach `pip.parse` (D137, `334edeb`).
+
+    **Why:** same class of bug as the JVM/Rust siblings — `external_coordinates` is a flat list
+    Phase 1 populates from whatever manifests it found, with no guarantee every entry is PyPI.
+    Before the fix `workspace_deps` built a `WorkspaceDep` for every coordinate unconditionally,
+    so an npm coordinate recorded on a Python unit would silently join the `@pypi` hub.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.PYPI)
+    unit = _unit(
+        "acme-svc",
+        Ecosystem.PYPI,
+        "py/acme-svc",
+        srcs=["acme_svc/__init__.py"],
+        external=[
+            Coordinate(ecosystem=Ecosystem.PYPI, name="requests", version_spec=">=2.31"),
+            Coordinate(ecosystem=Ecosystem.NPM, name="left-pad"),
+        ],
+    )
+    deps = adapter.workspace_deps(unit)
+    names = {dep.coordinate.name for dep in deps}
+    assert names == {"requests"}, f"the stray npm coordinate reached pip.parse: {names}"
+
+
+def test_py_workspace_files_contributor_gate_ignores_a_unit_with_only_non_pypi_coordinates() -> (
+    None
+):
+    """A unit whose `external_coordinates` are all non-PyPI must not become a `workspace_files`
+    contributor — the gate `334edeb` added alongside the `workspace_deps` filter.
+
+    **Why:** before the fix, the contributor test was bare `if unit.external_coordinates` — truthy
+    for ANY non-empty list, PyPI or not. A unit carrying only, say, an npm coordinate (a mixed
+    manifest, or mis-attributed Phase 1 extraction) would then be treated as a real Python
+    contributor: it would seed `dest`/`carry_from` for the root `//:requirements.lock` even though
+    it declares zero actual PyPI dependencies, materializing a lock keyed off a repo with nothing
+    to resolve.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.PYPI)
+    stray = _unit(
+        "acme-docs",
+        Ecosystem.PYPI,
+        "py/acme-docs",
+        srcs=["acme_docs/__init__.py"],
+        external=[Coordinate(ecosystem=Ecosystem.NPM, name="left-pad")],
+    )
+    assert adapter.workspace_files([stray]) == [], (
+        "a unit with only a non-pypi coordinate was treated as a contributor"
+    )
+
+
+def test_py_workspace_files_content_excludes_a_non_pypi_coordinate_from_a_real_contributor() -> (
+    None
+):
+    """A genuine PyPI contributor's stray non-PyPI coordinate must not appear in the rendered
+    `requirements.lock` content — the filter inside `_requirements_text`'s input (`334edeb`).
+
+    **Why:** distinct from the contributor gate above — this unit legitimately contributes (it has
+    a real PyPI coordinate too), so the contributor-gate fix alone cannot catch a poisoned content
+    line. Before the fix, `content=_requirements_text([c for unit in contributors for c in
+    unit.external_coordinates])` iterated every coordinate on every contributor unconditionally,
+    so the stray npm name would have been written into the fleet's Python lockfile.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.PYPI)
+    mixed = _unit(
+        "acme-svc",
+        Ecosystem.PYPI,
+        "py/acme-svc",
+        srcs=["acme_svc/__init__.py"],
+        external=[
+            Coordinate(ecosystem=Ecosystem.PYPI, name="requests", version_spec=">=2.31"),
+            Coordinate(ecosystem=Ecosystem.NPM, name="left-pad"),
+        ],
+    )
+    (lock,) = adapter.workspace_files([mixed])
+    assert "requests>=2.31" in lock.content, lock.content
+    assert "left-pad" not in lock.content, (
+        f"a non-pypi coordinate reached the rendered requirements.lock: {lock.content!r}"
+    )
+
+
+def test_py_resolution_excludes_a_non_pypi_coordinate_from_the_resolver_input() -> None:
+    """A stray non-PyPI coordinate must not reach `uv pip compile`'s `requirements.in`, and a unit
+    with ONLY a non-PyPI coordinate must not trigger a resolution at all (`334edeb`).
+
+    **Why:** before the fix, `resolution()` gated on `[c for unit in units for c in
+    unit.external_coordinates]` unconditionally — a fleet with no real PyPI dependency but one
+    stray npm coordinate would still produce a `Resolution` (and run the resolver) instead of
+    correctly reporting nothing to resolve, and any real resolve would carry the stray name into
+    the resolver's input alongside the genuine specs.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.PYPI)
+    stray_only = _unit(
+        "acme-docs",
+        Ecosystem.PYPI,
+        "py/acme-docs",
+        srcs=["acme_docs/__init__.py"],
+        external=[Coordinate(ecosystem=Ecosystem.NPM, name="left-pad")],
+    )
+    assert adapter.resolution([stray_only]) is None, (
+        "a unit with only a non-pypi coordinate produced a resolution"
+    )
+
+    mixed = _unit(
+        "acme-svc",
+        Ecosystem.PYPI,
+        "py/acme-svc",
+        srcs=["acme_svc/__init__.py"],
+        external=[
+            Coordinate(ecosystem=Ecosystem.PYPI, name="requests", version_spec=">=2.31"),
+            Coordinate(ecosystem=Ecosystem.NPM, name="left-pad"),
+        ],
+    )
+    plan = adapter.resolution([mixed])
+    assert plan is not None
+    (source,) = plan.inputs
+    assert "requests>=2.31" in source.content
+    assert "left-pad" not in source.content, (
+        f"a non-pypi coordinate reached the resolver input: {source.content!r}"
+    )
+
+
 def _rust_unit(unit_id: str, dest: str, dep: str) -> BuildUnit:
     """A Rust crate with one crates.io dependency of its own — the fixture the tests below need."""
     return _unit(
@@ -2194,6 +2346,106 @@ def test_rust_every_workspace_member_has_a_manifest_the_adapter_declares() -> No
     # same set by construction rather than by coincidence.
     bare = _unit("acme-docs", Ecosystem.CARGO, "rust/acme-docs", srcs=["src/lib.rs"])
     assert adapter.package_files(bare) == []
+
+
+def test_rust_workspace_deps_excludes_a_coordinate_from_another_ecosystem() -> None:
+    """A stray non-Cargo coordinate on a Rust unit must not reach `crate.from_cargo` (`334edeb`).
+
+    **Why:** matches the JVM/Python siblings — before the fix `workspace_deps` built a
+    `WorkspaceDep` for every `external_coordinates` entry unconditionally, so a non-crates.io
+    coordinate recorded on a Rust unit would silently join the `@crates` hub `crate.from_cargo`
+    splices from `Cargo.lock`, which only ever names real crates.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.CARGO)
+    unit = _rust_unit("acme-store", "rust/acme-store", "serde")
+    stray_coord = Coordinate(ecosystem=Ecosystem.NPM, name="left-pad")
+    unit = unit.model_copy(
+        update={"external_coordinates": [*unit.external_coordinates, stray_coord]}
+    )
+    deps = adapter.workspace_deps(unit)
+    names = {dep.coordinate.name for dep in deps}
+    assert names == {"serde"}, f"the stray npm coordinate reached crate.from_cargo: {names}"
+
+
+def test_rust_workspace_files_contributor_gate_ignores_a_unit_with_only_non_cargo_coordinates() -> (
+    None
+):
+    """A unit whose `external_coordinates` are all non-Cargo must not be a `workspace_files`
+    contributor: it must not appear in the root workspace `members` list or seed the `Cargo.lock`
+    carry candidate (`334edeb`).
+
+    **Why:** before the fix, the contributor test was bare `if unit.external_coordinates` —
+    truthy for any non-empty list. A unit carrying only a stray npm coordinate would then be
+    unioned into `_member_dests`, naming a `members` entry whose directory has no real Cargo
+    dependency at all — `cargo metadata` would still load it (an empty `[package]` floor exists),
+    but the workspace would falsely claim a Rust crate contributes to the fleet's dependency
+    graph when it declares nothing `crate.from_cargo` should ever see.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.CARGO)
+    real = _rust_unit("acme-store", "rust/acme-store", "serde")
+    stray = _unit(
+        "acme-docs",
+        Ecosystem.CARGO,
+        "rust/acme-docs",
+        srcs=["src/lib.rs"],
+        external=[Coordinate(ecosystem=Ecosystem.NPM, name="left-pad")],
+    )
+    assert adapter.workspace_files([stray]) == [], (
+        "a unit with only a non-cargo coordinate was treated as a contributor"
+    )
+    manifest = next(
+        f for f in adapter.workspace_files([real, stray]) if f.path == "Cargo.toml"
+    ).content
+    assert "rust/acme-docs" not in manifest, (
+        f"the non-contributing unit's dest reached the workspace members list: {manifest!r}"
+    )
+
+
+def test_rust_unit_workspace_files_returns_no_lock_candidate_for_a_non_cargo_only_unit() -> None:
+    """`_unit_workspace_files` itself must gate on a real Cargo coordinate, not mere
+    non-emptiness of `external_coordinates` (`334edeb`) — checked by calling the (private) method
+    directly rather than only through `workspace_files()`.
+
+    **Why direct:** `workspace_files()` only ever calls `_unit_workspace_files` on units already
+    filtered by its own outer contributor gate (`any(c.ecosystem in self.ecosystems ...)`), which
+    guarantees any unit reaching this method already carries a real Cargo coordinate. That makes
+    this method's own guard unreachable *through that one caller* — reverting it in isolation
+    would not change `workspace_files()`'s observable output at all, which is exactly the kind of
+    non-discriminating mutation Rule 12 warns against trusting without checking. The guard is
+    still real defense-in-depth on the method's own contract (it is not `workspace_files`-only:
+    nothing stops a future caller from invoking it on an unfiltered unit), so it is verified here
+    directly rather than declared untestable.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.CARGO)
+    stray = _unit(
+        "acme-docs",
+        Ecosystem.CARGO,
+        "rust/acme-docs",
+        srcs=["src/lib.rs"],
+        external=[Coordinate(ecosystem=Ecosystem.NPM, name="left-pad")],
+    )
+    assert adapter._unit_workspace_files(stray) == [], (  # type: ignore[attr-defined]
+        "a unit with only a non-cargo coordinate produced a Cargo.lock carry candidate"
+    )
+
+
+def test_rust_package_files_returns_no_member_manifest_for_a_non_cargo_only_unit() -> None:
+    """`package_files()` must not write a member `Cargo.toml` for a unit whose only external
+    coordinate is non-Cargo (`334edeb`) — the same gate `workspace_files()`'s `members` list uses,
+    so the two stay the same set by construction (the invariant the base test already checks for
+    a unit with NO coordinates at all).
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.CARGO)
+    stray = _unit(
+        "acme-docs",
+        Ecosystem.CARGO,
+        "rust/acme-docs",
+        srcs=["src/lib.rs"],
+        external=[Coordinate(ecosystem=Ecosystem.NPM, name="left-pad")],
+    )
+    assert adapter.package_files(stray) == [], (
+        "a unit with only a non-cargo coordinate got a member Cargo.toml"
+    )
 
 
 # =======================================================================================
