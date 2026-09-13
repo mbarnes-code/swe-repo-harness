@@ -31,7 +31,7 @@ from fleet.llm.client import (
     TransportError,
     UnknownRole,
 )
-from fleet.llm.failover import BackendHealthTransition
+from fleet.llm.failover import BackendHealth, BackendHealthTransition
 from fleet.models.enums import ModelTier
 from fleet.models.tasks import BackendTarget, ModelCapabilities, Price, TokenUsage
 from fleet.orchestrator.retry import RetryPolicy
@@ -657,3 +657,49 @@ def test_the_third_consecutive_failure_opens_the_breaker_at_open_after_failures_
     assert [c["model_id"] for c in backend.calls] == ["m1", "m1", "m1"], (
         "the 4th call must not have reached invoke() at all -- m1 is DOWN and skipped"
     )
+
+
+def test_a_late_arriving_failure_on_an_already_down_target_does_not_push_down_since_forward() -> (
+    None
+):
+    """`334edeb`'s fix (module docstring's "Only the UP -> DOWN transition may (re)start the
+    cooldown clock"): `may_call` only blocks NEW calls, so a call that started BEFORE a target
+    tripped can still report a qualifying failure AFTER it is already `DOWN` (a concurrent
+    in-flight call finishing late). Such a failure must not push `down_since` forward, or a
+    sustained trickle of these late arrivals could keep the cooldown from ever elapsing.
+
+    Driven directly against `BackendHealth`, not through `LadderModelClient.complete()`: the
+    client's own `may_call` would refuse to dispatch a second call to an already-`DOWN` target at
+    all, which is exactly why this path is only reachable via concurrent in-flight calls and needs
+    a direct unit test to exercise it (`record_failure` is `complete()`'s outcome-reporting hook,
+    called regardless of whether `may_call` was consulted first)."""
+    clock = MutableClock(0.0)
+    transitions: list[BackendHealthTransition] = []
+    health = BackendHealth(
+        open_after_failures=1,
+        cooldown_s=10.0,
+        clock=clock,
+        on_transition=transitions.append,
+    )
+    m1 = target("m1")
+    tier = ModelTier.WORKHORSE
+
+    health.record_failure(m1, tier)  # t=0: UP -> DOWN, down_since = 0.0
+    assert [t.to_state for t in transitions] == ["DOWN"]
+
+    clock.value = 5.0
+    health.record_failure(m1, tier)  # a second, late-arriving qualifying failure; still DOWN
+    assert [t.to_state for t in transitions] == ["DOWN"], (
+        "a qualifying failure against an already-DOWN target must not emit a second transition"
+    )
+
+    # The behavioural proof `down_since` was not pushed to 5.0: at t=11, 11s have elapsed since
+    # the ORIGINAL down_since (t=0, >= cooldown_s=10.0) but only 6s since the late failure (t=5,
+    # < cooldown_s=10.0). If the late failure had reset down_since, this probe would still be
+    # refused.
+    clock.value = 11.0
+    assert health.may_call(m1, tier) is True, (
+        "cooldown must be measured from the original UP -> DOWN transition (t=0), not from the "
+        "later qualifying failure that arrived while already DOWN (t=5)"
+    )
+    assert [t.to_state for t in transitions] == ["DOWN", "HALF_OPEN"]
