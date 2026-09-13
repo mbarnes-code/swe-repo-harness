@@ -337,7 +337,22 @@ def test_ruff_check_is_clean_across_the_whole_repository():
 # out of scope, per the original rationale above — confirmed by reading their content directly,
 # they still contain verbatim historical code quotations (e.g. `Before (pre-fix, `b4bc8be`):`
 # fenced blocks) that reformatting would rewrite.
-_RUFF_FORMAT_DIRTY_BASELINE = 125
+# **Corrected 2026-09-13 (round VIII, worker-ruff-drift-2 follow-up, controller-directed
+# structural fix): 125 above was the pin's true value only until this same round's
+# `worker-citation-drift-fix-report.md` and then this task's own `worker-ruff-drift-2-report.md`
+# each in turn tripped this same test via an illustrative python-fenced snippet inside a
+# `.superpowers/` round-ledger report -- the third such report/pin interaction this round, per
+# the controller. Rather than keep reformatting one report at a time, the controller ordered
+# `.superpowers/` added to `pyproject.toml`'s `[tool.ruff]` `exclude` (round-ledger coordination
+# scratch, never project source). That exclusion is a SCOPE change, not a drift: it removes the
+# 3 permanently-excluded historical-quotation files named above from `ruff format`'s scan
+# entirely (they are no longer walked at all, so there is nothing left to "confirm still dirty"),
+# not just from this test's accounting of them. Re-measured directly post-exclude:
+# `ruff format --check --no-cache --output-format=concise .` -> **122** dirty, and the per-file
+# dirty list is IDENTICAL to the prior 125-file set minus exactly those 3 files (comm-diffed both
+# ways: zero newly-dirty, exactly those 3 newly-clean-by-exclusion). 125 - 3 = 122; no other
+# file's dirty status changed.
+_RUFF_FORMAT_DIRTY_BASELINE = 122
 
 _FORMAT_PER_FILE = re.compile(
     r"^(?P<path>\S+):\d+:\d+: unformatted: File would be reformatted$", re.MULTILINE
