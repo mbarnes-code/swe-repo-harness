@@ -11437,8 +11437,9 @@ own, matching this same paragraph's existing convention) now describe the worker
 loud infra-fault preflight, no floor on `check_criterion_c`) remains "Not yet built" and out of
 scope for task 116, which fixed only the two docstrings this same entry named.
 
-## D137 — OPEN. `CachingModelClient.scoped()` (ADR-0021's anti-anchoring key component) is never
-called anywhere in `src/fleet/` — the cache key never actually varies by `context_policy`
+## D137 — FIXED, LANDED (`b76eb94`). `CachingModelClient.scoped()` (ADR-0021's anti-anchoring key
+component) is never called anywhere in `src/fleet/` — the cache key never actually varies by
+`context_policy`
 
 **Found 2026-09-11 by a `/code-review -high` background review pass across `src/fleet/`. Allocated
 by the round VI controller — form-agnostic sweep found `D136` as the highest allocated number.**
@@ -11466,3 +11467,22 @@ cached answer, defeating the exact anti-anchoring guarantee ADR-0021 exists to g
 the ladder rung about to run, rather than handing out one unscoped instance for the run's whole
 lifetime. This needs its own design pass (where in the call chain the current rung's policy is
 known vs. where `model_client` is currently constructed) and is deliberately not attempted here.
+
+**[Dated note, 2026-09-12, round VIII worker-d137-fix]** Two independent re-verifications
+(`.superpowers/sdd/round-VIII-qa-qc/review-d137-reverify-report.md`,
+`.superpowers/sdd/round-VIII-qa-qc/research-d137-report.md`) confirmed the gap and traced it to
+one call site: `execute()` (`workers/base.py:807-812`) already threads the correct per-rung
+`context_policy` onto `WorkerContext`, so `RunContext`/`worker_context()` needed no changes.
+`RewriteWorker._repair()` (`workers/rewrite.py`) was the only site holding both the rung's real
+`ctx.context_policy` and what `_evidence()` actually rendered; it now calls a new `_scoped_client()`
+helper (binding `context_policy` and a digest over `payload.rejected_approaches`, gated the same
+way `_evidence()` gates them, unioned with `extra_rejected_signatures`) instead of reading
+`ctx.llm` directly. A `runtime_checkable` `ScopedModelClient` Protocol (`llm/cache.py`, satisfied
+structurally by `CachingModelClient`) keeps the call site from importing the concrete class. The
+other four `ctx.llm`-touching workers (classify/buildgen/buildverify/prwriter) were spot-checked
+and confirmed unaffected: none branches its rendered prompt on *which* non-`None` `ContextPolicy`
+is active, only on none-vs-not-none. New test:
+`tests/test_rewrite_ladder_cache_scoping.py::test_two_rungs_with_different_policies_bind_distinct_cache_keys`,
+confirmed to fail against the pre-fix `client = ctx.llm` (both rows collapse to
+`context_policy IS NULL` / the empty-set digest) and pass against the fix. See
+`.superpowers/sdd/round-VIII-qa-qc/worker-d137-fix-report.md` for the full report.

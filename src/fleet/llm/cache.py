@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Final, Literal, Protocol, final
+from typing import TYPE_CHECKING, Final, Literal, Protocol, final, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -78,6 +78,7 @@ __all__ = [
     "CachingModelClient",
     "LlmCacheStore",
     "MemoryLlmCacheStore",
+    "ScopedModelClient",
     "SqliteLlmCacheStore",
 ]
 
@@ -381,6 +382,24 @@ def _as_effort(value: str) -> Literal["low", "medium", "high"] | None:
     if value == "high":
         return "high"
     raise ValueError(f"llm_cache.effort holds {value!r}, not one of low/medium/high or ''")
+
+
+@runtime_checkable
+class ScopedModelClient(Protocol):
+    """Structural narrowing of `ModelClient` for callers needing ADR-0021 per-rung cache scoping
+    (D137). `CachingModelClient` below satisfies this structurally with no explicit inheritance;
+    a bare test fake (or any `ModelClient` that isn't cache-backed) does not, and a caller must
+    degrade to the unscoped client rather than requiring every fake to grow a `.scoped()` it has
+    no use for. Deliberately NOT a widening of `ModelClient` itself — `complete()`'s signature
+    must not grow an anti-anchoring parameter every backend and fake would have to care about
+    (see `scoped()`'s own docstring below)."""
+
+    def scoped(
+        self,
+        *,
+        context_policy: ContextPolicy | None,
+        rejected_approach_digest: str = EMPTY_SHA256,
+    ) -> ModelClient: ...
 
 
 @final
