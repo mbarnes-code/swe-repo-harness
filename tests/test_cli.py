@@ -985,6 +985,73 @@ def test_quarantine_dry_run_changes_nothing(workspace: Path) -> None:
         conn.close()
 
 
+def test_quarantine_never_overwrites_a_phase_that_started_running_after_the_read(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`334edeb`'s status guard / lease-fence bump on `_quarantine_impl`'s SKIPPED write.
+
+    Why: `_quarantine_impl` reads each phase's status ONCE, through a separate read-only
+    connection, and validates the SKIPPED move via `transition()` against that stale read. A live
+    worker can claim the lease and move the phase to RUNNING in the window between that read and
+    the later write -- RUNNING has no SKIPPED edge in `ALLOWED_TRANSITIONS` (only a crash sweep
+    may move it, and only to PENDING), so the UPDATE itself must re-check `status != 'RUNNING'`
+    rather than trust the stale read, or it silently overwrites a live worker's in-flight phase
+    with the operator's verdict -- exactly the race `334edeb` closed.
+
+    Reproducing the race genuinely (rather than pre-seeding a RUNNING row, which `transition()`
+    would refuse before the UPDATE is ever reached) needs a hook between the read and the write.
+    `ordering_descendants` is called synchronously in exactly that window, after `phase_rows` is
+    read but before `StateWriter` opens -- the same class of connection-level monkeypatch
+    `test_retry_translates_a_repository_error_into_a_usage_error` (above) uses for an equivalent
+    TOCTOU it cannot reach directly through the CLI. It stands in for the worker claiming the
+    lease here.
+    """
+    from fleet import cli as cli_module
+
+    db = workspace / "state" / "fleet.db"
+    _put_in_flight(db, "acme-commons", "PENDING")
+    real_ordering_descendants = cli_module.ordering_descendants
+
+    def _claim_the_lease_then_compute(pairs: object) -> object:
+        conn = sqlite3.connect(db, isolation_level=None)
+        try:
+            conn.execute(
+                "UPDATE phases SET status = 'RUNNING', lease_owner = 'other-worker', "
+                "       lease_fence = lease_fence + 1 "
+                " WHERE run_id = ? AND repo_id = 'acme-commons'",
+                (RUN_ID,),
+            )
+        finally:
+            conn.close()
+        return real_ordering_descendants(pairs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli_module, "ordering_descendants", _claim_the_lease_then_compute)
+
+    result = runner.invoke(
+        app, [*base_args(workspace), "quarantine", "acme-commons", "--reason", "operator"]
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    conn = sqlite3.connect(db)
+    try:
+        status, lease_owner, lease_fence = conn.execute(
+            "SELECT status, lease_owner, lease_fence FROM phases "
+            " WHERE run_id = ? AND repo_id = 'acme-commons'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert status == "RUNNING", (
+        "a phase a live worker claimed after the read must survive `fleet quarantine` untouched "
+        "-- the guard exists precisely so a stale PENDING read cannot overwrite it"
+    )
+    assert lease_owner == "other-worker", "the live worker's own lease must not be cleared either"
+    assert lease_fence == 1, (
+        "only the worker's own claim bumped the fence -- the quarantine write must not have "
+        "touched this row at all"
+    )
+
+
 # --------------------------------------------------------------------------------------
 # retry: reopen an abandoned repo through the audited OPERATOR_REOPEN door (§12.14, ADR-0125)
 # --------------------------------------------------------------------------------------
