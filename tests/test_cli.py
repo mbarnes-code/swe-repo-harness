@@ -4246,6 +4246,118 @@ def test_resume_stub_reconcile_never_moves_a_repo_out_of_requires_human_interven
     assert published["repos"]["acme-commons"]["status"] == "REQUIRES_HUMAN_INTERVENTION"
 
 
+async def test_apply_stub_decisions_reports_no_touched_consumer_on_cas_race(
+    workspace: Path,
+) -> None:
+    """`334edeb`: `_apply_stub_decisions`'s per-decision `UPDATE stubs ... WHERE
+    revalidation_round = ? AND state = ?` is a CAS against a `records` snapshot read moments
+    earlier over a SEPARATE connection (the function's own docstring, and
+    `_stub_reconcile_inputs`/`_stub_supersede_inputs`'s query). A concurrent writer (another
+    `fleet resume`/`--sync`, or a REVALIDATE claim bumping `revalidation_round`) between that
+    read and this write makes the CAS match zero rows — the transition did not happen, and the
+    fix's own comment names the consequence: "do not write the finding, do not clear the paired
+    UnmergedDependency finding, and do not report this consumer as touched."
+
+    Drives `_apply_stub_decisions` directly (not via its two production callers,
+    `_apply_stub_reconcile`/`_pr_sync_impl`'s T1 branch) so the race is constructed rather than
+    hoped for: `_put_stub` seeds `revalidation_round=0`, `original` is built to match that
+    snapshot, and a second, independent connection bumps `revalidation_round` to 1 (exactly what a
+    REVALIDATE claim's own row would do) before the decision is applied. Without the rowcount
+    check (`334edeb`'s fix reverted), the UPDATE's WHERE clause simply matches nothing, rowcount is
+    never consulted, and the function returns the consumer as touched while writing a finding for
+    a transition that never happened — the exact silent no-op-reported-as-success bug `334edeb`
+    fixes.
+    """
+    import aiosqlite
+
+    from fleet.cli import _apply_stub_decisions
+    from fleet.models.tasks import StubRecord
+    from fleet.orchestrator.stubs import AbandonReason, StubDecision, StubFinding, StubTransition
+
+    db = workspace / "state" / "fleet.db"
+    _put_stub(db)  # ACTIVE, revalidation_round=0, acme-commons -> acme-billing@1.0.0
+
+    now = datetime(2026, 9, 13, tzinfo=UTC)
+    original = StubRecord(
+        stub_id=uuid.UUID("22222222-2222-4222-8222-222222222222"),
+        run_id=uuid.UUID(RUN_ID),
+        coord_key="acme-billing@1.0.0",
+        provider_repo_id="acme-billing",
+        consumer_repo_ids=["acme-commons"],
+        fidelity=StubFidelity.PUBLISHED_ARTIFACT,
+        pinned_version="1.0.0",
+        state=StubState.ACTIVE,
+        rounds_spent=0,
+        max_revalidation_rounds=2,
+        created_at=now,
+        state_changed_at=now,
+    )
+    decision = StubDecision(
+        coord_key="acme-billing@1.0.0",
+        consumer_repo_id="acme-commons",
+        provider_repo_id="acme-billing",
+        transition=StubTransition.T4,
+        from_state=StubState.ACTIVE,
+        to_state=StubState.ABANDONED,
+        consumer_status=RepoStatus.DEGRADED,
+        detail="test: concurrent-writer CAS race",
+        abandon_reason=AbandonReason.END_OF_RUN,
+        finding=StubFinding.UNRESOLVED_STUB,
+        round_index=0,
+    )
+
+    # The concurrent writer: a REVALIDATE claim (or a second `fleet resume`) that has already
+    # bumped this exact row's `revalidation_round` since `original` was read — the CAS's
+    # `revalidation_round = 0` no longer matches the live row's `1`.
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE stubs SET revalidation_round = 1 WHERE run_id = ? "
+            "  AND consumer_repo_id = 'acme-commons' AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        )
+    finally:
+        conn.close()
+
+    async with StateWriter(db, owner="test-batch8-cas-race") as writer:
+
+        async def unit(conn: aiosqlite.Connection) -> list[str]:
+            return await _apply_stub_decisions(
+                conn,
+                RUN_ID,
+                {("acme-commons", "acme-billing@1.0.0"): original},
+                [decision],
+                now=now,
+            )
+
+        consumer_ids = await writer.submit(unit)
+
+    assert consumer_ids == [], (
+        "the CAS matched no row (a concurrent writer already moved revalidation_round); "
+        f"the consumer must not be reported as touched, got {consumer_ids!r}"
+    )
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT state, revalidation_round FROM stubs WHERE run_id = ? "
+            "  AND consumer_repo_id = 'acme-commons' AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()
+        finding = conn.execute(
+            "SELECT 1 FROM findings WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND kind = 'UnresolvedStub'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert tuple(row) == ("ACTIVE", 1), (
+        "the row must be left exactly as the concurrent writer left it — untouched by a "
+        "transition that never actually applied"
+    )
+    assert finding is None, "no finding may be written for a transition the CAS did not make"
+
+
 # ---- --raise-budget -----------------------------------------------------------------
 
 
