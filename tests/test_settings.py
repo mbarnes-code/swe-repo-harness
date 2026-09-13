@@ -390,6 +390,17 @@ def test_every_drift_section_has_a_digest_and_the_sha_is_derived_from_them(tmp_p
     assert settings.config_sha256() == expected
 
 
+def test_canonical_json_refuses_nan_rather_than_emitting_a_non_standard_literal() -> None:
+    """`canonical_json` added `allow_nan=False` (round VIII fix, matching `state/digest.py`'s own
+    `canonical_json`) so a NaN/Infinity float never round-trips into a non-standard JSON literal
+    inside what is supposed to be a canonical, portable digest input (Rule 11: fail loud instead
+    of silently emitting `NaN`, which strict JSON parsers elsewhere in the fleet would reject)."""
+    with pytest.raises(ValueError, match="Out of range"):
+        canonical_json({"a": float("nan")})
+    with pytest.raises(ValueError, match="Out of range"):
+        canonical_json({"a": float("inf")})
+
+
 def test_editing_one_section_moves_exactly_one_digest(tmp_path: Path) -> None:
     """The whole point of per-section digests (§10): `--accept-drift budgets` must accept ONE
     section. If an unrelated section's digest moved too, accepting one would mean accepting every

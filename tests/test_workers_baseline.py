@@ -268,6 +268,21 @@ def test_cancelled_before_dispatch_reports_status_cancelled(tmp_path: Path) -> N
     assert runner.calls == []
 
 
+def test_expired_before_dispatch_reports_status_timeout(tmp_path: Path) -> None:
+    """A genuine `ctx.expired()` (the deadline already passed, no operator cancel) is a real
+    timeout and must be a chargeable `timeout` result (§11) -- conflating it with `cancelled`
+    (the free, non-chargeable retry) would let a repo that times out on every attempt loop
+    forever instead of escalating to REQUIRES_HUMAN_INTERVENTION after 3 tries."""
+    runner = ScriptedRunner(results=[])
+    worker = BaselineWorker(runner=runner)
+    ctx = make_ctx(tmp_path, seconds_left=-1.0)  # deadline already passed; cancel left unset
+    result = _run(worker, ctx, _payload())
+    assert result.status == "timeout"
+    assert result.error is not None
+    assert result.error.failure_class == FailureClass.TIMEOUT
+    assert runner.calls == []
+
+
 # =======================================================================================
 # (5) the containerized argv shape (ADR-0135 ruling 3: a SEPARATE, networked container)
 # =======================================================================================

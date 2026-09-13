@@ -167,6 +167,89 @@ async def test_docker_stats_failure_raises_loudly() -> None:
         await reader.read_total(RUN_ID)
 
 
+class TOCTOURunner:
+    """Simulates the TOCTOU race the retry exists for: a container present in the first `docker
+    ps` listing exits (`--rm`) before `docker stats` reaches it, failing that whole batch. A
+    re-list (`docker ps`) then reflects only the survivor, and the SECOND `docker stats` call --
+    against that freshly re-listed set -- succeeds."""
+
+    def __init__(
+        self, *, first_ps_stdout: str, second_ps_stdout: str, second_stats_stdout: str
+    ) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self._ps_replies = [first_ps_stdout, second_ps_stdout]
+        self._second_stats_stdout = second_stats_stdout
+        self._stats_call_count = 0
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        parts = tuple(argv)
+        self.calls.append(parts)
+        if parts[1] == "ps":
+            stdout = self._ps_replies.pop(0)
+            return ProcResult(
+                argv=parts,
+                exit_code=0,
+                stdout_tail=stdout,
+                stderr_tail="",
+                duration_ms=1,
+                timed_out=False,
+                started=True,
+            )
+        assert parts[1] == "stats"
+        self._stats_call_count += 1
+        if self._stats_call_count == 1:
+            return ProcResult(
+                argv=parts,
+                exit_code=1,
+                stdout_tail="",
+                stderr_tail="docker stats failed: no such container",
+                duration_ms=1,
+                timed_out=False,
+                started=True,
+            )
+        return ProcResult(
+            argv=parts,
+            exit_code=0,
+            stdout_tail=self._second_stats_stdout,
+            stderr_tail="",
+            duration_ms=1,
+            timed_out=False,
+            started=True,
+        )
+
+
+async def test_a_stats_failure_retries_once_against_a_relisted_container_set() -> None:
+    """TOCTOU (round VIII fix): a container in `names` can legitimately exit between `docker ps`
+    and `docker stats`, failing the whole `docker stats` batch. The reader must re-list (dropping
+    the exited container) and retry ONCE against the survivors, rather than permanently reporting
+    the host unreadable on an ordinary mid-build container exit."""
+    prefix = run_prefix(RUN_ID)
+    fake = TOCTOURunner(
+        first_ps_stdout=f"{prefix}acme-commons-1\n{prefix}acme-widgets-1\n",
+        second_ps_stdout=f"{prefix}acme-widgets-1\n",
+        second_stats_stdout=f"{prefix}acme-widgets-1\t1.5MiB / 8GiB\n",
+    )
+    reader = ContainerStatsReader(runner=fake)
+
+    total = await reader.read_total(RUN_ID)
+
+    expected = int(1.5 * 1024**2)
+    assert tuple((r.name, r.memory_bytes) for r in total.readings) == (
+        (f"{prefix}acme-widgets-1", expected),
+    )
+    assert total.total_bytes == expected
+    # ps, stats (fails on the exited container), ps (re-list), stats (succeeds on survivors)
+    assert [c[1] for c in fake.calls] == ["ps", "stats", "ps", "stats"]
+
+
 async def test_malformed_stats_line_raises_loudly() -> None:
     prefix = run_prefix(RUN_ID)
     fake = FakeDockerRunner(
