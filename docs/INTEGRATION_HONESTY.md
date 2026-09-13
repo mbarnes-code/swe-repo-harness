@@ -1347,7 +1347,7 @@ invoke it does not exist**. Every one of these has tests that pass. None of thos
 evidence, because the thing they exercise is not the thing that ships.
 
 **D20 — OPEN. Commits are not probe-gated in production; the ast-grep parse probe is wired only in
-tests.** `RewriteWorker.pipeline_for` (`workers/rewrite.py:370`) constructs its `RewritePipeline`
+tests.** `RewriteWorker.pipeline_for` (`workers/rewrite.py:373`) constructs its `RewritePipeline`
 with `rules`, an `EngineRegistry`, `max_passes`, `params`, `tier` and `repo_id` — and **no
 `probe=`**. The only `probe=` in `src/` is `workers/rewrite.py:456`, an unrelated local in the
 repair-evidence renderer. Separately, `rewrite/apply.apply_patch` — the function whose docstring
@@ -11464,7 +11464,7 @@ exactly one `CachingModelClient` per run with the class's own field defaults, an
 **zero** hits under `src/fleet/`; the method is exercised only by `tests/test_llm_cache.py:340-341`.
 **ADR-0021** (`docs/DECISIONS.md:910`) is explicit that the escalation ladder's anti-anchoring
 guarantee depends on `context_policy`/`rejected_approach_digest` being bound into the `llm_cache`
-key per rung — `CachingModelClient.scoped()` (`llm/cache.py:436-463`) is the mechanism that does the
+key per rung — `CachingModelClient.scoped()` (`llm/cache.py:455-482`) is the mechanism that does the
 binding, and it is dead code in production.
 
 **Failure this permits.** Two runs (or one run under an operator `--context-policy` override
