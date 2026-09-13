@@ -55,8 +55,8 @@ unresolved"*.
 
 ```python
 unresolved = [a for a in survey.anchored if not a.resolves]
-len(survey.anchored)      # -> 87
-len(unresolved)           # -> 56
+len(survey.anchored)  # -> 87
+len(unresolved)  # -> 56
 ```
 
 This is the same quantity `test_every_census_number_this_module_states_is_the_number_it_derives`
