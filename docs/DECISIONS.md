@@ -13155,6 +13155,19 @@ follow-on if ever wanted; this ADR only settles that the PINNED form is what "do
 own sentence should carry a dated marker recording this substitution, in the same commit as
 marking §12.2 DONE — per Rule 14, not before.
 
+**Addendum, added 2026-09-13 (round VIII, worker-ruff-format-drift, controller-adjudicated):** the
+123-dirty figure above was accurate for its own measurement date (2026-09-03) but the pin has
+since moved twice more, entirely in `tests/test_lint_gate.py`'s own dated comments, not tracked
+here until now: round VI task 116 (`bb8ec70`) correctly raised it to 126 to account for 3 new,
+permanently-excluded historical-quotation report files; a same-day commit (`7f6ba2d`) reverted it
+back to 123 on a claim that does not reproduce (checking out `7f6ba2d` and re-measuring directly
+against it reads 126, not 123 — an unmeasured/wrong number, left as a historical record per the
+annotate-never-rewrite convention rather than edited); round VIII then found one genuine new
+drift file (`src/fleet/util/errors.py`, from `334edeb`, reformatted) landing the true count at
+**125**, adjudicated as the correct pin in the same round. See `tests/test_lint_gate.py`'s own
+comment trail immediately above `_RUFF_FORMAT_DIRTY_BASELINE` for the full, dated history — not
+reproduced here to avoid a second copy that can drift out of sync with the first.
+
 ## ADR-0117 — §12.29's divergent-modifier clause: worker-level proof accepted as satisfying intent, real-scan reachability not required for DONE
 
 **Decision (2026-09-03, round VI controller).** `docs/SPEC.md` item 29's literal text includes: "a

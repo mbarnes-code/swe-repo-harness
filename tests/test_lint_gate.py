@@ -319,7 +319,25 @@ def test_ruff_check_is_clean_across_the_whole_repository():
 # (`ruff format --check --no-cache --output-format=concise .`) against current `main`: **123**,
 # not 126. The 3 pinned report files are independently re-confirmed still dirty for the same
 # reason stated above (unchanged). Do not carry 126 forward; 123 is this pin's true current value.
-_RUFF_FORMAT_DIRTY_BASELINE = 123
+# **Corrected 2026-09-13 (round VIII, worker-ruff-format-drift): the note directly above this one
+# does not reproduce and was itself an unmeasured/wrong claim, left in place per this project's
+# annotate-never-rewrite convention rather than edited.** Checking out `7f6ba2d` itself (the
+# commit that wrote "123, not 126" above) and running this test's own exact command against that
+# commit reads **126**, with the identical dirty-file set `bb8ec70` had — not 123. There was no
+# "parallel-merge collision" changing the file set between those two commits; `bb8ec70`'s 126 was
+# the correct measured value the whole time, and `7f6ba2d` reverted a correct pin to a wrong one.
+# Separately, `334edeb` (round VIII) created `src/fleet/util/errors.py` dirty (never run through
+# `ruff format`) and, in the same commit, incidentally left `src/fleet/llm/backends/
+# openai_compatible.py` ruff-format-clean — net zero to the total (126 unchanged), but real
+# per-file churn. This task reformatted `errors.py` (whitespace-only docstring collapse; `ruff
+# check` and `mypy` both confirmed clean on it, no behavior change) — a genuine -1. Net: 126
+# (`bb8ec70`'s true value, never actually 123) - 1 (this task's `errors.py` fix) = **125**, which
+# is this pin's true current value. The 3 permanently-excluded report files
+# (`.superpowers/sdd/round-VI-criteria-closure/task-{78,80,105}-report.md`) remain dirty and
+# out of scope, per the original rationale above — confirmed by reading their content directly,
+# they still contain verbatim historical code quotations (e.g. `Before (pre-fix, `b4bc8be`):`
+# fenced blocks) that reformatting would rewrite.
+_RUFF_FORMAT_DIRTY_BASELINE = 125
 
 _FORMAT_PER_FILE = re.compile(
     r"^(?P<path>\S+):\d+:\d+: unformatted: File would be reformatted$", re.MULTILINE
