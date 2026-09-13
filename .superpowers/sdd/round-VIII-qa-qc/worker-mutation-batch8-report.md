@@ -75,14 +75,29 @@ masquerading as a discriminator).
   E501 line-length violations introduced by my own first draft: shortened the test function name
   and rewrapped its docstring).
 - `mypy src/fleet/cli.py` → Success: no issues found.
-- `mypy tests/test_cli.py` → 57 pre-existing errors, all outside my inserted test's line range
-  (4249-4351) and unrelated to `_apply_stub_decisions`/`StubRecord`/`StubDecision` (e.g.
-  `ExitCode` literal-overlap checks around lines 6356-9097, pre-existing on `main`). Zero new
-  errors introduced by this change.
+- `mypy tests/test_cli.py` → **Corrected (round of review 2026-09-13): my original "57 pre-existing,
+  zero new" claim was wrong on both halves — I never re-measured the pre-existing baseline against
+  `main` directly, I only diffed my own count's line numbers against my own eyeballing of which
+  lines "looked pre-existing".** The task review (`review-mutation-batch8-report.md`) independently
+  measured `mypy tests/test_cli.py` on `main` directly and got **55**, not 57. Re-measured myself
+  (via `git stash`/`git stash pop` in this same worktree, toggling only my own diff) and confirm:
+  **55 is the correct pre-existing baseline**; my first commit (`bfb1266`) introduced exactly **2**
+  new `arg-type` errors at `tests/test_cli.py:4282-4283` (`StubRecord(stub_id=..., run_id=...)`
+  passed plain `str` literals where both fields are typed `UUID` — Pydantic coerces this at
+  runtime, which is why the test itself passed and the mutation proof was never invalidated, but
+  it is a genuine mypy-strict regression), for a first-commit total of **57 = 55 + 2**. Fixed by
+  wrapping both literals in `uuid.UUID(...)` (`uuid` already imported at file top). Re-measured
+  after the fix: `mypy tests/test_cli.py` → **55 errors** — back to the exact pre-existing
+  baseline, zero new errors introduced.
 
 ## Result
 - Branch: `agent/roundviii-mutation-batch8` (from `main` at `16e55df`).
-- Commit: contains only `tests/test_cli.py` (+112 lines, one new test function).
-- `src/fleet/cli.py`: unmodified (mutation applied and fully reverted during the proof; final
-  working tree is byte-identical to `main`).
+- First commit `bfb1266`: `tests/test_cli.py` (+112 lines, one new test function) — introduced 2
+  new mypy `arg-type` errors, corrected below.
+- Follow-up commit (this round): wraps `StubRecord(stub_id=..., run_id=...)`'s two string literals
+  in `uuid.UUID(...)`; re-ran the full mutation-proof cycle (mutant fails on the same discriminating
+  assertion, `-k stub` blast radius unchanged at 23 passed/1 failed under the mutant, restore
+  byte-identical, 24/24 pass on original) to confirm the type fix did not disturb the discriminator.
+- `src/fleet/cli.py`: unmodified (mutation applied and fully reverted twice during the two proof
+  runs; final working tree is byte-identical to `main`).
 - Not merged, not pushed, per brief.

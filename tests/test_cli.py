@@ -4279,8 +4279,8 @@ async def test_apply_stub_decisions_reports_no_touched_consumer_on_cas_race(
 
     now = datetime(2026, 9, 13, tzinfo=UTC)
     original = StubRecord(
-        stub_id="22222222-2222-4222-8222-222222222222",
-        run_id=RUN_ID,
+        stub_id=uuid.UUID("22222222-2222-4222-8222-222222222222"),
+        run_id=uuid.UUID(RUN_ID),
         coord_key="acme-billing@1.0.0",
         provider_repo_id="acme-billing",
         consumer_repo_ids=["acme-commons"],
