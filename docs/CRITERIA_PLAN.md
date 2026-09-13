@@ -283,6 +283,18 @@ DONE bar.
 **Out of scope:** none — this is a pure grep-widening, no production risk.
 
 ## 6. The ecosystem/contract-kind confinement invariant
+**DONE — reconciled, round VIII QA/QC (2026-09-13, worker-backlog-housekeeping task).** The
+"pending a controller ruling" flag at the tail of this entry is resolved: `D120`
+(`docs/INTEGRATION_HONESTY.md`) is `FIXED, LANDED` (round VI task 62, `1996e44`). Re-verified live
+against `main` here: `pytest tests/test_ecosystems.py -k "no_ecosystem_branch or
+no_ecosystem_member_other or no_bare_compare"` → `3 passed` — none of the 3 reds research-34 found
+remain. The Rollup table above already counted §6 as DONE on this same basis
+(`worker-criteria-rollup` task, 2026-09-12); this section's own dedicated entry was the one place
+still describing the flip as pending a controller ruling — now brought current. Everything below
+this line is kept as history, not rewritten.
+
+*(Superseded status line, kept for history — was accurate before the D120 regression flagged at
+this entry's own tail, round VI research-34, 2026-09-06:)*
 **DONE (fix landed round Q task 1, `78e5667`; AST gates landed `dbd91d6`, merged `a1f20f5`;
 round-Q-final-review correction `I4` closes the one gap found in the landed gate).** *(Edited
 post-round-Q-final-review: this entry previously read "OPEN — real defect found, fix ruled —
