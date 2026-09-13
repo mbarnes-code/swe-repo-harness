@@ -11349,8 +11349,9 @@ ruling is satisfied as written, closing this defect's own scope. (D136, filed th
 separate, unrelated defect: the shipped default's `BaselineRed` gate has no floor against
 exempting the whole fleet — it does not reopen this defect's own unit-mismatch question.)
 
-## D135 — OPEN. `TokenEstimator` has zero production constructors fleet-wide — every cost
-reservation is `ZERO_COST`, so every §11.2 ceiling fires only after an overshoot, never before
+## D135 — FIXED, LANDED (`334edeb`). `TokenEstimator` has zero production constructors fleet-wide
+— every cost reservation is `ZERO_COST`, so every §11.2 ceiling fires only after an overshoot, never
+before
 
 **Found by research-54 (round VI's research task, 2026-09-09), while designing §12.39-B's
 revalidation-round pricing. Allocated by the round VI controller, thirty-seventh wave —
@@ -11379,6 +11380,18 @@ the same commit (since B1's ledger reads exactly this path); the general fix (au
 
 **Not required by this research task to fix**: no code was written; this is a scoping-only finding
 per research-54's own read-only brief.
+
+*(2026-09-13, round VIII lane roundviii-backlog-housekeeping — **heading updated; the body above is
+untouched.** First surfaced as a housekeeping gap by `review-criteria-rollup-report.md` (round VIII
+QA/QC, 2026-09-12): `334edeb`'s own commit message discloses fixing exactly this gap ("all four
+wave runners ... never wired a real cost estimate into the budget ledger"). Independently
+re-verified here against `main` at `7218d06`, not merely cited: `_ledger_estimate(...)` is now
+passed as `estimate=` at all four `PhaseRunner(` construction sites in `src/fleet/cli.py`
+(`:2284` SCAN, `:6725` TRANSFORM, `:11807` BUILD, `:11912` VERIFY) — `git blame` confirms each of
+the four `estimate=_ledger_estimate(...)` lines was added by `334edeb` — plus a fifth, separate
+direct `TokenEstimator()` construction on the REVALIDATE path (`cli.py:14707`, predating `334edeb`,
+landed round VI task 109 per ADR-0136/D135's own comment there). No other production
+`PhaseRunner`/cost-reservation site remains uncovered by this sweep.)*
 
 ## D136 — OPEN. The shipped default config silently exempts most of the fleet from migration under
 §3.1(c)'s `BaselineRed` exemption, and `check_criterion_c` has no floor to catch it
