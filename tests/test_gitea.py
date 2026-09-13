@@ -257,6 +257,38 @@ def test_the_request_file_is_deleted_after_the_call(tmp_path: Path) -> None:
     assert not list(tmp_path.glob("fleet-gitea-*.json")), "a request body file survived the call"
 
 
+def test_label_lookup_paginates_past_the_first_page(tmp_path: Path) -> None:
+    """WHY: `_label_ids` builds `by_name` from `GET .../labels?limit=100`. A repo with more than
+    one page of labels would otherwise silently drop every label past the first 100 from
+    `by_name`, misreporting a real label as "does not exist" — exactly the false negative a
+    reviewer only discovers by not finding the PR in their filter (this module's own docstring).
+    A page of exactly 100 rows must not be mistaken for the last page; the target label sits on
+    page 2, so the call only succeeds if the reader actually followed the `page=` parameter.
+    """
+    page_one = json.dumps([{"id": i, "name": f"l{i}"} for i in range(100)])
+    page_two = json.dumps([{"id": 555, "name": "priority"}])
+    created = json.dumps({"html_url": f"{BASE_URL}/{OWNER}/monorepo/pulls/42"})
+    runner = RecordingRunner((200, page_one), (200, page_two), (201, created))
+    forge = _forge(tmp_path, runner)
+    body_file = tmp_path / "body.md"
+    body_file.write_text("## migration\n", encoding="utf-8")
+
+    url = asyncio.run(
+        forge.create_pr(
+            base="integration",
+            head="migrate/acme-billing",
+            title="migrate acme",
+            body_file=body_file,
+            labels=["priority"],
+        )
+    )
+
+    assert url.endswith("/pulls/42")
+    assert len(runner.calls) == 3, "expected two paginated label GETs, then the create POST"
+    assert any("page=1" in part for part in runner.calls[0])
+    assert any("page=2" in part for part in runner.calls[1])
+
+
 # --------------------------------------------------------------------------------------
 # pure parsing — the state machine that gates every wave
 # --------------------------------------------------------------------------------------
