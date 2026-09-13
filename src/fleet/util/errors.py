@@ -1,5 +1,4 @@
-"""Exception classification primitives shared across worker/orchestrator error reporting.
-"""
+"""Exception classification primitives shared across worker/orchestrator error reporting."""
 
 from __future__ import annotations
 
