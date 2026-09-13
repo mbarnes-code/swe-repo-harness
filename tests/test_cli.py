@@ -6058,6 +6058,55 @@ def test_a_reachable_floor_lets_the_phase_proceed(
     assert outcome["disk_bytes_freed"] == 0, "nothing to evict, and the floor was cleared"
 
 
+def test_gc_disk_real_run_free_bytes_excludes_the_already_reclaimed_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """334edeb: on a REAL run (`dry_run=False`), `_gc_disk`'s `free_bytes` must be read from
+    `disk_free_bytes(cache_dir)` ALONE. The eviction loop above already unlinked the freed files
+    by the time it's read, so `disk_free_bytes` already reflects the reclaimed space -- adding
+    `freed` on top double-counts it, overstates how much room is actually free, and can hide a
+    real ENOSPC condition from exactly the preflight guard §11.3 requires (the bug 334edeb fixed).
+
+    None of the other `_gc_disk`/`_require_disk_headroom` tests in this module discriminate this:
+    they all fix an workspace with an empty or absent cache dir, so `freed` is always 0 and adding
+    it or not makes no observable difference. This test forces a partial eviction (two large
+    sparse files against a `max_disk_gb` small enough to evict exactly one of them, `freed > 0`)
+    and patches `disk_free_bytes` to a small, fixed reading -- only a wrongly-added `freed` could
+    push the reported `free_bytes` back over `preflight.min_free_bytes`.
+    """
+    from fleet.cli import DiskExhaustedError, _gc_disk
+    from fleet.settings import FleetSettings
+
+    write_config(
+        tmp_path,
+        fleet=(
+            "run:\n  monorepo_path: ../acme-monorepo\n"
+            "budgets:\n  max_disk_gb: 1\n"
+            "preflight:\n  min_free_bytes: 5000000\n"
+        ),
+    )
+    settings = FleetSettings.load(tmp_path / "config")
+    cache_dir = (settings.root / settings.config.run.cache_dir).resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    # Two sparse files, each bigger than half of `max_disk_gb`'s 1 GiB limit: evicting either
+    # ONE of them (oldest atime first) is enough to bring `total - freed` back under the limit,
+    # so the loop stops after exactly one eviction and `freed == 700_000_000` (not both, not zero).
+    for name in ("a.bin", "b.bin"):
+        with (cache_dir / name).open("wb") as fh:
+            fh.truncate(700_000_000)
+
+    monkeypatch.setattr("fleet.cli.disk_free_bytes", lambda _cache_dir: 1_000_000)
+
+    with pytest.raises(DiskExhaustedError) as raised:
+        _gc_disk(settings, dry_run=False)
+
+    # The fixed computation reports EXACTLY the patched reading (no `freed` added on a real run).
+    # Under the pre-334edeb inversion, `free_bytes` would be 1_000_000 + 700_000_000 =
+    # 701_000_000 -- comfortably clearing `min_free_bytes` (5_000_000) and raising nothing at all.
+    assert "701000000" not in str(raised.value), str(raised.value)
+    assert "1000000 bytes are free" in str(raised.value), str(raised.value)
+
+
 # --------------------------------------------------------------------------------------
 # §11.3/§12.22 — the memory-budget startup refusal (D50's `max_host_rss_mb` leg)
 # --------------------------------------------------------------------------------------
