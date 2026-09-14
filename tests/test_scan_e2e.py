@@ -720,6 +720,136 @@ def test_the_run_projects_a_migration_state_that_round_trips(fleet: Path) -> Non
     assert state.repos["acme-lib-ts"].status.value == "SUCCEEDED"
 
 
+def test_a_broken_wave_projector_rebuild_is_logged_but_never_fails_the_scan(
+    fleet: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cli._close_wave_projector`'s whole reason for existing (its own docstring): `Projector.
+    aclose()` deliberately re-raises whatever its last rebuild raised, but a projection is an
+    OUTPUT (§11.5) and that exception must not stall the wave that feeds it -- so it is logged via
+    `ctx.log.error`, not suppressed and not re-raised. `_close_wave_projector` is shared by all
+    four of `cli.py`'s `_run_*_wave` composition roots and, before this test, had ZERO coverage
+    anywhere in this suite: nothing ever made `Projector.aclose()` raise.
+    """
+    from fleet.state.projection import Projector
+
+    async def _raise(self: Projector) -> None:
+        raise RuntimeError("synthetic wave-projector rebuild failure")
+
+    monkeypatch.setattr(Projector, "aclose", _raise)
+
+    result = scan(fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+
+def test_a_projector_failure_after_a_successful_scan_still_exits_success(
+    fleet: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_scan_impl`'s trailing `with suppress(Exception): await project_once(...)` -- its own
+    comment: "a projection is an OUTPUT (§11.5); it never fails a scan". No test anywhere made
+    `project_once` raise, so this branch (the difference between a bare `await project_once(...)`
+    and the wrapped form actually shipped) had zero coverage.
+    """
+    from fleet import cli
+
+    async def _raise(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("synthetic projection failure")
+
+    monkeypatch.setattr(cli, "project_once", _raise)
+
+    result = scan(fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+
+def test_a_scan_seals_config_digests_and_monorepo_branch_into_the_runs_row(fleet: Path) -> None:
+    """`_open_run`'s own docstring: `config_digests` is written HERE rather than left at the
+    schema's `'{}'` default, because §10's drift check is per section and an empty map makes
+    every section look changed. No test in this suite ever reads `runs.config_digests`/
+    `monorepo_branch` back after a REAL `fleet scan` -- every config-drift test hand-writes its
+    own `runs` row with its own `config_digests`, bypassing `_open_run` entirely.
+    """
+    assert scan(fleet).exit_code == ExitCode.SUCCESS
+    rows = query(fleet, "SELECT config_digests, monorepo_branch FROM runs")
+    assert len(rows) == 1
+    digests_json, monorepo_branch = rows[0]
+    assert digests_json != "{}", "runs.config_digests was left at the schema default"
+    digests = json.loads(digests_json)
+    assert digests, "config_digests must hold one entry per §10 section"
+    assert monorepo_branch == "integration"
+
+
+def test_a_manifest_entry_marked_skip_seeds_a_skipped_phase_while_its_sibling_still_dispatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_seed_fleet`'s docstring: a `skip: true` manifest entry gets its PENDING `phases` row
+    turned `SKIPPED` here -- "the one transition into SKIPPED the §6 state machine allows" -- so
+    nothing downstream has to special-case it. `tests/test_settings.py` proves the YAML `skip:`
+    field parses; nothing anywhere drives it through a REAL `fleet scan` and checks either the
+    `phases` row it produces or that an un-skipped sibling still dispatches normally.
+    """
+    sources = {
+        "acme-active": _make_repo(tmp_path / "sources", "acme-active", {"README.md": "hi\n"}),
+        "acme-skipped": _make_repo(tmp_path / "sources", "acme-skipped", {"README.md": "hi\n"}),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = workspace / "config"
+    config.mkdir()
+    (config / "fleet.yaml").write_text(FLEET_YAML, encoding="utf-8")
+    (config / "models.yaml").write_text(MODELS_YAML, encoding="utf-8")
+    (config / "repos.yaml").write_text(
+        "version: 1\ndefaults:\n  ref: main\nrepos:\n"
+        f"  - name: acme-active\n    url: {sources['acme-active']}\n"
+        f"  - name: acme-skipped\n    url: {sources['acme-skipped']}\n    skip: true\n",
+        encoding="utf-8",
+    )
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+
+    assert scan(workspace).exit_code == ExitCode.SUCCESS
+
+    assert query(
+        workspace, "SELECT status FROM phases WHERE repo_id = 'acme-skipped' AND phase = 1"
+    ) == [("SKIPPED",)]
+    assert query(
+        workspace, "SELECT status FROM phases WHERE repo_id = 'acme-active' AND phase = 1"
+    ) == [("SUCCEEDED",)]
+    state = MigrationState.model_validate_json(
+        (workspace / "migration_state.json").read_text(encoding="utf-8")
+    )
+    assert state.repos["acme-skipped"].status.value == "SKIPPED"
+
+
+def test_run_scan_wave_clamps_git_net_and_subprocess_concurrency_to_the_lane_count(
+    fleet: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_run_scan_wave` narrows `concurrency.git_net`/`concurrency.subprocess` to
+    `min(configured, lanes)` before building `Limits` -- `fleet.yaml`'s own `git_net`/`subprocess`
+    defaults (8/16) are wider than a `--concurrency 1` invocation's single lane, and a wave that
+    admits at most `lanes` repos at once gains nothing from a wider clone/subprocess ceiling. No
+    test in this suite ever passes `--concurrency` narrower than the configured `git_net`/
+    `subprocess`, so the `min(...)` clamp itself has zero coverage (as opposed to the trivial
+    pass-through case where `lanes` already exceeds both).
+    """
+    from fleet.orchestrator.budgets import Limits
+    from fleet.settings import ConcurrencySection
+
+    captured: list[ConcurrencySection] = []
+    real_create = Limits.create.__func__  # type: ignore[attr-defined]
+
+    def _spy(cls: type[Limits], /, concurrency: ConcurrencySection, **kwargs: object) -> Limits:
+        captured.append(concurrency)
+        result: Limits = real_create(cls, concurrency, **kwargs)
+        return result
+
+    monkeypatch.setattr(Limits, "create", classmethod(_spy))
+
+    result = scan(fleet, "--concurrency", "1")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert captured, "Limits.create was never called"
+    assert captured[0].git_net == 1, captured[0]
+    assert captured[0].subprocess == 1, captured[0]
+
+
 def test_scan_refuses_the_flags_it_cannot_honour(fleet: Path) -> None:
     """`--refresh` and a foreign `--repos` are refused with exit 2, not accepted and ignored.
 

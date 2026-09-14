@@ -49,6 +49,7 @@ non-existent `FailureClass` member.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -376,3 +377,36 @@ def test_an_orchestrator_rss_breach_halts_the_run_with_exit_5(
     assert query(
         tiny_fleet, "SELECT status, attempts, lease_owner FROM phases WHERE phase = 1"
     ) == [("PENDING", 0, None)]
+
+
+def test_host_memory_sampler_falls_back_to_the_real_readers_when_no_seam_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cli._host_memory_sampler`'s three `X or <production reader>` expressions are the ONLY
+    thing standing between a real fleet run and a real `docker`/cgroup/`getrusage` read. But
+    `tests/conftest.py`'s autouse `_no_real_docker_stats` fixture patches `cli.CONTAINER_STATS_
+    RUNNER`/`cli.CGROUP_MEMORY_READER`/`cli.RSS_READER` to non-`None` fakes for EVERY test that
+    loads `fleet.cli` (by design — see that fixture's own docstring), which means every other
+    test in this file (and this suite) exercises only the LEFT side of each `or`. Nothing
+    exercises the RIGHT side — the actual production fallback — anywhere. This test explicitly
+    overrides the autouse fixture back to `None` (production's real default) and asserts the
+    sampler that comes out holds the exact production callables, by identity.
+    """
+    import fleet.cli as cli
+    from fleet.orchestrator.memory_guard import read_own_rss_bytes
+    from fleet.util.cgroup import read_process_tree_memory_bytes
+    from fleet.util.proc import run as proc_run
+
+    monkeypatch.setattr(cli, "CONTAINER_STATS_RUNNER", None)
+    monkeypatch.setattr(cli, "CGROUP_MEMORY_READER", None)
+    monkeypatch.setattr(cli, "RSS_READER", None)
+
+    config_dir = tmp_path / "config"
+    shutil.copytree(Path(__file__).resolve().parents[1] / "config", config_dir)
+    settings = cli._load_settings(cli.GlobalOptions(config_path=config_dir / "fleet.yaml"))
+
+    sampler = cli._host_memory_sampler(settings, "run-fallback")
+
+    assert sampler._rss_reader is read_own_rss_bytes
+    assert sampler._cgroup_reader is read_process_tree_memory_bytes
+    assert sampler._container_reader._runner is proc_run

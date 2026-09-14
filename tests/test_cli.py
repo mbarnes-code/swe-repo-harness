@@ -7413,6 +7413,71 @@ def test_transform_max_patch_bytes_is_threaded_from_settings_to_rewrite_input(
     assert "100" in reason, "the reason must cite the CONFIGURED cap, not the 1 MiB default"
 
 
+def test_scan_payloads_symbol_batch_rows_prefers_the_cli_override_over_the_config_default(
+    tmp_path: Path,
+) -> None:
+    """`cli._scan_payloads`'s docstring: what a payload holds is the phase's business, not the
+    driver's. `symbol_batch_rows=batch_rows or scan.symbol_batch_rows` is the ONE field this
+    function computes with an `or` rather than a straight passthrough, because `--symbol-batch-
+    rows` is allowed to override the configured default. No test in this suite ever passes
+    `--symbol-batch-rows` (`grep` over `tests/` for it finds nothing but this test), so the
+    override half of that `or` had zero coverage — every existing scan drives only the
+    fall-through (`batch_rows=None`) half.
+    """
+    from fleet.cli import RepoEntry, ScanInput, _scan_payloads
+    from fleet.models.enums import Phase
+    from fleet.settings import FleetSettings
+
+    config = write_config(tmp_path)
+    settings = FleetSettings.load(config.parent)
+    entry = RepoEntry(name="repo1", url="https://example.invalid/repo1.git")
+
+    overridden = _scan_payloads(settings, [entry], steps=("clone",), batch_rows=7)
+    payload = asyncio.run(
+        overridden(repo_id="repo1", phase=Phase.SCAN, attempt=1, remaining_units=None)
+    )
+    assert isinstance(payload, ScanInput)
+    assert payload.symbol_batch_rows == 7, (
+        "a --symbol-batch-rows override must reach ScanInput, not the configured default"
+    )
+
+    defaulted = _scan_payloads(settings, [entry], steps=("clone",), batch_rows=None)
+    payload_default = asyncio.run(
+        defaulted(repo_id="repo1", phase=Phase.SCAN, attempt=1, remaining_units=None)
+    )
+    assert payload_default.symbol_batch_rows == settings.config.scan.symbol_batch_rows
+
+
+def test_ledger_estimate_prices_off_the_real_routed_cheap_tier_target_not_zero_cost(
+    tmp_path: Path,
+) -> None:
+    """`cli._ledger_estimate`'s own docstring: a phase's pre-dispatch reservation must be priced
+    off the REAL routed target at `tier`, via `TokenEstimator` — "no longer `PhaseRunner`'s own
+    `ZERO_COST` default, which defeats `budgets.py`'s admission check by reserving $0/0 tokens
+    against every real dispatch." No test calls `_ledger_estimate` directly, and a live e2e scan
+    cannot observe a reservation reliably (it is transient, reconciled to actual cost by
+    `settle()` before the process exits, and every e2e scan runs `--skip-classify` besides) — so
+    this function's whole pricing contract had zero coverage.
+    """
+    from fleet.cli import _ledger_estimate, llm_router
+    from fleet.llm.roles import Role
+    from fleet.models.enums import ModelTier
+    from fleet.orchestrator.budgets import ZERO_COST, TokenEstimator
+    from fleet.settings import FleetSettings
+
+    config = write_config(tmp_path)
+    settings = FleetSettings.load(config.parent)
+    router = llm_router(settings)
+
+    estimate = _ledger_estimate(router, role=Role.REPO_CLASSIFY, tier=ModelTier.CHEAP)
+    result = estimate("acme-any")
+
+    target = router.resolve(str(Role.REPO_CLASSIFY)).targets[0]
+    expected = TokenEstimator().estimate(target, role=str(Role.REPO_CLASSIFY), tier=ModelTier.CHEAP)
+    assert result == expected
+    assert result != ZERO_COST, "a real, non-zero reservation must be priced for scan dispatch"
+
+
 def test_max_patch_bytes_at_exactly_the_cap_is_accepted_not_rejected(tmp_path: Path) -> None:
     """`check_diff` uses strict `>` (`rewrite/apply.py`): a patch sized exactly at the configured
     cap must be ACCEPTED. Pinned separately from the threading test above because an off-by-one
