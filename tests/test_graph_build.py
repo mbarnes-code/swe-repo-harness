@@ -40,6 +40,7 @@ from fleet.graph.build import (
 )
 from fleet.graph.infer import (
     EDGE_BASE_CONFIDENCE,
+    MODIFIERS,
     InferenceInput,
     ManifestDependency,
     OwnerIndex,
@@ -594,6 +595,64 @@ def test_an_undeclared_import_is_an_edge_but_a_declared_one_is_not_doubled() -> 
         symbols=[s for s in full_input().symbols if s.kind is SymbolKind.IMPORT],
     )
     assert not [e for e in infer_edges(with_manifest) if e.kind is EdgeKind.INTERNAL_IMPORT]
+
+
+def test_a_gradle_test_configuration_scope_gets_the_test_scope_discount() -> None:
+    """`334edeb` added Gradle's five test-configuration names (`testImplementation` and
+    siblings) to `TEST_SCOPES` — `manifests/gradle.py`'s `_CONFIGURATIONS` names these as its
+    test-related configurations, and `RawDependency.scope` is the configuration name "as
+    written" (its own docstring), never normalized to Maven's literal `"test"`. Before the fix,
+    only `"test"` (and the other pre-existing literals) were in `TEST_SCOPES`, so a Gradle test
+    dependency's `scope="testImplementation"` fell through `(dep.raw.scope or "") in
+    TEST_SCOPES` unnoticed and got no discount at all — indistinguishable from a real compile
+    dependency."""
+    edge = infer_edges(
+        InferenceInput(
+            owners=owner_index(),
+            dependencies=[
+                dependency(repo_id="acme-a", on="b", version="1.4.0", scope="testImplementation"),
+            ],
+        )
+    )[0]
+    assert edge.confidence_factors.get("test_scope") == MODIFIERS["test_scope"]
+    assert edge.confidence == pytest.approx(
+        EDGE_BASE_CONFIDENCE[EdgeKind.PUBLISHED_ARTIFACT] * MODIFIERS["test_scope"]
+    )
+
+
+def test_a_dynamic_ref_matching_two_owners_is_marked_ambiguous() -> None:
+    """`334edeb` added the missing `MODIFIERS["ambiguous"]` confidence factor to
+    `_dynamic_ref_edges` — `_manifest_edges` and `_import_edges` already discounted an edge
+    whose target has more than one owner (`len(owners) > 1` / `len(...) > 1`), but the DYNAMIC_REF
+    rule computed `factors` before that check existed, so an ambiguous dynamic reference kept
+    `EDGE_BASE_CONFIDENCE[DYNAMIC_REF]` undiscounted even though `.ambiguous` and `candidates`
+    (driven by the same `len(targets) > 1`, unchanged by this fix) already correctly flagged it
+    as ambiguous. Two repos publishing the identical coordinate is what makes `targets` resolve
+    to more than one owner here."""
+    shared_owners = OwnerIndex.from_published(
+        [("acme-b", coord("shared")), ("acme-e", coord("shared"))]
+    )
+    symbol = SymbolRef(
+        repo_id="acme-d", fqn="com.acme.shared.Bootstrap", kind=SymbolKind.DYNAMIC_REF,
+        path="src/main/java/Boot.java", line=44, language="java", is_definition=False,
+    )
+    dynamic = [
+        e for e in infer_edges(InferenceInput(owners=shared_owners, symbols=[symbol]))
+        if e.kind is EdgeKind.DYNAMIC_REF
+    ]
+
+    # One row: `edge_key` is keyed on the coordinate, not the resolved owner, so the two
+    # candidate owners collide onto a single deduplicated edge (`infer_edges`'s own dedup by
+    # `edge_key`) — `dst_candidate_repo_ids` is where both survive, for `graph/build.py` to
+    # expand into one ordering constraint per candidate.
+    assert len(dynamic) == 1
+    edge = dynamic[0]
+    assert sorted(edge.dst_candidate_repo_ids) == ["acme-b", "acme-e"]
+    assert edge.ambiguous
+    assert edge.confidence_factors.get("ambiguous") == MODIFIERS["ambiguous"]
+    assert edge.confidence == pytest.approx(
+        EDGE_BASE_CONFIDENCE[EdgeKind.DYNAMIC_REF] * MODIFIERS["ambiguous"]
+    )
 
 
 # =======================================================================================
