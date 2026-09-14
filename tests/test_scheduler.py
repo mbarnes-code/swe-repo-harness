@@ -194,6 +194,89 @@ async def test_a_partial_predecessor_still_blocks_a_later_wave(
         await scheduler.open_wave(1)
 
 
+async def test_a_partial_wave_is_not_stepped_over_by_a_later_wave_through_an_empty_gap(
+    tmp_path: Path,
+) -> None:
+    """The scenario the class docstring names but the "partial predecessor" test above cannot
+    reach: opening wave 2 while wave 0 is `PARTIAL` and wave 1 "happens to be empty."
+
+    `MigrationWave` forbids an empty wave AT PLAN TIME (`models/graph.py::_wave_is_non_empty`), so
+    the only way wave 1 goes genuinely empty is the realistic one: step 6's `append_unblocked_wave`
+    MOVES a wave's sole member into a synthetic wave, which is exactly what freeing a `BLOCKED`
+    repo does. After the move, wave 1's `waves` row still exists but `wave_members` holds none of
+    it, and `wave_state`'s loop over `members` never executes its body, so it falls straight to
+    `CLOSED` — vacuously, by construction, not because wave 1 did anything.
+
+    `open_wave`'s guard walks EVERY earlier index for exactly this reason: a guard that checked
+    only `wave_index - 1` would see wave 1's vacuous CLOSED and admit wave 2 over a wave 0 that
+    never finished — a dependent of the still-`PENDING` `acme-batch` would then migrate against a
+    dependency that has not landed, which is the one failure `open_wave` exists to prevent
+    (§3.1 step 7).
+
+    Discriminating mutation: change the loop's `if earlier >= wave_index: break` to
+    `if earlier != wave_index - 1: continue`. Verified in this worktree: `scheduler.py` mutated in
+    place (diff non-empty), then restored byte-identical after. Every other test in this file
+    (13/13, `test_a_partial_predecessor_still_blocks_a_later_wave` included) still passes under
+    that mutation — none of them opens a wave two or more indices past a `PARTIAL` one with an
+    empty wave in between — and only this test catches it.
+    """
+    path = tmp_path / "state" / "fleet.db"
+    await initialize_database(path)
+    async with StateWriter(path, owner="test-scheduler-gap") as writer:
+        read_conn = await connect_ro(path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            store = SqliteSchedulerStore(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN, started_at=NOW, config_sha256="c" * 64, harness_version="0.1.0"
+            )
+            for repo_id in ("acme-mid", "acme-far"):
+                await repo.upsert_repo(
+                    repo_id, name=repo_id, url=f"https://example.invalid/{repo_id}.git", now=NOW
+                )
+                await repo.upsert_phase(RUN, repo_id, PHASE, now=NOW)
+            for repo_id, radius in WAVE_0.items():
+                await repo.upsert_repo(
+                    repo_id, name=repo_id, url=f"https://example.invalid/{repo_id}.git", now=NOW
+                )
+                await repo.upsert_phase(RUN, repo_id, PHASE, now=NOW)
+                await _set_blast_radius(writer, repo_id, radius)
+            plan = WavePlan(
+                waves=(
+                    MigrationWave(wave_index=0, repo_ids=sorted(WAVE_0)),
+                    MigrationWave(wave_index=1, repo_ids=["acme-mid"], depends_on_waves=[0]),
+                    MigrationWave(wave_index=2, repo_ids=["acme-far"], depends_on_waves=[1]),
+                ),
+                wave_index_by_node={},
+                cycle_findings=(),
+                excluded_repo_ids=(),
+            )
+            await store.record_plan(RUN, plan, now=NOW, max_usd_per_repo=8.0)
+            clock = SteppableClock()
+            scheduler = _scheduler(repo, store, clock, wave_max_wallclock_s=60)
+
+            # Empty wave 1 the realistic way: move its sole member into a synthetic wave, exactly
+            # as step 6 does for a repo a `blocked_by` recompute freed.
+            moved = await store.append_unblocked_wave(
+                RUN, ["acme-mid"], now=clock(), max_usd_per_repo=8.0
+            )
+            assert moved == 3, "sanity: the synthetic wave lands at MAX(wave_index) + 1"
+
+            await scheduler.open_wave(0)
+            await _set_status(repo, "acme-commons", RepoStatus.SUCCEEDED, clock)
+            clock.advance(120)
+            assert await scheduler.wave_state(0) is WaveState.PARTIAL
+            assert await scheduler.wave_state(1) is WaveState.CLOSED, (
+                "sanity: wave 1 lost its only member to the move and is CLOSED vacuously -- "
+                "this is the gap being closed"
+            )
+
+            with pytest.raises(WaveNotReadyError):
+                await scheduler.open_wave(2)
+        finally:
+            await read_conn.close()
+
+
 # --------------------------------------------------------------------------------------
 # admission
 # --------------------------------------------------------------------------------------
