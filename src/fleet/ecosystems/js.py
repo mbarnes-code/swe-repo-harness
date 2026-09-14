@@ -135,8 +135,17 @@ def _needs_npm_hub(unit: BuildUnit) -> bool:
     `root_targets` and `resolution`, because a unit that emits the `npm_translate_lock` tag but
     no lockfile — or a lockfile but no macro at the root — fails inside the ruleset with a
     message about our file.
+
+    **Only `Ecosystem.NPM` coordinates count** (D139, matching `334edeb`'s `py.py` contributor
+    gate): `external_coordinates` is re-read from every manifest the repo ships, not filtered by
+    the unit's own ecosystem, so a JS unit sharing a directory with a foreign manifest (a `go.mod`
+    beside its `package.json`) can carry only non-NPM coordinates. Such a unit has nothing for the
+    `@npm` hub to link and must not become an importer with an empty manifest.
     """
-    return bool(unit.external_coordinates or _first_party(unit))
+    return bool(
+        any(coordinate.ecosystem is Ecosystem.NPM for coordinate in unit.external_coordinates)
+        or _first_party(unit)
+    )
 
 
 def _first_party(unit: BuildUnit) -> list[InternalDep]:
@@ -289,6 +298,11 @@ def _unit_package_json(unit: BuildUnit) -> str:
 
     Sorted keys and a trailing newline because this text is an input to a lockfile that is
     committed onto the integration branch: two runs must produce the same bytes (§11.6).
+
+    **Only `Ecosystem.NPM` external coordinates are eligible** (D139, matching `334edeb`'s
+    `py.py`/`jvm.py`/`rust.py` fix): a stray foreign-ecosystem coordinate on this unit must not
+    render into the emitted `dependencies` block, or a Go/PyPI package name would poison this
+    repo's importer manifest and, downstream, the resolved `pnpm-lock.yaml`.
     """
     dest = unit.dest.strip("/")
     published = unit.published
@@ -297,6 +311,7 @@ def _unit_package_json(unit: BuildUnit) -> str:
         for coordinate in sorted(
             unit.external_coordinates, key=lambda c: (c.key, c.version_spec or "")
         )
+        if coordinate.ecosystem is Ecosystem.NPM
     }
     dependencies.update(
         {
@@ -586,9 +601,18 @@ class JsAdapter(EcosystemAdapter):
         `external_labels()` structurally unable to name a sibling, so a `ts_project` was left
         depending on `//ts/acme/lib:lib` — a target that supplies the declarations to the action
         and no `node_modules` entry for `tsc` to resolve the specifier through.
+
+        **Only `Ecosystem.NPM` coordinates from `external_coordinates`** (D139, matching
+        `334edeb`'s `py.py`/`jvm.py`/`rust.py` fix and `go.py`'s pre-existing `_go_requires`
+        filter): `external_coordinates` is re-read from every manifest the repo ships, not
+        filtered by the unit's own ecosystem, so a stray foreign coordinate (a `go.mod` sharing
+        this unit's directory) would otherwise poison the fleet-wide `@npm` hub with a package
+        `npm_translate_lock` cannot resolve. The first-party siblings' `published` coordinates
+        need no such filter — they are synthesized above from this adapter's own internal deps
+        and are NPM coordinates by construction.
         """
         coordinates = [
-            *unit.external_coordinates,
+            *(c for c in unit.external_coordinates if c.ecosystem is Ecosystem.NPM),
             *(dep.published for dep in _first_party(unit) if dep.published is not None),
         ]
         return [
