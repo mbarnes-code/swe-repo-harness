@@ -10666,3 +10666,391 @@ def test_models_check_reports_unregistered_backends_and_strict_fails_closed(
     strict = runner.invoke(app, [*base_args(workspace), "models", "check", "--strict"])
     assert strict.exit_code == ExitCode.TIER_UNAVAILABLE == 8, strict.output
     assert "anthropic" in strict.output
+
+
+# ---------------------------------------------------------------------------------------
+# VerifyPipelineWorker (round VIII, §15.1 item 3 Wave 7.5 batch 42) -- `run()`/
+# `preconditions_hold()`/`_handoff()`/`_absorb()`/`VerifyOutput.equivalence`/`_worker()`
+# branch coverage the e2e suite (`tests/test_build_e2e.py`) never isolates: it always drives
+# the composite worker through a REAL buildverify+rdepverify pair over `FakeBazel`, so a
+# `partial`-with-no-error buildverify, an `ok` status carrying no output, a resumed dispatch
+# that must skip buildverify entirely, and `_absorb`'s empty-`test_command` guard are all
+# reachable in production but never actually exercised there.
+# ---------------------------------------------------------------------------------------
+
+
+async def test_verify_preconditions_hold_is_false_with_no_remaining_units_recorded(
+    worker_ctx: WorkerContext,
+) -> None:
+    """A payload with `remaining_units=None` never went through `_verify_payloads` (which always
+    sets it to `VERIFY_UNITS` on a fresh dispatch or the checkpoint's remainder on resume) -- this
+    worker refuses it outright, BEFORE even probing `ctx.workdir`.
+    """
+    from fleet.cli import VerifyInput, VerifyPipelineWorker
+
+    worker = VerifyPipelineWorker()
+    payload = VerifyInput(
+        repo_id="acme-commons",
+        dest="libs/widget",
+        integration_ref="refs/fleet/test/integration/0",
+        remaining_units=None,
+    )
+    assert await worker.preconditions_hold(worker_ctx, payload) is False
+
+
+async def test_verify_preconditions_hold_checks_the_real_workdir_when_units_are_named(
+    worker_ctx: WorkerContext, tmp_path: Path
+) -> None:
+    """The other half: once `remaining_units` is set, the precondition is a REAL `is_dir` probe
+    on `ctx.workdir`, not a constant `True` -- a worktree a sibling deleted from under the lease
+    must refuse here rather than dispatch into a directory that no longer exists.
+    """
+    from fleet.cli import VERIFY_UNITS, VerifyInput, VerifyPipelineWorker
+
+    worker = VerifyPipelineWorker()
+    payload = VerifyInput(
+        repo_id="acme-commons",
+        dest="libs/widget",
+        integration_ref="refs/fleet/test/integration/0",
+        remaining_units=tuple(VERIFY_UNITS),
+    )
+    missing_ctx = replace(worker_ctx, workdir=str(tmp_path / "gone"))
+    assert await worker.preconditions_hold(missing_ctx, payload) is False
+
+    present_ctx = replace(worker_ctx, workdir=str(tmp_path))
+    assert await worker.preconditions_hold(present_ctx, payload) is True
+
+
+async def test_verify_run_skips_buildverify_entirely_when_already_landed(
+    worker_ctx: WorkerContext,
+) -> None:
+    """Resuming after `VERIFY_UNIT` already landed must dispatch ONLY rdepverify -- re-running
+    buildverify would re-execute `bazel build`/`bazel test` against a tree Phase 4 already
+    verified this attempt, silently doubling the cost §12's build-verification-cost bound
+    polices. `remaining_units=(RDEPS_UNIT,)` is exactly the checkpoint a re-entrant attempt 2
+    carries, and this also proves `buildverify_usage` stays the zero seed rather than leaking a
+    stale value into the accumulated total when buildverify never ran.
+    """
+    from fleet.cli import (
+        BUILDVERIFY_STEP,
+        RDEPS_UNIT,
+        RDEPVERIFY_STEP,
+        VERIFY_UNIT,
+        VerifyInput,
+        VerifyPipelineWorker,
+    )
+    from fleet.models.tasks import TokenUsage, VerificationReport
+    from fleet.workers.base import WorkerResult
+    from fleet.workers.rdepverify import RdepverifyInput, RdepverifyOutput
+
+    class _ExplodingBuildverify:
+        async def run(self, ctx: WorkerContext, payload: object) -> WorkerResult[Any]:
+            raise AssertionError("buildverify must not run when VERIFY_UNIT is already landed")
+
+    class _StubRdepverify:
+        async def run(
+            self, ctx: WorkerContext, payload: RdepverifyInput
+        ) -> WorkerResult[RdepverifyOutput]:
+            report = VerificationReport(
+                run_id=ctx.run_id, repo_id=ctx.repo_id, build_ok=True, test_ok=True, verdict="PASS"
+            )
+            return WorkerResult[RdepverifyOutput](
+                status="ok",
+                output=RdepverifyOutput(
+                    report=report,
+                    integration_ref=payload.integration_ref,
+                    target_pattern_file="artifacts/pattern.txt",
+                ),
+                completed_units=[RDEPS_UNIT],
+                usage=TokenUsage(cost_usd=2.5),
+            )
+
+    worker = VerifyPipelineWorker()
+    worker._workers[BUILDVERIFY_STEP] = _ExplodingBuildverify()  # type: ignore[index]
+    worker._workers[RDEPVERIFY_STEP] = _StubRdepverify()  # type: ignore[index]
+
+    payload = VerifyInput(
+        repo_id="acme-commons",
+        dest="libs/widget",
+        integration_ref="refs/fleet/test/integration/0",
+        remaining_units=(RDEPS_UNIT,),
+    )
+
+    result = await worker.run(worker_ctx, payload)
+
+    assert result.status == "ok"
+    assert set(result.completed_units) == {VERIFY_UNIT, RDEPS_UNIT}
+    assert result.output is not None
+    assert result.output.build_ok is False, "skipped buildverify must not fabricate a pass"
+    assert result.output.test_ok is False
+    assert result.usage.cost_usd == 2.5, "buildverify usage must stay zero when it never ran"
+    assert result.evidence == [payload.integration_ref, "artifacts/pattern.txt"]
+
+
+async def test_verify_run_tolerates_a_buildverify_ok_result_carrying_no_output(
+    worker_ctx: WorkerContext,
+) -> None:
+    """`WorkerResult.output` is `O | None` for every worker in the protocol -- an `ok` status
+    does not itself guarantee a payload. `run()`'s `if own is not None:` guard must survive that
+    combination rather than raising on `own.steps`/`own.build_ok` against `None`, and still land
+    `VERIFY_UNIT` (the step genuinely completed; only its optional evidence payload was empty)
+    before moving on to rdepverify.
+    """
+    from fleet.cli import (
+        BUILDVERIFY_STEP,
+        RDEPVERIFY_STEP,
+        VERIFY_UNIT,
+        VerifyInput,
+        VerifyPipelineWorker,
+    )
+    from fleet.models.tasks import VerificationReport
+    from fleet.workers.base import WorkerResult
+    from fleet.workers.buildverify import BuildverifyInput, BuildverifyOutput
+    from fleet.workers.rdepverify import RdepverifyInput, RdepverifyOutput
+
+    class _EmptyOkBuildverify:
+        async def run(
+            self, ctx: WorkerContext, payload: BuildverifyInput
+        ) -> WorkerResult[BuildverifyOutput]:
+            return WorkerResult[BuildverifyOutput](
+                status="ok", output=None, completed_units=["build"]
+            )
+
+    class _StubRdepverify:
+        async def run(
+            self, ctx: WorkerContext, payload: RdepverifyInput
+        ) -> WorkerResult[RdepverifyOutput]:
+            report = VerificationReport(
+                run_id=ctx.run_id, repo_id=ctx.repo_id, build_ok=True, test_ok=True, verdict="PASS"
+            )
+            return WorkerResult[RdepverifyOutput](
+                status="ok",
+                output=RdepverifyOutput(report=report, integration_ref=payload.integration_ref),
+                completed_units=["rdeps"],
+            )
+
+    worker = VerifyPipelineWorker()
+    worker._workers[BUILDVERIFY_STEP] = _EmptyOkBuildverify()  # type: ignore[index]
+    worker._workers[RDEPVERIFY_STEP] = _StubRdepverify()  # type: ignore[index]
+
+    payload = VerifyInput(
+        repo_id="acme-commons", dest="libs/widget", integration_ref="refs/fleet/test/integration/0"
+    )
+    result = await worker.run(worker_ctx, payload)
+
+    assert result.status == "ok"
+    assert VERIFY_UNIT in result.completed_units
+    assert result.output is not None
+    assert result.output.build_ok is False
+    assert result.output.steps == []
+
+
+async def test_verify_handoff_synthesizes_an_error_for_a_wordless_partial_buildverify(
+    worker_ctx: WorkerContext,
+) -> None:
+    """`_handoff` maps a `partial` step to `failed` and must fabricate a structured `WorkerError`
+    when the step itself supplied none -- `WorkerResult`'s own validator allows `partial` with
+    `error=None` (only `failed`/`timeout` require one), so a buildverify that lands SOME units and
+    then stops without an error is a real, constructible input this worker must not crash on, and
+    the result must still carry actionable `stderr_tail` for `retry.py` to read rather than
+    reporting `failed` with nothing.
+    """
+    from fleet.cli import (
+        BUILDVERIFY_STEP,
+        RDEPS_UNIT,
+        VERIFY_UNIT,
+        VerifyInput,
+        VerifyPipelineWorker,
+    )
+    from fleet.models.enums import FailureClass
+    from fleet.workers.base import WorkerResult
+    from fleet.workers.buildverify import BuildverifyInput, BuildverifyOutput
+
+    class _PartialBuildverify:
+        async def run(
+            self, ctx: WorkerContext, payload: BuildverifyInput
+        ) -> WorkerResult[BuildverifyOutput]:
+            return WorkerResult[BuildverifyOutput](
+                status="partial",
+                output=BuildverifyOutput(
+                    dest=payload.dest, integration_ref=payload.integration_ref, build_ok=True
+                ),
+                completed_units=["build"],
+                error=None,
+            )
+
+    worker = VerifyPipelineWorker()
+    worker._workers[BUILDVERIFY_STEP] = _PartialBuildverify()  # type: ignore[index]
+
+    payload = VerifyInput(
+        repo_id="acme-commons",
+        dest="libs/widget",
+        integration_ref="refs/fleet/test/integration/0",
+    )
+    result = await worker.run(worker_ctx, payload)
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.failure_class == FailureClass.UNKNOWN
+    assert result.error.retryable is True
+    assert "verify: a step returned 'partial' with no error" in result.error.stderr_tail
+    assert VERIFY_UNIT not in result.completed_units
+    assert result.remaining_units == [VERIFY_UNIT, RDEPS_UNIT]
+    assert result.evidence == [payload.integration_ref]
+
+
+async def test_verify_handoff_forwards_the_real_error_after_verify_unit_already_landed(
+    worker_ctx: WorkerContext,
+) -> None:
+    """Once buildverify lands `VERIFY_UNIT` for real, a later rdepverify timeout must hand back
+    `remaining_units=[RDEPS_UNIT]` only (not `VERIFY_UNIT`, which already landed) and the
+    ORIGINAL `WorkerError` untouched -- `_handoff`'s synthetic-error branch exists only for a
+    step that supplied none, and must never overwrite one a step already gave it.
+    """
+    from fleet.cli import (
+        BUILDVERIFY_STEP,
+        RDEPS_UNIT,
+        RDEPVERIFY_STEP,
+        VERIFY_UNIT,
+        VerifyInput,
+        VerifyPipelineWorker,
+    )
+    from fleet.models.enums import FailureClass
+    from fleet.workers.base import WorkerError, WorkerResult
+    from fleet.workers.buildverify import BuildverifyInput, BuildverifyOutput
+    from fleet.workers.rdepverify import RdepverifyInput, RdepverifyOutput
+
+    class _OkBuildverify:
+        async def run(
+            self, ctx: WorkerContext, payload: BuildverifyInput
+        ) -> WorkerResult[BuildverifyOutput]:
+            return WorkerResult[BuildverifyOutput](
+                status="ok",
+                output=BuildverifyOutput(
+                    dest=payload.dest,
+                    integration_ref=payload.integration_ref,
+                    build_ok=True,
+                    test_ok=True,
+                ),
+                completed_units=["build", "test"],
+            )
+
+    real_error = WorkerError(
+        failure_class=FailureClass.TRANSIENT_INFRA,
+        retryable=True,
+        stderr_tail="deadline exceeded",
+    )
+
+    class _TimeoutRdepverify:
+        async def run(
+            self, ctx: WorkerContext, payload: RdepverifyInput
+        ) -> WorkerResult[RdepverifyOutput]:
+            return WorkerResult[RdepverifyOutput](status="timeout", output=None, error=real_error)
+
+    worker = VerifyPipelineWorker()
+    worker._workers[BUILDVERIFY_STEP] = _OkBuildverify()  # type: ignore[index]
+    worker._workers[RDEPVERIFY_STEP] = _TimeoutRdepverify()  # type: ignore[index]
+
+    payload = VerifyInput(
+        repo_id="acme-commons",
+        dest="libs/widget",
+        integration_ref="refs/fleet/test/integration/0",
+    )
+    result = await worker.run(worker_ctx, payload)
+
+    assert result.status == "timeout"
+    assert result.error is real_error, "a real error must never be replaced by a synthetic one"
+    assert result.completed_units == [VERIFY_UNIT]
+    assert result.remaining_units == [RDEPS_UNIT]
+    assert result.output is not None
+    assert result.output.build_ok is True and result.output.test_ok is True, (
+        "the buildverify verdict must survive a later rdepverify failure"
+    )
+    assert result.output.report is None, "closure is None -- _absorb must never run over it"
+
+
+def test_verify_absorb_appends_a_step_record_only_when_rdepverify_ran_a_test_command() -> None:
+    """`_absorb` copies rdeps evidence verbatim and appends ONE `StepRecord` for `RDEPS_UNIT` --
+    but only when `closure.test_command` is non-empty. An empty closure (nothing in the verified
+    target set) must not fabricate a phantom test step with a made-up exit code, and a present but
+    unresolved `test_exit_code` (`None`, no test ran to completion) must map to `-1`, never `0`.
+    """
+    from fleet.cli import RDEPS_UNIT, VerifyOutput, VerifyPipelineWorker
+    from fleet.models.tasks import VerificationReport
+    from fleet.workers.rdepverify import RdepverifyOutput
+
+    base_report = VerificationReport(
+        run_id=uuid.uuid4(), repo_id="acme-commons", build_ok=True, test_ok=True, verdict="PASS"
+    )
+
+    with_tests_output = VerifyOutput(repo_id="acme-commons")
+    with_tests = RdepverifyOutput(
+        report=base_report,
+        test_command=["bazel", "test", "//..."],
+        test_exit_code=None,
+        test_log_path="artifacts/logs/rdeps.log",
+    )
+    VerifyPipelineWorker._absorb(with_tests_output, with_tests)
+    assert len(with_tests_output.steps) == 1
+    step = with_tests_output.steps[0]
+    assert step.unit == RDEPS_UNIT
+    assert step.exit_code == -1, "a None exit_code (no test ran to completion) maps to -1, not 0"
+    assert step.ok is False
+    assert step.log_path == "artifacts/logs/rdeps.log"
+
+    no_tests_output = VerifyOutput(repo_id="acme-commons")
+    without_tests = RdepverifyOutput(report=base_report, test_command=[])
+    VerifyPipelineWorker._absorb(no_tests_output, without_tests)
+    assert no_tests_output.steps == [], "no test_command -> no StepRecord fabricated"
+
+
+def test_verify_output_equivalence_is_full_before_any_report_lands() -> None:
+    """`VerifyOutput.equivalence` must read `FULL` when no report has landed yet (a run that
+    failed before rdepverify ever produced one) rather than raising -- `_handoff`'s `output` is a
+    live `VerifyOutput` a caller may inspect on every failure path, so `report is None` must be a
+    safe, ordinary case rather than one this property is never asked about.
+    """
+    from fleet.cli import VerifyOutput
+    from fleet.models.enums import Equivalence
+
+    assert VerifyOutput(repo_id="acme-commons").equivalence == Equivalence.FULL
+
+
+def test_verify_output_equivalence_always_echoes_the_reports_own_value() -> None:
+    """The other half: once a report lands, `equivalence` must be the REPORT's derived value, not
+    a fresh `FULL` default and not a second, independent derivation the PR body could disagree
+    with.
+    """
+    from fleet.cli import VerifyOutput
+    from fleet.models.enums import Equivalence
+    from fleet.models.tasks import VerificationReport
+
+    report = VerificationReport(
+        run_id=uuid.uuid4(),
+        repo_id="acme-commons",
+        build_ok=True,
+        test_ok=True,
+        rdeps_truncated=True,
+        verdict="PASS",
+    )
+    assert report.equivalence == Equivalence.CLOSURE_SAMPLED
+    output = VerifyOutput(repo_id="acme-commons", report=report)
+    assert output.equivalence == Equivalence.CLOSURE_SAMPLED
+
+
+def test_worker_factory_passes_the_runner_through_only_when_one_is_given() -> None:
+    """`_worker` is the one seam through which `VerifyPipelineWorker.__init__` fetches its two
+    steps from the REGISTRY -- `factory()` with no `runner` kwarg when none was given (never a
+    literal `runner=None` the constructor would have to special-case), and `factory(runner=...)`
+    when one was.
+    """
+    from fleet.cli import _worker
+    from fleet.workers.buildverify import BuildverifyWorker
+
+    bare = _worker("buildverify")
+    assert isinstance(bare, BuildverifyWorker)
+    assert bare._runner is None
+
+    sentinel: Any = object()
+    wired = _worker("buildverify", runner=sentinel)
+    assert wired._runner is sentinel  # type: ignore[attr-defined]
