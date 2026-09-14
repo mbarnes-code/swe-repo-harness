@@ -30,22 +30,31 @@ from typer.testing import CliRunner
 
 from fleet import cli
 from fleet.cli import (
+    VERIFICATION_KIND,
     ExitCode,
     GlobalOptions,
+    LabelRewriteError,
     PrState,
     StateWriter,
+    _current_stub_states_by_consumer,
     _load_settings,
     _now,
     _pr_records,
+    _revalidation_round_stub_diverged,
+    _rewrite_one_consumer_label,
     _rewrite_superseded_consumer_labels,
+    _round_index_from_revalidation_key,
     _run_one_revalidation_task,
     _run_revalidation_claims_impl,
+    _stub_records_for_revalidation_task,
     _write_pr_record,
     app,
     connect_ro,
     insert_revalidation_task_row,
 )
-from fleet.models.tasks import TokenUsage
+from fleet.models.enums import Equivalence, StubState
+from fleet.models.tasks import StubRecord, TokenUsage
+from fleet.vcs.git import Git
 from tests.test_build_e2e import (  # noqa: F401  (fixtures used by injection)
     _PROVIDER_LABEL,
     _STUB_CONSUMER,
@@ -70,6 +79,7 @@ from tests.test_build_e2e import (  # noqa: F401  (fixtures used by injection)
     transformed,
     verify,
 )
+from tests.test_cli import fresh_db, write_config
 from tests.test_llm_client import BackendReply, FakeBackend
 from tests.test_pr_e2e import (  # noqa: F401  (fixtures used by injection)
     _PROVIDER_FAILS_RULE,
@@ -2666,3 +2676,282 @@ def test_stubs_resolve_dry_run_writes_nothing(
         0
     ][0]
     assert tasks_after == tasks_before, "a dry run must mint no REVALIDATE task"
+
+
+# ---------------------------------------------------------------------------------------
+# Round VIII §15.1 item 3, Wave 7.2 batch 30 -- group G7 (stub/PR label rewrite mechanics).
+# Direct, standalone unit tests of six functions this file otherwise reaches only through the
+# real-Bazel/real-CLI fixtures above. Each targets that function's most load-bearing branch that
+# none of those heavier tests happen to exercise, built on the CHEAPEST fixture that can actually
+# reach the branch -- a plain git repo (no Bazel, no `filter_repo`, no `fleet` e2e tree) for the
+# two git-driven functions, and a bare `fresh_db`-schema SQLite file (no real run) for the two
+# pure-DB ones -- rather than the heavy `fleet`/`monorepo`/`filter_repo` fixtures the rest of this
+# file uses for the mechanisms these six feed into.
+# ---------------------------------------------------------------------------------------
+
+_STAMP = "2026-09-01T00:00:00+00:00"
+
+
+def _seed_run_and_repos(conn: sqlite3.Connection, run_id: str, repos: tuple[str, ...]) -> None:
+    conn.execute(
+        "INSERT INTO runs (run_id, started_at, config_sha256, config_digests, harness_version) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (run_id, _STAMP, "a" * 64, "{}", "0.1.0"),
+    )
+    for repo in repos:
+        conn.execute(
+            "INSERT INTO repos (repo_id, name, url, updated_at) VALUES (?, ?, ?, ?)",
+            (repo, repo, f"https://example.invalid/{repo}", _STAMP),
+        )
+
+
+def test_round_index_from_revalidation_key_parses_the_round_prefix() -> None:
+    """`orchestrator.stubs.revalidation_key` is `'r{round}:{hash}'` -- the ONLY place the round
+    int is encoded (own docstring: "re-deriving it here is cheaper than a schema change").
+    Untested directly anywhere in the suite before this: every existing caller drives it through
+    a real `fleet resume` end to end (`_run_one_revalidation_task`), never asserting the parse
+    itself against a value that would catch a broken prefix strip (e.g. a multi-digit round)."""
+    assert _round_index_from_revalidation_key("r0:abcdef") == 0
+    assert _round_index_from_revalidation_key("r12:deadbeef1234") == 12
+
+
+def test_stub_records_for_revalidation_task_excludes_a_non_superseded_row_at_the_same_task_id(
+    tmp_path: Path,
+) -> None:
+    """Scoped to `state = 'SUPERSEDED'` (own docstring): "a row this task's own round already
+    settled in an earlier, partially-completed attempt (crash-and-retry) is skipped rather than
+    re-settled, since `settle_revalidation` itself raises on a non-SUPERSEDED row." Untested
+    directly: every real-claiming-loop test in this suite happens to seed exactly one row per
+    task, always SUPERSEDED, so the exclusion itself has never fired under test."""
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    run_id = "22222222-2222-4222-8222-222222222222"
+    task_id = "33333333-3333-4333-8333-333333333333"
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        _seed_run_and_repos(conn, run_id, ("acme-consumer", "acme-provider"))
+        for coord_key, state in (
+            ("acme-provider@1.0.0", "SUPERSEDED"),
+            ("acme-provider@2.0.0", "RESOLVED"),
+        ):
+            conn.execute(
+                "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+                "                   provider_repo_id, pinned_version, bazel_label, state, "
+                "                   stub_fidelity, revalidation_task_id, resolved_at, "
+                "                   state_changed_at, created_at) "
+                "VALUES (?, ?, 'acme-consumer', ?, 'acme-consumer', 'acme-provider', '1.0.0', "
+                "        '//third_party/stubs/x', ?, 'PUBLISHED_ARTIFACT', ?, ?, ?, ?)",
+                (str(uuid4()), run_id, coord_key, state, task_id, _STAMP, _STAMP, _STAMP),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    async def _read() -> dict[tuple[str, str], StubRecord]:
+        read_conn = await connect_ro(db_path)
+        try:
+            return await _stub_records_for_revalidation_task(read_conn, run_id, task_id)
+        finally:
+            await read_conn.close()
+
+    records = asyncio.run(_read())
+    assert set(records) == {("acme-consumer", "acme-provider@1.0.0")}, records
+
+
+def test_current_stub_states_by_consumer_reads_the_latest_round_not_the_first(
+    tmp_path: Path,
+) -> None:
+    """"One row per coord_key: the row at that coord_key's own highest `revalidation_round`,
+    since a re-emitted stub inserts a new row rather than mutating the old one" (own docstring,
+    SPEC §3.5.1's append-only audit trail). Untested directly: no test in this suite seeds two
+    rounds of the SAME coord_key and reads this function back, so a regression collapsing the
+    correlated MAX subquery to the wrong row (e.g. the first-inserted one) would pass every
+    existing test in this file."""
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    run_id = "77777777-7777-4777-8777-777777777777"
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        _seed_run_and_repos(conn, run_id, ("acme-consumer", "acme-provider"))
+        for round_, state, resolved_at in (
+            (0, "ACTIVE", None),
+            (1, "SUPERSEDED", _STAMP),
+        ):
+            conn.execute(
+                "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+                "                   provider_repo_id, pinned_version, bazel_label, state, "
+                "                   stub_fidelity, revalidation_round, resolved_at, "
+                "                   state_changed_at, created_at) "
+                "VALUES (?, ?, 'acme-consumer', 'acme-provider@1.0.0', 'acme-consumer', "
+                "        'acme-provider', '1.0.0', '//third_party/stubs/x', ?, "
+                "        'PUBLISHED_ARTIFACT', ?, ?, ?, ?)",
+                (str(uuid4()), run_id, state, round_, resolved_at, _STAMP, _STAMP),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    async def _read() -> dict[str, StubState]:
+        read_conn = await connect_ro(db_path)
+        try:
+            return await _current_stub_states_by_consumer(read_conn, run_id, "acme-consumer")
+        finally:
+            await read_conn.close()
+
+    states = asyncio.run(_read())
+    assert states == {"acme-provider@1.0.0": StubState.SUPERSEDED}, states
+
+
+def _init_bare_monorepo(repo_path: Path) -> Git:
+    """A real git repo with one commit on `integration` -- no Bazel, no `filter_repo`, no
+    `fleet` e2e tree. Enough for the two functions below, since both raise/decide off `git log`
+    alone before touching anything a real worktree render would need."""
+    repo_path.mkdir(parents=True, exist_ok=True)
+    git = Git(repo_path)
+
+    async def _setup() -> None:
+        await git.exec(["init", "-b", "integration"])
+        (repo_path / "README.md").write_text("base\n", encoding="utf-8")
+        await git.exec(["add", "-A"])
+        await git.commit("base commit")
+
+    asyncio.run(_setup())
+    return git
+
+
+def test_revalidation_round_stub_diverged_requires_both_halves_not_either(
+    tmp_path: Path,
+) -> None:
+    """§12.39 case (i)'s differential (own docstring): "`STUB_DIVERGED` is reachable ONLY when
+    BOTH halves hold for this exact round" -- a preceding STUB_LIMITED verification (Half A) AND
+    an all-Phase-3 commit set (Half B). `test_t3_stub_diverged_is_reached_through_the_real_
+    claiming_loop_not_a_direct_call` above proves the case where both hold, end to end under real
+    Bazel; nothing in the suite proves the disclosed narrowing's converse directly -- Half A alone,
+    with a genuinely non-Phase-3 commit landed on the branch, must NOT read as divergence."""
+    git = _init_bare_monorepo(tmp_path / "monorepo")
+
+    async def _branch_with_one_phase3_commit() -> None:
+        await git.exec(["checkout", "-b", "migrate/acme-consumer"])
+        (git.path / "BUILD.bazel").write_text("phase3\n", encoding="utf-8")
+        await git.exec(["add", "-A"])
+        await git.commit("phase-3 emission", trailers={"Fleet-Phase": "3"})
+
+    asyncio.run(_branch_with_one_phase3_commit())
+
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    run_id = "44444444-4444-4444-8444-444444444444"
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        _seed_run_and_repos(conn, run_id, ("acme-consumer",))
+        conn.execute(
+            "INSERT INTO findings (run_id, repo_id, kind, fingerprint, payload, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                "acme-consumer",
+                VERIFICATION_KIND,
+                "fp-1",
+                json.dumps({"report": {"equivalence": Equivalence.STUB_LIMITED.value}}),
+                _STAMP,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    async def _diverged() -> bool:
+        read_conn = await connect_ro(db_path)
+        try:
+            return await _revalidation_round_stub_diverged(
+                git,
+                read_conn,
+                run_id=run_id,
+                repo_id="acme-consumer",
+                branch="migrate/acme-consumer",
+                base="integration",
+            )
+        finally:
+            await read_conn.close()
+
+    # Half A holds (preceding STUB_LIMITED) and Half B holds (the branch's only commit ahead of
+    # `integration` is this exact rewrite's own Phase-3 emission) -> True.
+    assert asyncio.run(_diverged()) is True
+
+    async def _add_non_phase3_commit() -> None:
+        (git.path / "README.md").write_text("drift\n", encoding="utf-8")
+        await git.exec(["add", "-A"])
+        await git.commit("an unrelated commit landed on the branch")  # no Fleet-Phase trailer
+
+    asyncio.run(_add_non_phase3_commit())
+
+    # Half A still holds (the finding row is untouched), but Half B no longer does -- must NOT
+    # read as divergence: calling a legitimate/unrelated commit "divergence" is the false positive
+    # the docstring's own worked example warns against.
+    assert asyncio.run(_diverged()) is False
+
+
+def test_rewrite_superseded_consumer_labels_reports_every_consumer_failed_when_no_monorepo(
+    tmp_path: Path,
+) -> None:
+    """ADR-0128 judgment call 1 (own docstring): "A missing/unavailable monorepo checkout
+    (`MonorepoUnavailableError`) is caught here rather than left to propagate and abort the WHOLE
+    `_pr_sync_impl` call" -- and every consumer named in the same call gets its own `FAILED: ...`
+    outcome, not just the first. Untested directly: every real-CLI test in this file runs against
+    a real, present monorepo fixture, so this catch branch has never actually fired under test
+    (the only existing reference to its `"FAILED: ..."` shape,
+    `test_pr_sync_lines_surfaces_a_failed_label_rewrite` above, feeds a HAND-WRITTEN string
+    straight to `_pr_sync_lines` and never calls this function at all)."""
+    settings = _load_settings(GlobalOptions(config_path=write_config(tmp_path)))
+    # FLEET_YAML's default `run.monorepo_path` (`../acme-monorepo`, relative to `settings.root`)
+    # is never created by `write_config` -- `_monorepo_checkout` raises `MonorepoUnavailableError`
+    # on the missing `.git` directory before this function ever opens `path` (the DB doesn't even
+    # need to exist for this branch to fire).
+    outcomes = asyncio.run(
+        _rewrite_superseded_consumer_labels(
+            settings,
+            tmp_path / "state" / "fleet.db",
+            run_id="55555555-5555-4555-8555-555555555555",
+            consumer_repo_ids=["acme-a", "acme-b"],
+        )
+    )
+    assert set(outcomes) == {"acme-a", "acme-b"}, outcomes
+    assert all(v.startswith("FAILED: ") for v in outcomes.values()), outcomes
+
+
+def test_rewrite_one_consumer_label_refuses_when_the_branch_carries_an_unrecognized_commit(
+    tmp_path: Path,
+) -> None:
+    """The corrected precondition check (own docstring, "DISCLOSED NARROWING"): "every commit
+    unique to `migrate/<consumer>` relative to `integration` ... must be either NONE or a PRIOR
+    round of this exact function's own rewrite" -- a commit that landed on the branch by some
+    other route (a rebase pulling in unrelated work, a hand-applied patch) must refuse loudly
+    rather than silently re-rendering over it. Untested directly: the only existing exercise of
+    this string shape is a HAND-WRITTEN `"FAILED: ... does not exist"` fed straight to
+    `_pr_sync_lines` (`test_pr_sync_lines_surfaces_a_failed_label_rewrite` above), which never
+    calls this function at all -- and the branch this test targets (an UNRECOGNIZED commit, as
+    opposed to a wholly missing branch) is not exercised anywhere in this file."""
+    git = _init_bare_monorepo(tmp_path / "monorepo")
+
+    async def _branch_with_a_foreign_commit() -> None:
+        await git.exec(["checkout", "-b", "migrate/acme-consumer"])
+        (git.path / "extra.txt").write_text("drift\n", encoding="utf-8")
+        await git.exec(["add", "-A"])
+        await git.commit("a commit this function never made")  # no Fleet-Phase trailer
+
+    asyncio.run(_branch_with_a_foreign_commit())
+
+    settings = _load_settings(GlobalOptions(config_path=write_config(tmp_path)))
+
+    async def _rewrite() -> str:
+        return await _rewrite_one_consumer_label(
+            settings,
+            git,
+            run_id="66666666-6666-4666-8666-666666666666",
+            consumer_repo_id="acme-consumer",
+            facts={},
+            internal_deps={},
+            manifest_paths={},
+            owned_keys=frozenset(),
+            stub_root=tmp_path / "stub-resolve",
+        )
+
+    with pytest.raises(LabelRewriteError, match="moved since it was last ingested"):
+        asyncio.run(_rewrite())
