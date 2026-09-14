@@ -36,10 +36,13 @@ from fleet.cli import (
     LabelRewriteError,
     PrState,
     StateWriter,
+    UsageError,
     _current_stub_states_by_consumer,
     _load_settings,
     _now,
     _pr_records,
+    _pr_sync_lines,
+    _refuse_unresolved_stubs,
     _revalidation_round_stub_diverged,
     _rewrite_one_consumer_label,
     _rewrite_superseded_consumer_labels,
@@ -2955,3 +2958,154 @@ def test_rewrite_one_consumer_label_refuses_when_the_branch_carries_an_unrecogni
 
     with pytest.raises(LabelRewriteError, match="moved since it was last ingested"):
         asyncio.run(_rewrite())
+
+
+# ---------------------------------------------------------------------------------------
+# Batch 31 (round VIII, §15.1 item 3, Wave 7.2) -- group G7's orchestration layer sitting ON TOP
+# of the per-task label-rewrite mechanics above (batch 30's scope, explicitly excluded there):
+# `_run_revalidation_claims_impl`, `_pr_sync_lines`, `_refuse_unresolved_stubs`.
+# ---------------------------------------------------------------------------------------
+
+
+def test_run_revalidation_claims_impl_reports_every_candidate_failed_when_no_monorepo(
+    tmp_path: Path,
+) -> None:
+    """`_run_revalidation_claims_impl`'s OWN `except MonorepoUnavailableError` catch (own comment:
+    "Mirrors `_rewrite_superseded_consumer_labels`'s own catch: a temporarily-unavailable monorepo
+    checkout must not abort the REST of `fleet resume`... reported per candidate task rather than
+    raised") is a DIFFERENT code path from `_rewrite_superseded_consumer_labels`'s own catch
+    (batch 30's `test_rewrite_superseded_consumer_labels_reports_every_consumer_failed_when_no_
+    monorepo`, above): distinct function, distinct `try/except` block, distinct return shape
+    (`{"claimed": [...], "outcomes": {...}}`, keyed by `task_id` -- not `_rewrite_superseded_
+    consumer_labels`'s bare `consumer_repo_id -> outcome` dict). Untested directly: every
+    real-Bazel test in this file drives this function against a real, present monorepo fixture
+    (the `fleet`/`monorepo` fixtures), so THIS function's own catch has never fired under test --
+    a mutation deleting this `try/except` would raise a raw `MonorepoUnavailableError` straight
+    out of `fleet resume` instead of a per-task `FAILED:` outcome, and nothing in the suite would
+    notice.
+
+    Reached with a schema-only DB (`fresh_db`) carrying one PENDING REVALIDATE `tasks` row seeded
+    by hand -- no `stubs` fixture machinery needed, since the SELECT this function issues reads
+    only from `tasks`, and the raw `sqlite3.connect()` used to seed it does not enable FK
+    enforcement (`state/db.py` turns that on only for connections opened via `connect`/
+    `connect_ro`).
+    """
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    run_id = "77777777-7777-4777-8777-777777777777"
+    task_id = "88888888-8888-4888-8888-888888888888"
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        _seed_run_and_repos(conn, run_id, ("acme-consumer",))
+        conn.execute(
+            "INSERT INTO tasks (task_id, run_id, repo_id, phase, kind, revalidation_key, "
+            "                   dest_path, max_attempts, status, ladder, created_at) "
+            "VALUES (?, ?, 'acme-consumer', 4, 'REVALIDATE', ?, 'py/acme_consumer', 3, "
+            "        'PENDING', "
+            '        \'[null,"EVIDENCE_ONLY","EVIDENCE_PLUS_REJECTED_APPROACHES"]\', ?)',
+            (task_id, run_id, f"r1:{uuid4().hex}", _STAMP),
+        )
+    finally:
+        conn.close()
+
+    # FLEET_YAML's default `run.monorepo_path` (relative to `settings.root`) is never created by
+    # `write_config` -- `_monorepo_checkout` raises `MonorepoUnavailableError` on the missing
+    # `.git` directory before any candidate task is dispatched.
+    settings = _load_settings(GlobalOptions(config_path=write_config(tmp_path)))
+
+    result = asyncio.run(_run_revalidation_claims_impl(settings, db_path, run_id, now=_now()))
+    assert result["claimed"] == [], result
+    outcomes = result["outcomes"]
+    assert isinstance(outcomes, dict)
+    assert set(outcomes) == {task_id}, outcomes
+    assert outcomes[task_id].startswith("FAILED: "), outcomes
+    assert "no git repository at" in outcomes[task_id], outcomes
+
+
+def test_pr_sync_lines_reports_a_correct_count_and_names_every_newly_merged_repo() -> None:
+    """The two existing `_pr_sync_lines` tests above (`test_pr_sync_lines_surfaces_a_failed_
+    label_rewrite`, `test_pr_sync_lines_is_silent_when_every_rewrite_succeeded`) both exercise
+    only the `label_rewrites` branch this function's own docstring calls out as the "should-fix"
+    addition; neither asserts the base summary line's counts or the per-repo `merged` bullets,
+    which are this function's ORIGINAL, pre-D107 output and the only place an operator watching a
+    plain (non-`--json`) `fleet pr --sync` ever sees `polled`/`merged`/`closed` at all (the JSON
+    payload carries the raw lists separately, and no CLI-level test in `tests/test_pr_e2e.py`
+    asserts on `result.output` text for this command either -- they all parse `--json`). A
+    mutation swapping `len(merged)` for `len(closed)` in the summary string, or iterating `closed`
+    instead of `merged` for the per-repo bullets, would pass both existing tests (each seeds only
+    `label_rewrites`, with `polled`/`merged`/`closed` fixed at one element or empty) and would
+    still escape unless the summary line and the merged bullets are checked in full, which this
+    test does with three distinct repos split across all three lists.
+    """
+    lines = _pr_sync_lines(
+        {
+            "polled": ["acme-a", "acme-b", "acme-c"],
+            "merged": ["acme-a", "acme-b"],
+            "closed": ["acme-c"],
+        }
+    )
+    assert lines[0] == "pr --sync: polled 3 open PR(s); 2 newly MERGED, 1 CLOSED", lines
+    assert "  merged acme-a" in lines, lines
+    assert "  merged acme-b" in lines, lines
+    assert not any("acme-c" in line for line in lines), lines
+    assert not any("FAILED" in line for line in lines), lines
+
+
+def test_refuse_unresolved_stubs_reports_the_true_total_not_just_the_five_listed(
+    tmp_path: Path,
+) -> None:
+    """The refusal message reports `len(rows)` -- the TRUE total -- while the human-readable
+    `listed` string only ever joins the first 5 (`rows[:5]`, own comment: kept short so an
+    operator's terminal is not flooded by a fleet-wide refusal). Every existing test of this
+    function (`test_pr_ready_refuses_while_a_stub_is_unresolved` in `tests/test_cli.py`,
+    `test_pr_ready_refuses_a_superseded_stub_the_same_as_an_active_one` in
+    `tests/test_pr_e2e.py`, and every other caller in this file) seeds exactly ONE unresolved
+    stub row, so `rows[:5] == rows` always holds under test today -- a mutation reporting
+    `len(listed_rows)` instead of `len(rows)` in the count, or widening the slice to `rows[:7]`,
+    would pass every one of them. Seeded here with 7 rows across 7 distinct consumers, ordered
+    the same way the query itself orders (`ORDER BY consumer_repo_id, ...`), so the reported
+    count (7) and the listed subset (the first 5, alphabetically) provably diverge.
+    """
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    run_id = "99999999-9999-4999-8999-999999999999"
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        _seed_run_and_repos(
+            conn, run_id, (*(f"acme-{i}" for i in range(7)), "acme-provider")
+        )
+        for i in range(7):
+            conn.execute(
+                "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+                "                   provider_repo_id, pinned_version, bazel_label, state, "
+                "                   stub_fidelity, state_changed_at, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'acme-provider', '1.0.0', ?, 'ACTIVE', "
+                "        'PUBLISHED_ARTIFACT', ?, ?)",
+                (
+                    f"stub-{i}",
+                    run_id,
+                    f"acme-{i}",
+                    f"maven:com.acme:lib{i}",
+                    f"acme-{i}",
+                    f"//third_party/stubs:lib{i}",
+                    _STAMP,
+                    _STAMP,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    async def _call() -> None:
+        read_conn = await connect_ro(db_path)
+        try:
+            await _refuse_unresolved_stubs(read_conn, run_id, None)
+        finally:
+            await read_conn.close()
+
+    with pytest.raises(UsageError) as excinfo:
+        asyncio.run(_call())
+    message = str(excinfo.value)
+    assert "7 stub(s)" in message, message
+    for i in range(5):
+        assert f"acme-{i}" in message, message
+    assert "acme-5" not in message, message
+    assert "acme-6" not in message, message
