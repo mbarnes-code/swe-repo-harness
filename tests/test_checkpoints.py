@@ -185,6 +185,49 @@ async def test_a_checkpoint_written_by_another_model_invalidates(db_path: Path) 
     assert result.rejection is CheckpointRejection.MODEL_MISMATCH
 
 
+async def test_an_envelope_model_name_disagreeing_with_the_column_invalidates(
+    db_path: Path,
+) -> None:
+    """`load()` carries TWO separate model-name checks: one against the `model_name` SQL column
+    (`stored_name != expected`, covered by the test above), and a second, independent one against
+    the `model` field embedded INSIDE the JSON envelope itself (`envelope["model"] != expected`).
+    `save()` always writes both identically, so the second check is unreachable through normal
+    use — it only matters against a row where the column and the envelope have gone out of sync
+    (e.g. a hand-repaired row, or a bug in a future writer). Untested until now: a mutation
+    deleting this second check would pass every other test here, including the one above, which
+    only ever tampers via a genuinely different model class where BOTH checks would fire together
+    and so cannot tell them apart.
+    """
+    async with StateWriter(db_path, owner="test-writer") as writer:
+        await save(writer, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, payload=_payload())
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT payload FROM checkpoints WHERE run_id = ?", (RUN,)).fetchone()
+        envelope = json.loads(bytes(row[0]).decode("utf-8"))
+        # the `model_name` COLUMN is left untouched (still the correct CycleFinding qualname);
+        # only the envelope's embedded "model" field is corrupted.
+        envelope["model"] = "some.other.module.SomeOtherModel"
+        conn.execute(
+            "UPDATE checkpoints SET payload = ? WHERE run_id = ?",
+            (json.dumps(envelope).encode("utf-8"), RUN),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ro = await connect_ro(db_path)
+    try:
+        result = await load(
+            ro, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding
+        )
+    finally:
+        await ro.close()
+
+    assert result.payload is None
+    assert result.rejection is CheckpointRejection.MODEL_MISMATCH
+
+
 async def test_a_truncated_blob_invalidates_instead_of_raising(db_path: Path) -> None:
     """A torn or tampered payload re-runs the phase; it never escapes as a JSON error.
 

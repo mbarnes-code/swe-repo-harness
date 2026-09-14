@@ -411,6 +411,51 @@ async def test_stop_before_start_is_a_no_op() -> None:
     assert sampler.is_running is False
 
 
+async def test_a_sample_sitting_exactly_at_either_ceiling_is_a_breach() -> None:
+    """`_tick()`'s own docstring: "`>=`, not `>`, for both: 'keeps RSS under the ceiling' (§12.22)
+    reads a sample sitting exactly AT the ceiling as not under it." Every other test in this file
+    uses readings comfortably above or below a ceiling, never exactly equal to one -- so a
+    mutation flipping either `>=` to `>` in `_tick()` (`total_bytes >= self._host_ceiling_bytes`
+    or `own_bytes >= self._own_ceiling_bytes`) would pass every existing test unnoticed. Checked
+    for both ceilings independently, mirroring how the rest of this file keeps the untested leg
+    "far out of reach" rather than at zero (zero would not discriminate `>=` from `>` either)."""
+    host_ceiling_mb = 10
+    sampler = HostMemorySampler(
+        run_id=RUN_ID,
+        max_host_rss_mb=host_ceiling_mb,
+        max_rss_mb=100_000,  # this leg is not under test here: kept far out of reach
+        interval_s=0.001,
+        cgroup_reader=lambda: host_ceiling_mb * _MIB,  # exactly at the ceiling, not over it
+        rss_reader=lambda: 0,
+        container_reader=_no_containers(),
+    )
+    sampler.start()
+    try:
+        await _settle(interval_s=0.001)
+        assert sampler.guard() is HaltReason.HOST_MEMORY
+        assert sampler.breach_kinds() == frozenset({"host_rss"})
+    finally:
+        await sampler.stop()
+
+    own_ceiling_mb = 10
+    sampler = HostMemorySampler(
+        run_id=RUN_ID,
+        max_host_rss_mb=100_000,  # this leg is not under test here: kept far out of reach
+        max_rss_mb=own_ceiling_mb,
+        interval_s=0.001,
+        cgroup_reader=lambda: 0,
+        rss_reader=lambda: own_ceiling_mb * _MIB,  # exactly at the ceiling, not over it
+        container_reader=_no_containers(),
+    )
+    sampler.start()
+    try:
+        await _settle(interval_s=0.001)
+        assert sampler.guard() is HaltReason.HOST_MEMORY
+        assert sampler.breach_kinds() == frozenset({"own_rss"})
+    finally:
+        await sampler.stop()
+
+
 async def test_a_reader_failure_surfaces_loudly_when_stopped_rather_than_being_swallowed() -> None:
     """Rule 11: an unreadable host is not the same fact as "the host has room." A `_tick()`
     exception must not vanish -- it is stored on the background task and re-raised when `stop()`

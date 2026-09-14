@@ -557,6 +557,40 @@ async def test_emit_failure_does_not_propagate_to_the_caller(
     assert "event_emit_failed" in log_stream.getvalue()
 
 
+async def test_a_naive_now_fails_the_build_step_and_is_reported_without_raising(
+    tmp_path: Path,
+) -> None:
+    """`_build_row` rejects a naive `now` outright ("every persisted instant is UTC (§11.5)"),
+    and `emit()` wraps the whole `_build_row` call in its own `except Exception` block — the ONE
+    failure branch nothing else in this file exercises. Every other failure test here injects a
+    broken SINK (jsonl or SQL) after a row was already built; none makes row-BUILDING itself
+    raise. A mutation deleting that try/except, or the naive-datetime check itself, would pass
+    every other test in this file unnoticed while `emit()` stopped being exception-safe for a
+    caller that ever passes a naive `now` (or any other value `_build_row` cannot handle)."""
+    emitter = EventEmitter(run_id=RUN, jsonl_path=tmp_path / "logs" / "e.jsonl")
+    naive = datetime(2026, 8, 9, 12, 0, 0)  # deliberately no tzinfo
+
+    result = await emitter.emit("llm_call", payload={}, now=naive)
+
+    assert result.seq is None
+    assert result.stored is False
+    assert result.streamed is False
+    # NOTE (found while writing this test, not fixed here — out of this task's scope): unlike the
+    # jsonl/sql failure paths below, `emit()`'s `except Exception` branch around `_build_row`
+    # returns `EmitResult(...)` with no `failures=` argument, so `result.failures` is empty and
+    # `result.ok` reads True here even though a failure genuinely occurred. The failure is still
+    # counted and logged on the EMITTER itself (`failed_emits`/`failures` deque, asserted below)
+    # -- it is not silently dropped -- but the per-call `EmitResult` disagrees with the emitter's
+    # own bookkeeping about whether this call failed. Asserted as-is; flagged for the controller.
+    assert result.failures == ()
+    assert emitter.failed_emits == 1
+    assert len(emitter.failures) == 1
+    assert emitter.failures[-1].sink == "build"
+    assert "naive" in emitter.failures[-1].error
+    # the JSONL sink was never touched: the row never existed to write
+    assert not (tmp_path / "logs" / "e.jsonl").exists()
+
+
 async def test_emit_survives_an_unserialisable_payload(tmp_path: Path) -> None:
     """A payload the JSON encoder cannot take is rendered, not raised — and still redacted."""
     emitter = EventEmitter(run_id=RUN, jsonl_path=tmp_path / "logs" / "e.jsonl")

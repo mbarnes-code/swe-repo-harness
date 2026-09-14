@@ -79,6 +79,19 @@ def test_two_v2_lines_is_malformed_and_refused(tmp_path: Path) -> None:
         )
 
 
+def test_a_v2_line_whose_path_does_not_start_with_a_slash_is_malformed(tmp_path: Path) -> None:
+    """`resolve_own_cgroup_v2_relpath`'s final check -- the path component after `0::` must start
+    with `/` -- is untested by every other case here. The `!= 1` count check above is exercised
+    both directions (0 lines via the v1 test, 2 lines via the two-v2-lines test), but nothing
+    supplies a well-formed COUNT (exactly one `0::` line) whose path portion is itself malformed.
+    A mutation deleting or weakening this final check would pass every other test in this file
+    unnoticed."""
+    with pytest.raises(CgroupUnavailableError, match="does not start with"):
+        resolve_own_cgroup_v2_relpath(
+            proc_self_cgroup=_write_cgroup_file(tmp_path, "0::user.slice/session-1.scope\n")
+        )
+
+
 def test_missing_memory_current_at_resolved_path_fails_loudly(tmp_path: Path) -> None:
     cgroup_file = _write_cgroup_file(tmp_path, "0::/user.slice/session-1.scope\n")
     cgroup_root = tmp_path / "sys_fs_cgroup"
