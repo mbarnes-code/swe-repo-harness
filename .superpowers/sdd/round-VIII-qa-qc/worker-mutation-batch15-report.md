@@ -59,6 +59,57 @@ mutation runs, 1 per mutation) — no other test in the file was affected, confi
 discriminator is specific to its own step. After restoring each file: `cmp` reported byte-identical
 to the pre-mutation backup, and the full suite re-ran green (34 passed).
 
+> **Correction (2026-09-14, post-review) — the paragraph above is false for mutation 3 (v010) as
+> stated, and the "1 per mutation" / "no other test in the file was affected" claims for it were
+> never actually measured.** Task review (`review-mutation-batch15-report.md`) ran mutation 3
+> against the **whole file**, not `-k`-scoped, and got **12 failed / 22 passed**, reproduced
+> twice. I re-ran it myself, independently, on this branch: same result, **12 failed / 22 passed**,
+> reproduced twice, same 12 test names both the reviewer and I got:
+> `test_migrated_tables_match_a_freshly_created_v7_baseline`,
+> `test_the_only_divergence_from_a_fresh_baseline_is_documented`,
+> `test_foreign_key_check_is_clean_after_migrating`,
+> `test_two_concurrent_migrations_apply_the_ladder_once`,
+> `test_the_pre_v8_aggregate_is_adopted_as_exactly_one_reservation`,
+> `test_a_v7_ledger_holding_nothing_adopts_nothing`,
+> `test_the_reservations_table_a_migration_builds_matches_a_fresh_one`,
+> `test_a_full_ladder_replay_from_v6_gets_the_same_column_four_rungs_early`,
+> `test_the_migrated_test_count_column_a_migration_builds_matches_a_fresh_one`,
+> `test_migrating_a_current_v11_database_is_idempotent_for_migrated_test_count`,
+> `test_the_ninth_rung_creates_file_blobs_matching_the_baseline` (this batch's own sibling test),
+> and the intended target `test_the_ninth_rung_refuses_to_run_twice`.
+>
+> **Root cause of the false claim**: my own "Mutation results" runs were executed as
+> `pytest tests/test_migrations.py -k <target>` (see the paragraph above, still accurate as a
+> description of what I ran) — scoped to the single target test each time. A `-k`-scoped run
+> cannot observe failures in tests it never executes, so "no other test in the file was affected"
+> was an inference from a narrowed run, not a measurement of the whole file — exactly the
+> unmeasured-scope pattern CLAUDE.md's §6 measurement-discipline guardrail warns against ("state
+> what you ran, including what you excluded").
+>
+> **Actual blast radius of mutation 3, and why it differs from mutations 1 and 2**: inverting the
+> guard makes `v010_file_blobs.upgrade()` raise `SqlTextError` whenever `file_blobs` does **not**
+> already exist — which is the normal precondition on every *forward* migration through v10, not
+> only the guarded re-run case this test targets. Any test in the file that runs the default full
+> ladder (`migrate(db)`, default `steps=STEPS`, or an explicit `_STEPS_THROUGH(n)` for `n >= 10`)
+> through v10 hits the inverted guard and fails; only tests that never migrate past v9, or that
+> bypass `upgrade()` entirely, are unaffected. Mutations 1 and 2 are narrower value/predicate
+> mutations inside DDL that a specific column read or a specific conditional row discriminates —
+> they do not stop the ladder from running at all, so they only ever reddened their one targeted
+> test. Mutation 3 breaks the *control flow* of every normal call to `upgrade()`, which is a
+> structurally different (and more destructive) kind of mutation, and its collateral failures are
+> 11 **pre-existing** full-ladder tests correctly detecting that the ladder is broken — not
+> evidence that any new fixture in this batch is badly scoped.
+>
+> **Re-verification of mutations 1 and 2, whole-file (not `-k`-scoped), on this same branch**:
+> mutation 1 → **1 failed, 33 passed** (only the targeted test); mutation 2 → **1 failed, 33
+> passed** (only the targeted test). Both restored to byte-identical via `cmp` afterward. These
+> two match the original claims above; only the mutation-3 sentence was wrong.
+>
+> The test additions themselves need no change — `test_the_ninth_rung_refuses_to_run_twice`
+> reddens for the correct reason (`DID NOT RAISE SqlTextError`) and remains the specific,
+> non-redundant discriminator for this guard. The defect was confined to this report's blast-radius
+> claim for mutation 3.
+
 ## Verification
 
 - `ruff check tests/test_migrations.py` — clean.
