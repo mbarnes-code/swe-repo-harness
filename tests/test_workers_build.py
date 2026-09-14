@@ -35,6 +35,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from fleet import ecosystems
 from fleet.bazel.query import rdeps_query, sample_seed_for
@@ -1303,6 +1304,43 @@ async def test_attribute_hoist_break_is_a_noop_when_nothing_matches(tmp_path) ->
         assert output.hoist_broke_contract_id is None, name
         assert output.hoist_broke_target_path is None, name
         assert output.hoist_broke_matched_line == "", name
+
+
+def test_hoist_watch_rejects_an_empty_target_path() -> None:
+    """`HoistWatch.hoist_target_path` carries `Field(min_length=1)` for a reason that is not
+    decorative: `_match_hoist_broke_owner` (this file's own
+    `test_hoist_broke_owner_matcher_reads_real_quoted_bazel_error_forms`) matches a bazel label's
+    package against this field with a bare `==`-or-`/`-bounded comparison, never a substring
+    scan — but an empty `hoist_target_path` would make that check pass for the EMPTY package
+    string `_hoist_break_package` can return, attributing every stray build failure whose label
+    resolves to no package at all to whichever contract happened to be watched with a blank path.
+    The validator is what keeps that string from ever reaching the matcher, so it earns its own
+    test rather than being asserted only through a matcher fixture that always supplies a
+    non-empty one.
+    """
+    with pytest.raises(ValidationError):
+        HoistWatch(contract_id="proto:acme.hub.v1", hoist_target_path="")
+
+
+def test_build_output_green_requires_build_ok_and_tolerates_no_tests_ran() -> None:
+    """`BuildOutput.green` (§3.3's success criterion, `output.green` gates the sink write at
+    `cli.py`'s `_BuildSink` around line 12880) is `build_ok and (test_ok or not tests_ran)` — an
+    `and` of a `bool` with an `or` of two more, three independent ways to get it wrong. Every
+    corner is asserted on its own line rather than as one aggregate pass:
+
+    * `build_ok=False` must never be rescued by `test_ok=True` (an `or` swapped in for the outer
+      `and` would let a failed build read green because tests somehow "passed" against nothing);
+    * `build_ok=True, test_ok=False, tests_ran=False` — the CONTRACT-node case the property's own
+      docstring names — MUST be green: a node with no tests of its own is not penalized for never
+      running them (an `and` swapped in for the inner `or` would break exactly this case);
+    * `build_ok=True, test_ok=False, tests_ran=True` must NOT be green: tests ran and did not
+      pass, which `not tests_ran` must not paper over.
+    """
+    assert BuildOutput(repo_id=REPO, build_ok=False, test_ok=True, tests_ran=False).green is False
+    assert BuildOutput(repo_id=REPO, build_ok=False, test_ok=True, tests_ran=True).green is False
+    assert BuildOutput(repo_id=REPO, build_ok=True, test_ok=False, tests_ran=False).green is True
+    assert BuildOutput(repo_id=REPO, build_ok=True, test_ok=False, tests_ran=True).green is False
+    assert BuildOutput(repo_id=REPO, build_ok=True, test_ok=True, tests_ran=True).green is True
 
 
 async def test_the_sandboxed_command_is_network_none_and_named_after_the_attempt(

@@ -5742,6 +5742,99 @@ def test_an_unrenderable_coordinate_is_contained_to_its_own_ecosystems_repos(
     assert "requests" not in detail, "the Python group's resolve is not part of this failure"
 
 
+def test_a_resolver_failure_is_attributed_to_every_repo_of_the_shared_ecosystem(
+    fleet: Path,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `except DependencyResolutionError` half of `cli._fleet_support_files` (the sibling
+    branch to `except ecosystems.AdapterCoordinateError`, proven group-wide by
+    `test_an_unrenderable_coordinate_is_contained_to_its_own_ecosystems_repos` above) gets its own
+    direct proof of the identical claim: `requirements.lock` is ONE file for the whole PyPI group
+    (ADR-0048), so a resolver failure is "theirs jointly" (`_fleet_support_files`'s own docstring)
+    — attributed to the SAME exception object for every repo of the group, not just the one whose
+    resolver invocation happened to run or fail first.
+
+    Driven directly at `_fleet_support_files`, exactly as the coordinate-render sibling test is,
+    for the same reason: this observes the failure where it is CONTAINED, without a whole fleet's
+    ingest/dispatch having to succeed first. `test_a_resolver_failure_is_loud_and_classified_and_
+    never_an_empty_lock` proves the single-repo, full-chain shape (finding, phase status, no
+    lockfile on the branch); this proves the multi-repo attribution `_fleet_support_files` itself
+    is responsible for, which that single-repo test cannot exercise at all.
+    """
+    ecosystems.discover()
+
+    class BrokenResolver:
+        async def __call__(
+            self,
+            argv: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            deadline: float | None = None,
+            timeout_s: float | None = None,
+        ) -> ProcResult:
+            _ = (env, deadline, timeout_s)
+            return ProcResult(
+                argv=tuple(argv),
+                exit_code=2,
+                stdout_tail="",
+                stderr_tail="error: no solution found: requests>=2.31 and urllib3<2 conflict",
+                duration_ms=5,
+                timed_out=False,
+                cwd=cwd,
+            )
+
+    monkeypatch.setattr(cli, "RESOLVER_RUNNER", BrokenResolver())
+    settings = FleetSettings.load(fleet / "config")
+
+    plans = {
+        "acme-app-py": _root_file_plan(
+            BuildUnit(
+                unit_id="acme-app-py",
+                ecosystem=Ecosystem.PYPI,
+                dest="py/acme_app_py",
+                srcs=["acme_app_py/__init__.py"],
+                external_coordinates=[
+                    Coordinate(ecosystem=Ecosystem.PYPI, name="requests", version_spec=">=2.31")
+                ],
+            ),
+            tmp_path / "py-app",
+            "py",
+        ),
+        "acme-lib-py": _root_file_plan(
+            BuildUnit(
+                unit_id="acme-lib-py",
+                ecosystem=Ecosystem.PYPI,
+                dest="py/acme_lib_py",
+                srcs=["acme_lib_py/__init__.py"],
+                external_coordinates=[
+                    Coordinate(ecosystem=Ecosystem.PYPI, name="urllib3", version_spec="<2")
+                ],
+            ),
+            tmp_path / "py-lib",
+            "py",
+        ),
+    }
+    for plan in plans.values():
+        plan.worktree.mkdir(parents=True)
+
+    files, failures = asyncio.run(
+        cli._fleet_support_files(plans, settings=settings, run_id="run-resolve-fail")
+    )
+
+    assert files == {}, "no PyPI repo may get a resolved lock out of a group whose resolve failed"
+    assert set(failures) == {"acme-app-py", "acme-lib-py"}, failures
+    failure = failures["acme-app-py"]
+    assert failures["acme-lib-py"] is failure, (
+        "one resolution attempt, one verdict shared by every repo of the ecosystem — a mutation "
+        "that attributed the failure to only the first repo of the group, or minted a distinct "
+        "exception per repo, would pass a single-repo check and fail exactly this one"
+    )
+    assert isinstance(failure, cli.DependencyResolutionError), type(failure)
+    assert "no solution found" in str(failure), failure
+
+
 def test_a_coordinate_render_failure_marks_its_repos_and_the_rest_of_the_fleet_builds(
     fleet: Path,  # noqa: F811
     monorepo: Path,
