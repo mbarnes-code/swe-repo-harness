@@ -69,6 +69,7 @@ from fleet.orchestrator.budgets import (
     CostEstimate,
     CostLedger,
     Limits,
+    Reservation,
 )
 from fleet.orchestrator.context import RunContext, default_logger
 from fleet.orchestrator.findings import BACKEND_UNAVAILABLE, CAPABILITY_DRIFT
@@ -90,7 +91,12 @@ from fleet.settings import BudgetsSection, FleetConfig, RunSection
 from fleet.state import checkpoints
 from fleet.state import db as dbmod
 from fleet.state.db import StateWriter, connect_ro, initialize_database
-from fleet.state.repository import AttemptRow, LeaseStolenError, SqliteStateRepository
+from fleet.state.repository import (
+    AttemptRow,
+    LeaseStolenError,
+    RepoBudgetRefusedError,
+    SqliteStateRepository,
+)
 from fleet.workers.base import (
     BaseWorker,
     WorkerContext,
@@ -916,6 +922,104 @@ async def test_a_repo_scoped_ceiling_does_not_halt_the_fleet(tmp_path: Path) -> 
         assert (status, failure_class) == (
             "REQUIRES_HUMAN_INTERVENTION",
             FailureClass.BUDGET_EXHAUSTED,
+        )
+
+
+async def test_a_repo_scoped_breach_preserves_the_reloaded_transient_retries(
+    tmp_path: Path,
+) -> None:
+    """`_drive`'s `LadderState` reloads `row.transient_retries` off disk (`runner.py`, "D-closing:
+    reload the durable counter so a crash/restart or a later wave's re-admission of a still-PENDING
+    phase resumes the budget instead of resetting it") and `_on_breach` threads that SAME ladder
+    into `_record_diagnostics` (`ladder=ladder`) rather than a fresh `LadderState()`.
+
+    A repo pre-seeded with `transient_retries=2` (as if two `RETRY_TRANSIENT` rungs already ran
+    before a restart) that then breaches a repo-scoped budget ceiling on THIS dispatch must still
+    read `transient_retries == 2` afterwards. Recording a fresh, zeroed ladder here — which is what
+    `_on_breach` did before both fixes landed — would silently hand a resumed `fleet resume` an
+    intact §11.8 transient budget the ladder had already spent.
+    """
+    config = FleetConfig()
+    async for harness in _build(tmp_path, config, max_usd=1000.0):
+        await _seed(harness, "repo-greedy")
+        await harness.plan(("repo-greedy",))
+        BEHAVIOURS["repo-greedy"] = [ok()]
+
+        async def unit(conn: aiosqlite.Connection) -> None:
+            await conn.execute(
+                "UPDATE phases SET transient_retries = 2 "
+                " WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                (RUN, "repo-greedy", int(PHASE)),
+            )
+
+        await harness.writer.submit(unit)
+
+        report = await harness.runner(estimate=lambda _repo_id: CostEstimate(0, 0, 99.0)).run_wave(
+            0
+        )
+
+        assert report.halt is None
+        status, _, transient_retries, failure_class, _ = await harness.phase_row("repo-greedy")
+        assert (status, failure_class) == (
+            "REQUIRES_HUMAN_INTERVENTION",
+            FailureClass.BUDGET_EXHAUSTED,
+        )
+        assert transient_retries == 2, (
+            "a same-dispatch breach must not reset the reloaded transient-retry count to 0"
+        )
+
+
+async def test_a_settle_time_budget_refusal_is_recorded_as_a_repo_scoped_breach_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_dispatch` distinguishes two settle-time refusals from `state.repository`:
+    `ReservationRefusedError` (re-raised — the reaped-worker case, covered by
+    `test_a_runner_minted_reservation_names_its_owner_so_the_reaper_can_fence_it` above) and every
+    OTHER `BudgetRefusedError` — `RepoBudgetRefusedError` here — which `runner.py`'s `except
+    BudgetRefusedError as breach: return _Dispatched(breach=breach)` routes through `_on_breach`
+    exactly like a reserve-time `LedgerBreach`.
+
+    Unlike `LedgerBreach`, `state.repository.BudgetRefusedError` carries no `exit_code` ClassVar at
+    all, so `_on_breach` MUST read it with `getattr(breach, "exit_code", None)` rather than
+    `breach.exit_code` — a plain attribute access raises `AttributeError` on this exact type, which
+    would escape `_on_breach` uncaught and be misrecorded as `FailureClass.UNKNOWN` by the generic
+    `except Exception` handler one level up instead of the real `BUDGET_EXHAUSTED` cause.
+
+    `CostLedger.settle()` is monkeypatched to raise for one repo — the CAS mechanics that produce a
+    genuine `RepoBudgetRefusedError` are `tests/test_repository.py`'s job; what is under test here
+    is `PhaseRunner`'s handling of that exception once raised, which no other test drives through
+    `_dispatch`/`_on_breach`.
+    """
+    config = FleetConfig()
+    async for harness in _build(tmp_path, config, max_usd=1000.0):
+        await _seed(harness, "repo-a")
+        await harness.plan(("repo-a",))
+        BEHAVIOURS["repo-a"] = [ok()]
+
+        async def flaky_settle(
+            reservation: Reservation,
+            actual: CostEstimate | None = None,
+            *,
+            _real: Callable[[Reservation, CostEstimate | None], Awaitable[None]] = (
+                harness.ctx.ledger.settle
+            ),
+        ) -> None:
+            if reservation.scope.repo_id == "repo-a":
+                raise RepoBudgetRefusedError("synthetic settle-time refusal for repo-a")
+            await _real(reservation, actual)
+
+        monkeypatch.setattr(harness.ctx.ledger, "settle", flaky_settle)
+
+        report = await harness.runner().run_wave(0)
+
+        assert report.halt is None, "a settle-time repo refusal must not stop the fleet (§11.2)"
+        status, _, _, failure_class, last_error = await harness.phase_row("repo-a")
+        assert (status, failure_class) == (
+            "REQUIRES_HUMAN_INTERVENTION",
+            FailureClass.BUDGET_EXHAUSTED,
+        )
+        assert last_error is not None and "synthetic settle-time refusal" in last_error, (
+            "the breach message must reach the operator, not an AttributeError from `_on_breach`"
         )
 
 
