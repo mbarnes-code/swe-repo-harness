@@ -37,6 +37,28 @@ What each test is for:
   Rule 12: run clean first (real scan, zero rows), THEN inject a deliberately orphaned row of each
   `*_kind` combination the query has to check (`edges.src` REPO, `edges.dst` CONTRACT,
   `wave_members.node` REPO, `wave_members.node` CONTRACT) and confirm the query catches every one.
+
+**Correction, 2026-09-14 (round VIII, §15.1 item 3, Wave 7.3 batch 35) — the paragraph above and
+the second bullet's claim ("Real `fleet scan` never populates `ContractsInput.blob_shas`
+… confirmed against `cli.py::_extract_contracts`, which constructs `ContractsInput` with no
+`blob_shas=` argument at all") were true when this file was written (`843e70c`,
+2026-09-03 15:35 UTC) and are FALSE as of this correction: `c9340af` ("D114 (a)+(b): file_blobs
+capture mechanism, wire §12.9 criterion (d)"), landed the SAME DAY at 22:10 UTC — under seven
+hours later, on a sibling lane this file's author could not have seen — wired `_capture_file_blobs`
+(real `git ls-tree` blob SHAs, captured once per repo at scan time) into `_extract_contracts`'s
+`blob_shas=` argument, which now reads
+`blob_shas={f"{repo}\\x00{path}": sha for (repo, path), sha in blob_shas.items()}` (`cli.py`
+current HEAD), fed from `_scan_impl`'s own `file_blobs = await _capture_file_blobs(...)` call
+immediately before `_extract_contracts` (`cli.py`, same file). Re-confirmed by reading both sites
+directly before writing this correction, not inherited from the stale claim above — this is
+exactly the "re-measure a routed finding at the moment you act on it" case CLAUDE.md's Rule 12
+warns a finding can rot between filing and fix. **The gap this module docstring's own §3 note
+described (no blob SHA ⇒ `content_sha256` empty ⇒ `divergent` can never fire) is CLOSED for the
+CLI path** — `test_a_real_fleet_scan_populates_blob_shas_and_flips_the_divergent_collision_end_
+to_end` below is the new CLI-driven proof this closure enables, kept alongside (not instead of)
+the worker-level test 2 below, which remains a legitimate, narrower proof of the mechanism itself.
+Kept here as the record of what was true when this paragraph was written, per this project's
+"annotate, never rewrite" convention (CLAUDE.md §7) — not deleted or edited in place.
 """
 
 from __future__ import annotations
@@ -343,6 +365,63 @@ def test_a_divergent_fourth_copy_flips_the_collision_and_applies_the_modifier(
     for value in node.confidence_factors.values():
         product *= value
     assert node.extraction_confidence == pytest.approx(product, abs=1e-9)
+
+
+# =======================================================================================
+# 2b — the SAME divergent fourth copy, now driven through a REAL `fleet scan` — the CLI-level
+# proof the module docstring's original §3 note (see the dated correction above) said was
+# unreachable, closed by D114(a) (`c9340af`) since this file was first written
+# =======================================================================================
+
+
+def test_a_real_fleet_scan_populates_blob_shas_and_flips_the_divergent_collision_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The disclosed `_extract_contracts` gap this batch was dispatched to close (round VIII,
+    §15.1 item 3, Wave 7.3 batch 35; `research-wave7-scoping-report.md` §3) — re-measured, not
+    re-derived: reading `cli.py::_extract_contracts` (current HEAD) shows it already constructs
+    `ContractsInput(blob_shas=...)` from a real `blob_shas` argument, and `_scan_impl` already
+    feeds it `_capture_file_blobs`'s real `git ls-tree` output (see the module docstring's dated
+    correction above). What is actually missing — and what this test supplies — is a test
+    proving that wiring end to end: no test anywhere drove `DIVERGENT_FLEET` through a real
+    `fleet scan` before this one, only through `_payload`/`_run` directly (test above).
+
+    Uses REAL git blob SHAs (via `_make_repo` + `_capture_file_blobs`'s own `ls-tree`), not the
+    synthetic `sha256_text` values `_blob_shas()` (above) feeds the worker-level test — the two
+    are deliberately different capture mechanisms, and this test is the one that proves the git
+    one, not a restatement of the sha256 one.
+    """
+    sources = {
+        name: _make_repo(tmp_path / "sources", name, dict(files))
+        for name, files in DIVERGENT_FLEET.items()
+    }
+    workspace = tmp_path / "workspace"
+    config = workspace / "config"
+    config.mkdir(parents=True)
+    (config / "fleet.yaml").write_text(FLEET_YAML, encoding="utf-8")
+    (config / "models.yaml").write_text(MODELS_YAML, encoding="utf-8")
+    entries = "".join(f"  - name: {name}\n    url: {path}\n" for name, path in sources.items())
+    (config / "repos.yaml").write_text(
+        f"version: 1\ndefaults:\n  ref: main\nrepos:\n{entries}", encoding="utf-8"
+    )
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+
+    _scan_then_sequence(workspace)
+
+    collisions = _query(
+        workspace, "SELECT kind, key, severity FROM collisions WHERE kind = 'CONTRACT'"
+    )
+    assert collisions == [("CONTRACT", PROTO_ID, "error")], (
+        "a real git-blob-SHA-backed content divergence must flip the REAL CLI's own collision "
+        f"row to 'error', exactly as the worker-level proof shows in isolation: {collisions}"
+    )
+
+    factors_json = _query(
+        workspace, "SELECT confidence_factors FROM contracts WHERE contract_id = ?", (PROTO_ID,)
+    )[0][0]
+    factors = json.loads(factors_json)
+    assert factors.get("divergent") == MODIFIERS["divergent"] == 0.5, factors
 
 
 # =======================================================================================
