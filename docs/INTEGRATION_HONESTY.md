@@ -11499,3 +11499,49 @@ is active, only on none-vs-not-none. New test:
 confirmed to fail against the pre-fix `client = ctx.llm` (both rows collapse to
 `context_policy IS NULL` / the empty-set digest) and pass against the fix. See
 `.superpowers/sdd/round-VIII-qa-qc/worker-d137-fix-report.md` for the full report.
+
+## D138 — OPEN. `workers/clone.py::_interrupted()` never distinguishes a genuine timeout from a
+genuine cancellation — both report `status="cancelled"`, so a repo that always times out never
+charges an attempt and can loop forever instead of escalating
+
+**Found by round VIII's `worker-mutation-batch14` (`.superpowers/sdd/round-VIII-qa-qc/
+worker-mutation-batch14-report.md`) while mutation-auditing `334edeb`'s cancelled-vs-timeout
+conflation fix as a class-sweep — the sweep's own scope report listed `workers/clone.py` as a
+member of the class `334edeb` fixed, but this task found `334edeb` never actually touched
+`clone.py` for this bug, and the pre-existing conflation survives there unfixed. Allocated by the
+round VIII controller, form-agnostic sweep found `D137` as the highest allocated number.**
+
+**The gap, as measured.** `clone.py`'s main loop calls `self._interrupted(completed, owed)` from
+two distinct call sites (`clone.py:312`, guarding the whole method, and `:328-329`, guarding the
+worktree-cut step) — one reached via `ctx.cancelled()`, the other via `ctx.expired(loop_now()) or
+ctx.cancelled()`, so `_interrupted()` is entered on a genuine timeout just as readily as a genuine
+cancellation. `_interrupted()` itself (`clone.py:657-677`) takes no argument distinguishing the
+two and, when nothing has completed yet, unconditionally returns `WorkerResult(status="cancelled",
+error=WorkerError(failure_class=FailureClass.TIMEOUT, retryable=True, ...))` — verified by reading
+the function directly, not inferred. This is the exact conflation `334edeb` fixed in
+`workers/classify.py`, `interrogate.py`, `symbolindex.py`, and `contracts.py` (each now reports
+`status="timeout"` on a real expiry, `status="cancelled"` only on a real cancellation), but
+`clone.py` was never part of that commit's diff for this bug and the conflation was never closed
+here.
+
+**Related, narrower instance found by the same task**: `workers/rdepverify.py` and
+`workers/buildgen.py` correctly discriminate `status` (timeout vs. cancelled), but each
+unconditionally sets `failure_class=FailureClass.TIMEOUT` regardless of which condition actually
+fired — so a genuinely cancelled attempt is misclassified as a timeout for retry/backoff
+accounting purposes, a smaller version of the same root confusion.
+
+**Failure this permits.** A repo whose worktree materialization consistently exceeds its deadline
+(slow disk, huge repo, degraded host) never receives a "timeout" verdict from `clone.py` — every
+attempt reports `cancelled`/`TIMEOUT`-as-cancelled instead of the ladder's real timeout-escalation
+path, so whatever retry/backoff/escalation logic keys off a genuine timeout status never fires for
+this worker, and the repo can cycle through retries indefinitely rather than being escalated as a
+structurally-too-slow case.
+
+**Not yet built.** `_interrupted()` needs the same shape as the four already-fixed workers: thread
+through which condition (`ctx.expired(...)` vs `ctx.cancelled()`) actually triggered the call and
+report `status="timeout"`/`FailureClass.TIMEOUT` only for a genuine expiry, `status="cancelled"`
+with a non-timeout failure class for a genuine cancellation. `rdepverify.py`/`buildgen.py` need
+their `failure_class` selection to key off the same discriminant rather than a hardcoded
+`TIMEOUT`. Fix and mutation-proof tests deliberately not attempted here — this entry is a
+scoping-only finding per the discovering task's own read-mostly brief; a dedicated fix dispatch is
+recommended as a follow-up.
