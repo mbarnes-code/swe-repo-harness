@@ -46,11 +46,13 @@ from typer.testing import CliRunner
 
 from fleet.bazel.lockfile import MODULE_LOCK_PATH
 from fleet.cli import (
+    BreakCyclesMode,
     BuildInput,
     BuildOutput,
     BuildPipelineWorker,
     ExitCode,
     TransformStepUnavailableError,
+    UsageError,
     _abandon_repo,
     _AttemptWriter,
     _BuildEvidence,
@@ -61,6 +63,7 @@ from fleet.cli import (
     _promote_one_pr,
     _regenerate_pr_body,
     _report_with_stubs,
+    _sequence_graph_config,
     _TransformPlan,
     app,
     command_paths,
@@ -82,6 +85,7 @@ from fleet.models.state import SCHEMA_VERSION, MigrationState
 from fleet.models.tasks import PullRequestDraft, VerificationReport
 from fleet.sandbox.container import ContainerSandbox
 from fleet.sandbox.worktree import WorktreeManager
+from fleet.settings import FleetSettings
 from fleet.state import db as dbmod
 from fleet.state.db import SCHEMA_PATH, StateWriter
 from fleet.util.proc import ProcResult
@@ -804,6 +808,101 @@ def test_sequence_refuses_unresolved_error_collisions_with_exit_6(workspace: Pat
         conn.close()
     result = runner.invoke(app, [*base_args(workspace), "sequence"])
     assert result.exit_code == ExitCode.UNRESOLVED_FINDINGS == 6, result.output
+
+
+# --------------------------------------------------------------------------------------
+# `_sequence_graph_config` refuses three of §10's cycle flags with exit 2 — untested until now
+# --------------------------------------------------------------------------------------
+
+
+def _graph_settings(tmp_path: Path) -> FleetSettings:
+    write_config(tmp_path)
+    return FleetSettings.load(tmp_path / "config")
+
+
+def test_sequence_graph_config_refuses_break_cycles_manual(tmp_path: Path) -> None:
+    """`--break-cycles manual` parses but `graph/cycles.py` never reads `GraphSection.
+    break_cycles` (every SCC is ranked and broken by the 6c ladder; MANUAL is an OUTCOME of that
+    ladder, not an input) -- silently accepting it would be the exact "flag parses, does nothing"
+    lie `_sequence_graph_config`'s own docstring exists to refuse.
+    """
+    settings = _graph_settings(tmp_path)
+    with pytest.raises(UsageError, match="break-cycles manual"):
+        _sequence_graph_config(
+            settings,
+            break_cycles_mode=BreakCyclesMode.MANUAL,
+            accept_breaks=None,
+            force_hoist=None,
+            forbid_hoist=None,
+            hoist_contracts=True,
+            max_hoists_per_scc=None,
+            min_confidence=None,
+            scc_atomic_threshold=None,
+        )
+
+
+def test_sequence_graph_config_refuses_accept_breaks(tmp_path: Path) -> None:
+    """`--accept-breaks` has no matching `break_cycles()` parameter to receive it."""
+    settings = _graph_settings(tmp_path)
+    with pytest.raises(UsageError, match="accept-breaks"):
+        _sequence_graph_config(
+            settings,
+            break_cycles_mode=BreakCyclesMode.AUTO,
+            accept_breaks=("acme/some-edge",),
+            force_hoist=None,
+            forbid_hoist=None,
+            hoist_contracts=True,
+            max_hoists_per_scc=None,
+            min_confidence=None,
+            scc_atomic_threshold=None,
+        )
+
+
+def test_sequence_graph_config_refuses_force_hoist(tmp_path: Path) -> None:
+    """`--force-hoist` has no matching `break_cycles()` parameter to receive it -- distinct from
+    `--forbid-hoist`, which IS threaded (`GraphSection.forbidden_contract_ids`) and must NOT be
+    refused by the same code path (the sibling test below is the control for that)."""
+    settings = _graph_settings(tmp_path)
+    with pytest.raises(UsageError, match="force-hoist"):
+        _sequence_graph_config(
+            settings,
+            break_cycles_mode=BreakCyclesMode.AUTO,
+            accept_breaks=None,
+            force_hoist=("acme/billing",),
+            forbid_hoist=None,
+            hoist_contracts=True,
+            max_hoists_per_scc=None,
+            min_confidence=None,
+            scc_atomic_threshold=None,
+        )
+
+
+def test_sequence_graph_config_accepts_forbid_hoist_and_the_other_five_threaded_flags(
+    tmp_path: Path,
+) -> None:
+    """Control for the three refusal tests above: every flag that IS threaded (`forbid_hoist`,
+    `hoist_contracts`, `max_hoists_per_scc`, `min_confidence`, `scc_atomic_threshold`) together,
+    with all three refused flags at their non-refusing defaults, must return a `GraphSection`
+    reflecting every override -- proving the refusal branches above are additive to, not a
+    replacement for, the accepted path.
+    """
+    settings = _graph_settings(tmp_path)
+    result = _sequence_graph_config(
+        settings,
+        break_cycles_mode=BreakCyclesMode.AUTO,
+        accept_breaks=None,
+        force_hoist=None,
+        forbid_hoist=("acme/legacy-proto",),
+        hoist_contracts=False,
+        max_hoists_per_scc=3,
+        min_confidence=0.75,
+        scc_atomic_threshold=5,
+    )
+    assert result.forbidden_contract_ids == ("acme/legacy-proto",)
+    assert result.hoist_contracts is False
+    assert result.max_hoists_per_scc == 3
+    assert result.min_confidence == pytest.approx(0.75)
+    assert result.scc_atomic_threshold == 5
 
 
 # --------------------------------------------------------------------------------------

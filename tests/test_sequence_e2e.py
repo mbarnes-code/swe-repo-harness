@@ -51,16 +51,18 @@ from typer.testing import CliRunner
 from fleet.cli import (
     CONTRACT_NOT_SHARED_FINDING_KIND,
     ExitCode,
+    UnresolvedFindingsError,
     _committed_contracts,
     _hoist_watch_for_run,
     _now,
     _persist_contract_not_shared_findings,
+    _refuse_unresolved_collisions,
     app,
 )
 from fleet.graph.cycles import GraphFinding
 from fleet.graph.infer import EDGE_BASE_CONFIDENCE
 from fleet.models.enums import BreakStrategy, ContractStatus, EdgeKind
-from fleet.state.db import StateWriter
+from fleet.state.db import StateWriter, connect_ro
 from tests.test_cli import MODELS_YAML, RUN_ID, fresh_db, seed_run
 from tests.test_scan_e2e import _fresh_db, _make_repo
 from tests.test_workers_contracts import (
@@ -124,6 +126,31 @@ def cycle_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     config = workspace / "config"
     config.mkdir(parents=True)
     (config / "fleet.yaml").write_text(FLEET_YAML, encoding="utf-8")
+    (config / "models.yaml").write_text(MODELS_YAML, encoding="utf-8")
+    entries = "".join(f"  - name: {name}\n    url: {path}\n" for name, path in sources.items())
+    (config / "repos.yaml").write_text(
+        f"version: 1\ndefaults:\n  ref: main\nrepos:\n{entries}", encoding="utf-8"
+    )
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
+@pytest.fixture
+def cycle_fleet_low_scc_hard_max(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Identical to `cycle_fleet` except `fleet.yaml` sets `graph.scc_hard_max: 1` — below the
+    real SCC's own member count, so §3.1 6e's `MANUAL` ladder rung is reached through the real
+    CLI rather than only against a hand-built `build_graph`/`break_cycles` call
+    (`tests/test_graph_cycles.py::test_beyond_scc_hard_max_the_harness_refuses`, which does not
+    go through `cli._sequence_impl` at all)."""
+    sources = {
+        name: _make_repo(tmp_path / "sources", name, dict(files))
+        for name, files in CYCLE_FLEET.items()
+    }
+    workspace = tmp_path / "workspace"
+    config = workspace / "config"
+    config.mkdir(parents=True)
+    (config / "fleet.yaml").write_text(FLEET_YAML + "graph:\n  scc_hard_max: 1\n", encoding="utf-8")
     (config / "models.yaml").write_text(MODELS_YAML, encoding="utf-8")
     entries = "".join(f"  - name: {name}\n    url: {path}\n" for name, path in sources.items())
     (config / "repos.yaml").write_text(
@@ -438,6 +465,27 @@ def test_the_same_fleet_stays_cyclic_when_contracts_are_skipped(cycle_fleet: Pat
     assert _query(cycle_fleet, "SELECT status FROM contracts") == [
         (ContractStatus.EXTRACTABLE.value,)
     ], "a declined hoist must not leave a HOISTED row behind"
+
+
+def test_a_scc_beyond_hard_max_refuses_sequencing_with_exit_6_through_the_real_cli(
+    cycle_fleet_low_scc_hard_max: Path,
+) -> None:
+    """§3.1 6e / §10 exit 6, through `cli._sequence_impl`'s own inline check (`manual = tuple(...
+    if res.break_strategy is BreakStrategy.MANUAL)`) -- this is inline logic in `_sequence_impl`
+    itself, not delegated to a named helper, and until now had no coverage above the direct
+    `break_cycles()` unit level (`tests/test_graph_cycles.py::
+    test_beyond_scc_hard_max_the_harness_refuses`, `test_a_41_repo_cycle_completes_without_hanging`
+    -- neither goes through the real CLI).
+    """
+    assert _scan(cycle_fleet_low_scc_hard_max, "--skip-contracts").exit_code == ExitCode.SUCCESS
+    result = _sequence(cycle_fleet_low_scc_hard_max)
+    assert result.exit_code == ExitCode.UNRESOLVED_FINDINGS, result.output
+    assert "resolved MANUAL and can never be sequenced" in result.output, result.output
+    # the plan is never persisted for a MANUAL-resolved SCC: no repo may get a wave index, or an
+    # operator reading `wave_members` would see a plan the harness itself refused to commit to.
+    assert _query(
+        cycle_fleet_low_scc_hard_max, "SELECT COUNT(*) FROM wave_members"
+    ) == [(0,)]
 
 
 # =======================================================================================
@@ -1001,3 +1049,82 @@ async def test_the_findings_writer_never_mislabels_a_different_kind_in_report_fi
         "the foreign-kind finding must be dropped by this writer entirely, not written under "
         "the wrong kind — a second writer (not built here) owns persisting it"
     )
+
+
+# =======================================================================================
+# `_refuse_unresolved_collisions` really keys on `resolution IS NULL`, not on `severity`
+# alone (§10 exit 6)
+# =======================================================================================
+
+
+async def _insert_collision(
+    db_path: Path, *, run_id: str, key: str, severity: str, resolution: str | None
+) -> None:
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO collisions (run_id, kind, key, repo_ids, severity, resolution, "
+            "                        detected_at) VALUES (?, 'COORDINATE', ?, '[\"a\",\"b\"]', "
+            "                        ?, ?, ?)",
+            (run_id, key, severity, resolution, "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+
+async def test_a_resolved_error_severity_collision_does_not_refuse_the_run(
+    tmp_path: Path,
+) -> None:
+    """`_refuse_unresolved_collisions`'s SQL filters on `severity = 'error' AND resolution IS
+    NULL`, not on `severity = 'error'` alone. Every collision kind actually wired into production
+    today (`COORDINATE`, via `cli._sequence_impl`'s bare `CollisionInput(coordinates=..., ...)`
+    call — `contracts=`/`dests=` are never populated) happens to keep `severity='error'` in
+    lockstep with `resolution is None` (`graph/collisions.py::_coordinate_collisions`), so no
+    currently-reachable `fleet sequence` invocation can exercise the distinction. But
+    `_contract_collisions`/`_dest_collisions` (unwired today, per this module's own
+    `_phase1_exit_report` docstring: "remain unwired — a separate, later task") both allow
+    `severity='error'` alongside a non-NULL `resolution` — a genuine "the operator must be told,
+    but the harness already decided" row — and this writer's own docstring commits to reading
+    `resolution IS NULL` specifically so that when either detector is wired in, an already-resolved
+    error-severity collision does not spuriously block every subsequent `fleet sequence`. Proven
+    directly against the function, ahead of the input its current real producer can supply — the
+    same precedent `test_the_findings_writer_never_mislabels_a_different_kind_in_report_findings`
+    above sets for `_persist_contract_not_shared_findings`.
+    """
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    seed_run(db_path, repos=("acme-owner", "acme-other"))
+    await _insert_collision(
+        db_path,
+        run_id=RUN_ID,
+        key="already-resolved",
+        severity="error",
+        resolution="owner:acme-owner",
+    )
+
+    conn = await connect_ro(db_path)
+    try:
+        await _refuse_unresolved_collisions(conn, RUN_ID)  # must not raise
+    finally:
+        await conn.close()
+
+
+async def test_an_unresolved_error_severity_collision_still_refuses_the_run(
+    tmp_path: Path,
+) -> None:
+    """Control for the sibling test above: the SAME `severity='error'` value, but with
+    `resolution IS NULL` (the shape every collision persisted by a real `fleet sequence` today
+    actually takes when it blocks), still raises. Without this control, the sibling test could
+    pass merely because `_refuse_unresolved_collisions` had stopped checking `severity` at all.
+    """
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    seed_run(db_path, repos=("acme-owner", "acme-other"))
+    await _insert_collision(
+        db_path, run_id=RUN_ID, key="still-open", severity="error", resolution=None
+    )
+
+    conn = await connect_ro(db_path)
+    try:
+        with pytest.raises(UnresolvedFindingsError):
+            await _refuse_unresolved_collisions(conn, RUN_ID)
+    finally:
+        await conn.close()
