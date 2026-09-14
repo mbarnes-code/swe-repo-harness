@@ -447,6 +447,24 @@ def test_a_conversation_with_no_user_turn_is_refused() -> None:
         )
 
 
+def test_a_conversation_whose_first_non_system_turn_is_not_user_is_refused() -> None:
+    """A DIFFERENT guard than the one above: this turn list is non-empty (it survives `_render`'s
+    "no turns at all" check) but opens on 'assistant', which this transport requires to be 'user'.
+    Sending it anyway would have the endpoint reject a well-formed-looking body outright, instead of
+    failing loudly here where the field can be named (Rule 11)."""
+    with pytest.raises(VertexTargetMisconfigured, match="assistant"):
+        build_body(
+            target(),
+            (
+                Message(role="assistant", content="premature"),
+                Message(role="user", content="go"),
+            ),
+            None,
+            StructuredOutputMode.PROMPTED,
+            512,
+        )
+
+
 # ---------------------------------------------------------------------------------------------
 # Endpoint construction
 # ---------------------------------------------------------------------------------------------

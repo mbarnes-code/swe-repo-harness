@@ -428,6 +428,28 @@ def test_the_constrained_rung_is_refused_rather_than_silently_downgraded(transpo
         asyncio.run(_invoke(make_target(), mode=StructuredOutputMode.CONSTRAINED))
 
 
+def test_a_conversation_whose_first_non_system_turn_is_not_user_is_refused(
+    transport: Any,
+) -> None:
+    """`_render`'s second guard, mirrored verbatim in `bedrock.py`/`vertex.py`'s own `_render`
+    (both of which have a test for the "no non-system turns at all" case but, like this file
+    before this test, none for THIS one): a turn list that survives the emptiness check but still
+    opens on 'assistant' must never reach the transport. Sending it anyway would have the vendor
+    API reject a well-formed-looking payload with a confusing 400 (or silently accept an ordering
+    nothing upstream intended), instead of failing loudly at the one place that can name the
+    field (Rule 11)."""
+    transport(sdk_message())  # armed so a failure-to-validate would surface as a shape mismatch,
+    # not merely "no transport configured" -- proving the guard fired, not that it was unreachable.
+    with pytest.raises(AnthropicBackendError, match="assistant"):
+        asyncio.run(_invoke(
+            make_target(),
+            messages=[
+                Message(role="assistant", content="premature"),
+                Message(role="user", content="hi"),
+            ],
+        ))
+
+
 def test_the_transport_is_built_with_the_callers_timeout_and_the_spec_retry_count(
     transport: Any,
 ) -> None:
