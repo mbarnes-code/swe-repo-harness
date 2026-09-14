@@ -357,3 +357,31 @@ def test_a_genuinely_broken_native_baseline_is_skipped_with_a_baseline_red_findi
     assert "acme-baseline-red" in payload["excluded"], payload
     assert "acme-baseline-red" not in payload["wave_index_by_repo"], payload
     assert "acme-baseline-green" in payload["wave_index_by_repo"], payload
+
+
+def test_the_baseline_red_findings_payload_carries_the_real_ecosystem_and_exit_codes(
+    baseline_fleet: Path,
+) -> None:
+    """`_gate_baseline_red` writes a `payload` alongside the `BaselineRed` finding —
+    `{"repo_id", "ecosystem", "build_exit_code", "test_exit_code"}`, taken from the red repo's
+    OWN `BaselineOutput` — not just the `(kind, severity)` pair the sibling test above checks.
+    That sibling test (`test_a_genuinely_broken_native_baseline_is_skipped_with_a_baseline_red_
+    finding`) reads `SELECT repo_id, kind, severity FROM findings`, never `payload`, so a
+    mutation that swapped `build_exit_code`/`test_exit_code` or hard-coded `ecosystem` to `None`
+    would pass it untouched. This fixture's red repo genuinely runs `npm install` (which
+    succeeds — `build_exit_code == 0`) then `npm test` (which fails via the fixture script's own
+    `process.exit(1)` — `test_exit_code == 1`); swapping the two fields would read `(1, 0)`
+    instead and fail the assertion below.
+    """
+    assert scan(baseline_fleet).exit_code == 0
+
+    rows = query(
+        baseline_fleet,
+        "SELECT payload FROM findings WHERE repo_id = 'acme-baseline-red' AND kind = 'BaselineRed'",
+    )
+    assert len(rows) == 1, rows
+    payload = json.loads(rows[0][0])
+    assert payload["repo_id"] == "acme-baseline-red", payload
+    assert payload["ecosystem"] == "npm", payload
+    assert payload["build_exit_code"] == 0, payload
+    assert payload["test_exit_code"] == 1, payload
