@@ -9979,3 +9979,383 @@ async def test_create_stub_records_keys_each_row_on_its_own_triggers_coordinate(
         "primary_coord_key — no test here drives _unit_deps end-to-end against these rows "
         "(a disclosed gap, not proven closed by this assertion)"
     )
+
+
+# --------------------------------------------------------------------------------------
+# Round VIII §15.1 item 3, Wave 7.2 batch 32 — `contracts`/`stubs`/`models` CLI leaves
+# (`contracts_list`/`_contracts_rows`, `contracts_inspect`/`_contract_detail`,
+# `stubs_list`/`_stub_rows`, `stubs_abandon`/`_stub_abandon`, `models_list`, `models_profiles`,
+# `models_check`). `stubs_resolve`/`_stubs_resolve_impl` are exhaustively exercised elsewhere
+# (`tests/test_stub_resolution_task79.py`'s dry-run/refusal/idempotency/atomicity suite) and get
+# no new test here.
+# --------------------------------------------------------------------------------------
+
+
+def _put_contract(
+    db: Path,
+    *,
+    contract_id: str,
+    kind: str = "PROTO",
+    identifier: str | None = None,
+    owning_repo_id: str | None = None,
+    consumer_repo_ids: tuple[str, ...] = (),
+    extraction_confidence: float = 0.0,
+    extractable: bool = False,
+    hoist_target_path: str | None = None,
+    status: str = "DETECTED",
+) -> None:
+    """One `contracts` row with only the columns these tests vary; everything else takes the
+    schema's own default (`source_paths`/`generated_paths` `'[]'`, `confidence_factors` `'{}'`)."""
+    stamp = "2026-08-08T12:00:00.000000+00:00"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO contracts (run_id, contract_id, kind, identifier, owning_repo_id, "
+            "  consumer_repo_ids, extractable, extraction_confidence, hoist_target_path, "
+            "  status, detected_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                RUN_ID,
+                contract_id,
+                kind,
+                identifier or contract_id,
+                owning_repo_id,
+                json.dumps(list(consumer_repo_ids)),
+                int(extractable),
+                extraction_confidence,
+                hoist_target_path,
+                status,
+                stamp,
+            ),
+        )
+    finally:
+        conn.close()
+
+
+def test_contracts_list_sort_orders_by_the_named_key_not_by_contract_id(workspace: Path) -> None:
+    """`_contracts_rows`'s `order` mapping (`"repos-freed"` -> consumer count DESC, `"confidence"`
+    -> `extraction_confidence` DESC, anything else -> `contract_id`) has never run under a test
+    that passes `--sort` at all: `_SCHEMA_CHECKED_COMMANDS`'s `("contracts","list")` entry only
+    drives the schema-mismatch refusal, which returns before `_contracts_rows` is ever called.
+    With the fixture below the three orders disagree, so a mapping that pointed `repos-freed` at
+    `extraction_confidence` (or dropped `DESC` to `ASC`, or fell through to the default for every
+    key) cannot pass silently the way it would against alphabetically-ordered contract_ids alone.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_contract(db, contract_id="c-alpha", consumer_repo_ids=("r1",), extraction_confidence=0.5)
+    _put_contract(
+        db,
+        contract_id="c-beta",
+        consumer_repo_ids=("r1", "r2", "r3"),
+        extraction_confidence=0.2,
+    )
+    _put_contract(db, contract_id="c-gamma", consumer_repo_ids=(), extraction_confidence=0.9)
+
+    def ids(*extra: str) -> list[str]:
+        result = runner.invoke(app, [*base_args(workspace), "--json", "contracts", "list", *extra])
+        assert result.exit_code == ExitCode.SUCCESS, result.output
+        return [row["contract_id"] for row in json.loads(result.stdout)]
+
+    assert ids() == ["c-alpha", "c-beta", "c-gamma"], "default order is contract_id, ascending"
+    assert ids("--sort", "repos-freed") == ["c-beta", "c-alpha", "c-gamma"], (
+        "repos-freed must rank by consumer count, descending (§3.1 6c-H)"
+    )
+    assert ids("--sort", "confidence") == ["c-gamma", "c-alpha", "c-beta"], (
+        "confidence must rank by extraction_confidence, descending"
+    )
+
+
+def test_contracts_inspect_returns_the_full_row_and_refuses_an_unknown_id(
+    workspace: Path,
+) -> None:
+    """`_contract_detail` has no existing test at all: `_SCHEMA_CHECKED_COMMANDS`'s
+    `("contracts","inspect")` entry only drives the schema-mismatch refusal before the function
+    body runs. Both of its outcomes are exercised here — the full-row mapping an operator reads
+    with `fleet contracts inspect`, and the `UsageError` a mistyped or stale `contract_id` gets
+    instead of a silently empty result.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_contract(
+        db,
+        contract_id="proto:acme.v1",
+        identifier="acme.v1",
+        owning_repo_id="acme-commons",
+        consumer_repo_ids=("acme-billing",),
+        extraction_confidence=0.75,
+        extractable=True,
+        hoist_target_path="contracts/acme/v1",
+        status="HOISTED",
+    )
+
+    found = runner.invoke(
+        app, [*base_args(workspace), "--json", "contracts", "inspect", "proto:acme.v1"]
+    )
+    assert found.exit_code == ExitCode.SUCCESS, found.output
+    payload = json.loads(found.stdout)
+    assert payload["kind"] == "PROTO"
+    assert payload["owning_repo_id"] == "acme-commons"
+    assert payload["consumer_repo_ids"] == json.dumps(["acme-billing"])
+    assert payload["hoist_target_path"] == "contracts/acme/v1"
+    assert payload["status"] == "HOISTED"
+
+    missing = runner.invoke(
+        app, [*base_args(workspace), "contracts", "inspect", "no-such-contract"]
+    )
+    assert missing.exit_code == ExitCode.USAGE, missing.output
+    assert "no contract 'no-such-contract'" in missing.output
+
+
+def _put_stub_in_state(
+    db: Path,
+    *,
+    stub_id: str,
+    consumer: str,
+    provider: str,
+    coord_key: str,
+    state: str,
+    abandon_reason: str | None,
+) -> None:
+    """A `stubs` row already past `ACTIVE` — `_put_stub` (above) only ever writes `ACTIVE` rows
+    (every existing caller takes its default), and a `SUPERSEDED`/`ABANDONED`/`RESOLVED` row needs
+    `resolved_at` set or schema.sql's own CHECK (`state = 'ACTIVE' OR resolved_at IS NOT NULL`)
+    refuses the insert.
+    """
+    stamp = "2026-08-08T12:00:00.000000+00:00"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+            "  provider_repo_id, pinned_version, bazel_label, state, stub_fidelity, "
+            "  revalidation_round, max_revalidation_rounds, state_changed_at, resolved_at, "
+            "  abandon_reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED_ARTIFACT', 0, 2, ?, ?, ?, ?)",
+            (
+                stub_id,
+                RUN_ID,
+                consumer,
+                coord_key,
+                consumer,
+                provider,
+                "1.0.0",
+                f"//third_party/stubs/{provider}",
+                state,
+                stamp,
+                stamp,
+                abandon_reason,
+                stamp,
+            ),
+        )
+    finally:
+        conn.close()
+
+
+def test_stubs_list_unresolved_only_excludes_terminal_states(workspace: Path) -> None:
+    """`_stub_rows`'s `unresolved_only` clause (`state IN ('ACTIVE','SUPERSEDED')`) is what backs
+    the "degraded and unresolved" reconciliation view `stubs_list`'s own docstring names (§3.5.1).
+    No existing test drives it — `_SCHEMA_CHECKED_COMMANDS`'s `("stubs","list")` entry only
+    exercises the schema-mismatch refusal — so a state silently added to or dropped from that
+    allowed set would pass every green test today.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_stub(
+        db, consumer="acme-commons", provider="acme-billing", coord_key="acme-billing@1.0.0"
+    )  # ACTIVE
+    _put_stub_in_state(
+        db,
+        stub_id="s-2",
+        consumer="acme-commons",
+        provider="acme-billing",
+        coord_key="acme-billing@2.0.0",
+        state="SUPERSEDED",
+        abandon_reason=None,
+    )
+    _put_stub_in_state(
+        db,
+        stub_id="s-3",
+        consumer="acme-commons",
+        provider="acme-billing",
+        coord_key="acme-billing@3.0.0",
+        state="ABANDONED",
+        abandon_reason="OPERATOR",
+    )
+
+    unresolved = runner.invoke(
+        app, [*base_args(workspace), "--json", "stubs", "list", "--unresolved-only"]
+    )
+    assert unresolved.exit_code == ExitCode.SUCCESS, unresolved.output
+    assert {row["coord_key"] for row in json.loads(unresolved.stdout)} == {
+        "acme-billing@1.0.0",
+        "acme-billing@2.0.0",
+    }, "ACTIVE and SUPERSEDED are unresolved; ABANDONED must not appear"
+
+    filtered = runner.invoke(
+        app, [*base_args(workspace), "--json", "stubs", "list", "--filter", "state=ABANDONED"]
+    )
+    assert filtered.exit_code == ExitCode.SUCCESS, filtered.output
+    assert {row["coord_key"] for row in json.loads(filtered.stdout)} == {"acme-billing@3.0.0"}
+
+
+def test_stubs_abandon_transitions_active_and_refuses_a_resolved_stub(workspace: Path) -> None:
+    """`_stub_abandon`'s pre-check and its `UPDATE ... WHERE` both scope to
+    `state IN ('ACTIVE','SUPERSEDED')` — a RESOLVED or already-ABANDONED stub must be refused, not
+    silently rewritten. No existing test drives `_stub_abandon` at all:
+    `_SCHEMA_CHECKED_COMMANDS`'s `("stubs","abandon")` entry only exercises the schema-mismatch
+    refusal, so an allowed-states typo that let a RESOLVED stub through — or one that blocked a
+    legitimate ACTIVE one — would pass every green test today.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_stub(
+        db, consumer="acme-commons", provider="acme-billing", coord_key="acme-billing@1.0.0"
+    )  # ACTIVE
+    _put_stub_in_state(
+        db,
+        stub_id="s-resolved",
+        consumer="acme-commons",
+        provider="acme-billing",
+        coord_key="acme-billing@2.0.0",
+        state="RESOLVED",
+        abandon_reason=None,
+    )
+
+    ok = runner.invoke(
+        app,
+        [
+            *base_args(workspace),
+            "--json",
+            "stubs",
+            "abandon",
+            "acme-commons",
+            "acme-billing@1.0.0",
+            "--reason",
+            "operator says so",
+        ],
+    )
+    assert ok.exit_code == ExitCode.SUCCESS, ok.output
+    assert json.loads(ok.stdout)["rows"] == 1
+
+    conn = sqlite3.connect(db)
+    try:
+        state, reason, resolved_at = conn.execute(
+            "SELECT state, abandon_reason, resolved_at FROM stubs "
+            " WHERE run_id = ? AND consumer_repo_id = 'acme-commons' "
+            "   AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()
+        finding = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND kind = 'StubAbandoned'", (RUN_ID,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert (state, reason) == ("ABANDONED", "OPERATOR")
+    assert resolved_at is not None
+    assert finding is not None
+    assert json.loads(finding[0])["reason"] == "operator says so"
+
+    refused = runner.invoke(
+        app,
+        [
+            *base_args(workspace),
+            "stubs",
+            "abandon",
+            "acme-commons",
+            "acme-billing@2.0.0",
+            "--reason",
+            "should not work",
+        ],
+    )
+    assert refused.exit_code == ExitCode.USAGE, refused.output
+    assert "no ACTIVE/SUPERSEDED stub" in refused.output
+
+
+def test_models_list_role_and_tier_filters_narrow_the_rows(workspace: Path) -> None:
+    """`models_list`'s `--role`/`--tier` filters are the "what will THIS run actually call"
+    pre-flight's whole reason to take arguments at all, yet no existing test ever passes either
+    flag — every `models list` invocation elsewhere in this file requests the unfiltered set. A
+    `continue` firing on the wrong branch, or a `!=`/`is not` accidentally inverted to match
+    instead of exclude, would still leave every existing assertion in this file green.
+    """
+    by_role = runner.invoke(
+        app, [*base_args(workspace), "--json", "models", "list", "--role", "dep_disambiguate"]
+    )
+    assert by_role.exit_code == ExitCode.SUCCESS, by_role.output
+    role_rows = json.loads(by_role.stdout)["routes"]
+    assert role_rows, "dep_disambiguate must resolve to at least one target"
+    assert {row["role"] for row in role_rows} == {"dep_disambiguate"}
+    assert {row["tier"] for row in role_rows} == {"CHEAP"}
+
+    by_tier = runner.invoke(
+        app, [*base_args(workspace), "--json", "models", "list", "--tier", "HEAVY"]
+    )
+    assert by_tier.exit_code == ExitCode.SUCCESS, by_tier.output
+    tier_rows = json.loads(by_tier.stdout)["routes"]
+    heavy_roles = {role.value for role, tier in SPEC_ROLE_TIERS.items() if tier.value == "HEAVY"}
+    assert heavy_roles, "fixture assumption: at least one role is routed to HEAVY"
+    assert {row["role"] for row in tier_rows} == heavy_roles
+    assert {row["tier"] for row in tier_rows} == {"HEAVY"}
+
+
+def test_models_profiles_marks_the_active_profile_and_lists_the_rest(tmp_path: Path) -> None:
+    """`models_profiles`'s function body has never run to completion before this test:
+    `test_max_cost_usd_may_only_lower_the_ceiling` invokes `models profiles` but with a
+    `--max-cost-usd` override that fails inside `_load_settings`, before `models_profiles` itself
+    ever runs. The one thing worth getting wrong here is which name earns the `*` — an inverted
+    equality would mark every OTHER profile active and never the real one.
+    """
+    config = write_config(tmp_path, models=MODELS_YAML + LOCAL_PROFILE_YAML)
+
+    default_run = runner.invoke(app, ["--config", str(config), "--json", "models", "profiles"])
+    assert default_run.exit_code == ExitCode.SUCCESS, default_run.output
+    assert json.loads(default_run.stdout) == {
+        "active": "default",
+        "profiles": ["default", "local"],
+    }
+
+    table = runner.invoke(app, ["--config", str(config), "models", "profiles"])
+    assert table.exit_code == ExitCode.SUCCESS, table.output
+    lines = table.stdout.splitlines()
+    assert any(line.startswith("* default") for line in lines), table.stdout
+    assert any(line.startswith("  local") for line in lines), table.stdout
+
+    switched = runner.invoke(
+        app, ["--config", str(config), "--profile", "local", "--json", "models", "profiles"]
+    )
+    assert switched.exit_code == ExitCode.SUCCESS, switched.output
+    assert json.loads(switched.stdout)["active"] == "local"
+
+
+def test_models_check_reports_unregistered_backends_and_strict_fails_closed(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`models_check`'s own docstring's whole claim: a target whose backend never registered "can
+    never be reached, and under `--strict` that is exit 8" (ADR-0023's fail-closed rule). This
+    function has zero existing test coverage — `_SCHEMA_CHECK_EXCLUDED` documents that it never
+    touches the database, but nothing exercises the body itself.
+
+    `registry()` is monkeypatched rather than naming an unregistered backend in
+    `config/models.yaml`: a `backend` absent from `known_backends` fails `FleetSettings.load`
+    itself (`settings.py::_check_routing`) before `models_check` would ever run. The only way to
+    reach "registered when settings loaded, absent from `models_check`'s own later `registry()`
+    read" is to inject exactly that gap — which is also exactly what a backend whose SDK import
+    became broken between processes would look like from `models_check`'s point of view.
+    """
+    from fleet import cli as cli_module
+
+    live_registry = cli_module.registry
+    monkeypatch.setattr(
+        cli_module,
+        "registry",
+        lambda: {
+            name: backend for name, backend in live_registry().items() if name != "anthropic"
+        },
+    )
+
+    lenient = runner.invoke(app, [*base_args(workspace), "--json", "models", "check"])
+    assert lenient.exit_code == ExitCode.SUCCESS, lenient.output
+    payload = json.loads(lenient.stdout)
+    assert payload["unreachable"] == ["anthropic"]
+    assert payload["targets"], "the default profile fixture must route through anthropic"
+    assert all(not row["registered"] for row in payload["targets"])
+
+    strict = runner.invoke(app, [*base_args(workspace), "models", "check", "--strict"])
+    assert strict.exit_code == ExitCode.TIER_UNAVAILABLE == 8, strict.output
+    assert "anthropic" in strict.output
