@@ -145,3 +145,45 @@ restored byte-identical. Only this report file and the git commit recording it a
 | `src/fleet/bazel/lockfile.py` | Confirmed sound. Fresh mutation inverting `check_lock_registry`'s host filter; discriminating (3/72 failed), restored clean. |
 
 Do not merge, do not push.
+
+## Correction (2026-09-14, post-review, appended per CLAUDE.md's "annotate, never rewrite")
+
+**This does not overturn the report's "confirmed sound" verdict for `bazel/generators.py`, nor
+any other conclusion in this report — only one stated *reasoning* sentence below was found false
+by review, not by me.**
+
+The original text above (§ `bazel/generators.py`) claims:
+
+> `combined.lower` already equals the maximum of the candidate lower bounds; among the
+> candidates, only the one whose value equals that maximum can ever satisfy
+> `combined.contains(version)`. With at most one candidate ever able to satisfy the loop's
+> condition, iterating forward vs. reversed reaches the same answer by construction — the
+> mutation is **not expressible** against this algorithm's invariant, not a coverage gap.
+
+The reviewer (`.superpowers/sdd/round-VIII-qa-qc/review-mutation-batch24-report.md`) constructed
+a real counter-example, verified by direct execution against `parse_range`/`VersionRange`: two
+requirements `>=31` and `>=31.0` on the same coordinate. `candidates` is a `set` of `(rng.lower,
+rng.lower_text)` pairs, deduplicated on the *pair*, not on numeric value — so `"31"` (parsing to
+`(31,)`) and `"31.0"` (parsing to `(31, 0)`) are two distinct candidate entries that are **both**
+numerically maximal under the padded `_cmp` comparison `contains()` uses. Both pass
+`combined.contains(version) and all(rng.contains(version) for ...)`, so forward order picks `"31"`
+and reversed order picks `"31.0"` — a real, reproducible divergence. My "at most one candidate can
+ever satisfy the loop's condition" claim is therefore false as a general statement about
+`mvs_select`; the correct scope, per the reviewer, is "at most one **value** can satisfy it, but
+ties on that value between differently-precision-spelled requirements are possible and undecided
+by any documented tie-break rule."
+
+**Why this doesn't change the file's verdict:** the reviewer judged the consequence cosmetic (both
+spellings denote the same version to Bazel/BCR; no existing `tests/test_bazel.py` fixture
+constructs the tie) and recommended noting the gap rather than requiring a fix in this batch. My
+overall handling — not accepting the resulting 72/72 all-pass as proof of soundness, and instead
+running a second, genuinely discriminating mutation (`reconcile_versions`'s collect-not-raise
+property, 1/72 failed) — was assessed as the correct response to an inconclusive result, regardless
+of the flawed reasoning I gave for why it was inconclusive.
+
+**Caught by review, not by me.** I did not verify the "at most one candidate" claim by
+constructing a tie case before writing it; I reasoned about the single-lower-bound case and did
+not consider that `candidates` dedupes on the `(lower, lower_text)` pair rather than on `lower`
+alone. Flagging per CLAUDE.md's measurement discipline: an unmeasured reasoning claim, even one
+that only supports a conclusion later found correct on other grounds, is not itself validated by
+that conclusion, and is corrected here rather than left standing.
