@@ -1261,6 +1261,33 @@ def test_symbolindex_stops_between_files_when_cancelled(tmp_path: Path) -> None:
     assert result.remaining_units
 
 
+def test_symbolindex_cancelled_before_any_file_reports_status_cancelled(tmp_path: Path) -> None:
+    """Nothing landed yet: a genuine `ctx.cancelled()` is an operator decision and stays
+    `cancelled` (not an attempt) -- `TRANSIENT_INFRA`. `partial` with nothing completed is
+    `failed` wearing a friendlier name, so `not landed` is a distinct branch from the test above
+    (which lands one file before cancelling)."""
+    root = worktree_with(tmp_path)
+    ctx = make_ctx(root)
+    ctx.cancel.set()
+    result = asyncio.run(SymbolindexWorker().run(ctx, index_payload()))
+    assert result.status == "cancelled"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.TRANSIENT_INFRA
+
+
+def test_symbolindex_expired_before_any_file_reports_status_timeout(tmp_path: Path) -> None:
+    """Nothing landed yet and the deadline already passed (no operator cancel): must be a
+    chargeable `timeout` result (§11, retried up to 3 attempts before
+    REQUIRES_HUMAN_INTERVENTION) -- conflating it with `cancelled` would let a repo that times
+    out on every symbolindex attempt loop forever instead of escalating."""
+    root = worktree_with(tmp_path)
+    ctx = make_ctx(root, seconds_left=-1.0)
+    result = asyncio.run(SymbolindexWorker().run(ctx, index_payload()))
+    assert result.status == "timeout"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.TIMEOUT
+
+
 def test_symbolindex_batch_ceiling_hands_over_rather_than_growing(tmp_path: Path) -> None:
     """A full batch is handed back as `partial` instead of accumulating the whole repo (§11.3).
 
@@ -1413,6 +1440,35 @@ def test_interrogate_worktree_check_that_cannot_settle_is_retryable_not_prefligh
     assert result.error.failure_class is not FailureClass.PREFLIGHT
     assert result.error.failure_class is FailureClass.TRANSIENT_INFRA
     assert result.error.retryable is True
+
+
+def test_interrogate_cancelled_before_any_manifest_reports_status_cancelled(
+    tmp_path: Path,
+) -> None:
+    """Nothing parsed yet: a genuine `ctx.cancelled()` is an operator decision and stays
+    `cancelled` (not an attempt) -- `TRANSIENT_INFRA`, never charged against the ladder."""
+    root = worktree_with(tmp_path)
+    ctx = make_ctx(root)
+    ctx.cancel.set()
+    result = asyncio.run(InterrogateWorker().run(ctx, InterrogateInput(repo_id="acme-billing")))
+    assert result.status == "cancelled"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.TRANSIENT_INFRA
+
+
+def test_interrogate_expired_before_any_manifest_reports_status_timeout(
+    tmp_path: Path,
+) -> None:
+    """Nothing parsed yet and the deadline already passed (no operator cancel): must be a
+    chargeable `timeout` result (§11) -- conflating it with `cancelled` would let a repo that
+    times out on every interrogate attempt loop forever instead of escalating to
+    REQUIRES_HUMAN_INTERVENTION after 3 tries."""
+    root = worktree_with(tmp_path)
+    ctx = make_ctx(root, seconds_left=-1.0)
+    result = asyncio.run(InterrogateWorker().run(ctx, InterrogateInput(repo_id="acme-billing")))
+    assert result.status == "timeout"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.TIMEOUT
 
 
 # =======================================================================================
@@ -1594,6 +1650,33 @@ def test_classify_preconditions_and_reentry_spend_no_second_call(tmp_path: Path)
 
     missing_tree = classify_payload(remaining_units=(), worktree_path=str(tmp_path / "gone"))
     assert asyncio.run(worker.preconditions_hold(ctx, missing_tree)) is False
+
+
+def test_classify_cancelled_before_dispatch_reports_status_cancelled_not_an_attempt(
+    tmp_path: Path,
+) -> None:
+    """A genuine `ctx.cancelled()` is an operator decision and stays `cancelled` (not an
+    attempt) -- `TRANSIENT_INFRA`, never charged against the ladder."""
+    ctx = make_ctx(tmp_path)
+    ctx.cancel.set()
+    result = asyncio.run(ClassifyWorker().run(ctx, classify_payload()))
+    assert result.status == "cancelled"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.TRANSIENT_INFRA
+
+
+def test_classify_expired_before_dispatch_reports_status_timeout_and_charges_an_attempt(
+    tmp_path: Path,
+) -> None:
+    """A genuine `ctx.expired()` (deadline already passed, no operator cancel) must be a
+    chargeable `timeout` result (§11) -- conflating it with `cancelled` would let a repo that
+    times out on every classify attempt loop forever instead of escalating to
+    REQUIRES_HUMAN_INTERVENTION after 3 tries."""
+    ctx = make_ctx(tmp_path, seconds_left=-1.0)
+    result = asyncio.run(ClassifyWorker().run(ctx, classify_payload()))
+    assert result.status == "timeout"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.TIMEOUT
 
 
 # =======================================================================================
