@@ -389,6 +389,30 @@ def test_an_empty_repo_is_skipped_with_a_finding_and_the_fleet_continues(fleet: 
     assert query(fleet, "SELECT COUNT(*) FROM manifests WHERE repo_id = 'acme-empty'") == [(0,)]
 
 
+def test_the_gated_repo_is_named_in_the_reported_skipped_list_not_just_the_db(
+    fleet: Path,
+) -> None:
+    """`_gate_empty_repos`'s return value — `tuple(repo_id for repo_id, _ in rows)` — is not a
+    side channel: `cli.py::_scan_impl` folds it straight into `result["skipped"]`
+    (`"skipped": sorted(set(gated) | set(baseline_gated))`), which is what `fleet scan`'s own
+    human summary line reports to an operator (`f"{len(result['skipped'])} skipped"`) and what
+    `--json` hands to any caller that scripts around this tool. The sibling test immediately
+    above only reads `phases`/`findings` back out of SQLite directly — it never looks at the
+    function's return value at all — so a mutation collapsing `_gate_empty_repos`'s `return` to
+    `()` unconditionally (while the SKIPPED UPDATE and the `EmptyRepo` finding INSERT still run
+    exactly as before) would leave every DB-level assertion in this file green while the tool
+    told an operator "0 skipped" about a fleet that just silently dropped one repo.
+    """
+    result = runner.invoke(
+        app,
+        [*base_args(fleet), "--json", "scan", "--skip-classify"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["skipped"] == ["acme-empty"], payload
+
+
 def test_scan_makes_no_model_call_by_default_over_local_repos(fleet: Path) -> None:
     """The default scan path over local repositories reaches no model and no network.
 
@@ -491,6 +515,44 @@ def test_the_declared_dependency_edge_points_from_dependent_to_dependency(fleet:
     radii = dict(query(fleet, "SELECT repo_id, blast_radius FROM repos"))
     assert radii["acme-lib-ts"] == 1
     assert radii["acme-app-ts"] == 0
+
+
+def test_a_repo_dst_edges_coord_key_is_the_owning_repos_coordinate_not_the_bare_repo_id(
+    fleet: Path,
+) -> None:
+    """`_persist_scan_edges`'s `dst_coord_key` ternary (`str(edge.dst_id) if
+    edge.dst_coordinate is None else edge.dst_coordinate.key`) must resolve to the dst repo's OWN
+    published coordinate key for a REPO-kind edge, never fall through to the bare `dst_id` — the
+    `None` arm is for a CONTRACT dst only (`models/graph.py`'s own validator: a REPO dst edge
+    always carries `dst_coordinate`).
+
+    The sibling test immediately above (`test_the_declared_dependency_edge_points_from_dependent_
+    to_dependency`) selects `src_id, dst_id, kind, evidence_path, confidence,
+    retargeted_from_repo_id` — never `dst_coord_key` — so a mutation collapsing this ternary to
+    always `str(edge.dst_id)` would pass every existing `edges`-shape assertion in this file
+    untouched while corrupting the exact column `orchestrator/stubs.py` keys its
+    `(consumer_repo_id, edges.dst_coord_key)` transform-stub lookup on (its own docstring: "the
+    EDGE's own `dst_coord_key`, never the provider's `primary_coord_key`").
+    """
+    assert scan(fleet).exit_code == ExitCode.SUCCESS
+
+    primary_coord_keys = dict(query(fleet, "SELECT repo_id, primary_coord_key FROM repos"))
+    rows = query(
+        fleet,
+        "SELECT dst_id, dst_coord_key FROM edges "
+        "WHERE dst_kind = 'REPO' AND src_id = 'acme-app-ts'",
+    )
+    assert rows, (
+        "fixture's declared npm dependency edge must exist for this assertion to mean anything"
+    )
+    for dst_id, dst_coord_key in rows:
+        expected = primary_coord_keys[str(dst_id)]
+        assert expected is not None, f"{dst_id} must have published a coordinate to be a dst"
+        assert dst_coord_key == expected, (
+            f"edges.dst_coord_key={dst_coord_key!r} must equal the dst repo's own "
+            f"repos.primary_coord_key={expected!r}, not fall back to the bare repo id"
+        )
+        assert dst_coord_key != dst_id, "a real coordinate key must differ from the bare repo id"
 
 
 # ---------------------------------------------------------------------------------------
@@ -600,6 +662,30 @@ def test_a_second_scan_clones_nothing_and_duplicates_no_row(fleet: Path) -> None
     assert after == before, "a re-scan duplicated rows"
     assert dict(query(fleet, "SELECT repo_id, head_sha FROM repos")) == heads
     assert dict(query(fleet, "SELECT repo_id, attempts FROM phases WHERE phase = 1")) == attempts
+
+
+def test_a_second_scan_does_not_duplicate_file_blobs_rows(fleet: Path) -> None:
+    """`_capture_file_blobs` runs unconditionally on every `fleet scan` invocation (it re-reads
+    `head_sha` for the whole fleet from `repos`, not just this run's newly-cloned repos), so its
+    own `DELETE FROM file_blobs WHERE run_id = ?` immediately before the re-INSERT — the same
+    delete-then-insert pattern `_contract_rows` uses for `contracts`, per this function's own
+    docstring — is what makes a re-scan idempotent for this ONE table.
+
+    The sibling test immediately above (`test_a_second_scan_clones_nothing_and_duplicates_no_row`)
+    checks row counts across `repos, manifests, coordinates, symbols, edges, phases, findings` —
+    `file_blobs` is not among them — so a mutation deleting the `DELETE FROM file_blobs ...` line
+    would leave that whole battery of re-scan-idempotency assertions green while a second scan
+    either raises an uncaught `(run_id, repo_id, path)` PRIMARY KEY violation or, if that
+    constraint were ever relaxed, silently duplicates every captured blob row.
+    """
+    assert scan(fleet).exit_code == ExitCode.SUCCESS
+    before = query(fleet, "SELECT COUNT(*) FROM file_blobs")[0][0]
+    assert before > 0, "the fixture must really capture file_blobs for this test to mean anything"
+
+    result = scan(fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    after = query(fleet, "SELECT COUNT(*) FROM file_blobs")[0][0]
+    assert after == before, "a re-scan duplicated (or lost) file_blobs rows"
 
 
 def test_a_second_sequence_leaves_waves_and_wave_members_unchanged(fleet: Path) -> None:
