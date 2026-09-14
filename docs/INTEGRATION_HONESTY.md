@@ -11500,8 +11500,8 @@ confirmed to fail against the pre-fix `client = ctx.llm` (both rows collapse to
 `context_policy IS NULL` / the empty-set digest) and pass against the fix. See
 `.superpowers/sdd/round-VIII-qa-qc/worker-d137-fix-report.md` for the full report.
 
-## D138 — FIXED, LANDED (`0b8a192`, round VIII Wave 18, branch `agent/roundviii-d138-fix`, not yet
-merged to `main`). `workers/clone.py::_interrupted()` never distinguishes a genuine timeout from a
+## D138 — FIXED, LANDED (`0b8a192`, round VIII Wave 18, merged to `main` at `c53c6f7`).
+`workers/clone.py::_interrupted()` never distinguishes a genuine timeout from a
 genuine cancellation — both report `status="cancelled"`, so a repo that always times out never
 charges an attempt and can loop forever instead of escalating
 
@@ -11559,3 +11559,34 @@ recommended as a follow-up.
 > reverted to their pre-fix shape, confirmed non-empty diff against a backup, confirmed the new
 > discriminating test(s) went RED, restored to byte-identical, confirmed GREEN. Full report:
 > `.superpowers/sdd/round-VIII-qa-qc/worker-d138-fix-report.md`.
+
+## D139 — OPEN. `ecosystems/js.py` has NO ecosystem filter on `unit.external_coordinates`
+anywhere, unlike its four siblings (`go.py`/`py.py`/`jvm.py`/`rust.py`), which all filter
+foreign-ecosystem coordinates out before emitting workspace dependencies
+
+**Found by round VIII's `worker-mutation-batch19` (`.superpowers/sdd/round-VIII-qa-qc/
+worker-mutation-batch19-report.md`) while mutation-auditing `ecosystems/{base,go,js,unknown}.py`
+as a follow-on to `agent/roundviii-mutation-batch3`'s coverage of py.py/jvm.py/rust.py. Allocated
+by the round VIII controller, form-agnostic sweep found `D138` as the highest allocated number.**
+
+**The gap, as measured.** `334edeb` added an `external_coordinates` ecosystem-filter fix to
+`py.py`, `jvm.py`, and `rust.py` (mutation-proven this round in `agent/roundviii-mutation-batch3`);
+`go.py` already carried the equivalent `_go_requires()` filter independently (confirmed by
+`worker-mutation-batch19`, which added the missing test for it). `js.py`'s `workspace_deps()`
+(`js.py:573-593`) instead spreads `*unit.external_coordinates` directly into the
+`npm_translate_lock` coordinate list with no ecosystem check at all — verified by reading the
+function directly, and confirmed by grepping `js.py` for any `Ecosystem`/`ecosystem ==` guard
+near `external_coordinates`, `workspace_deps`, or `_unit_package_json`: none exists.
+
+**Failure this permits.** A build unit whose `external_coordinates` include a coordinate from a
+non-JS ecosystem (a mixed-language repo sharing one unit's coordinate list across ecosystem
+adapters, the same shape `334edeb`'s fix guards against elsewhere) would have that foreign
+coordinate silently rendered into the JS workspace's `npm_translate_lock` extension — the same
+class of cross-ecosystem leakage `334edeb` closed in the three sibling adapters, left open here.
+
+**Not yet built.** `js.py`'s `workspace_deps()` (and any other site iterating
+`unit.external_coordinates` without a filter) needs the same ecosystem guard as
+`py.py`/`jvm.py`/`rust.py`/`go.py`, plus a mutation-proof test confirming a foreign-ecosystem
+coordinate is excluded. Deliberately not attempted here — this entry is a scoping-only finding
+per the discovering task's own coverage-only brief; a dedicated fix dispatch is recommended as a
+follow-up.
