@@ -64,6 +64,30 @@ def test_binding_target_depends_on_the_neutral_targets_label_and_uses_the_suppli
     assert neutral.label in binding.deps
 
 
+def test_layout_collapses_runs_of_illegal_characters_into_a_single_dash_and_strips_edges() -> (
+    None
+):
+    """`_DEST_ILLEGAL = re.compile(r"[^a-z0-9]+")` (`openapi.py:37`) has a `+` quantifier that
+    every existing fixture identifier ("openapi/user_api.yaml") happens not to discriminate: none
+    of its illegal-character runs are longer than one character in a row at the point they matter
+    (the folding is exercised, but never a MULTI-character illegal run), so a mutation dropping
+    the `+` (folding each illegal character to its OWN dash instead of collapsing a run to one)
+    would pass every current test. An identifier with a 2-and-3-character illegal run, plus a
+    leading illegal run (exercising `.strip("-")` on the front, not just via `normalize_dest`),
+    discriminates: with the `+`, illegal runs each collapse to exactly one dash; without it, a
+    run of N illegal characters becomes N dashes."""
+    adapter = OpenApiContractAdapter()
+    identifier = "__Foo///Bar!!.yaml"
+    node = ContractNode(
+        contract_id="openapi:illegal-run-test",  # identifier itself fails ContractId's pattern
+        kind=ContractKind.OPENAPI,
+        identifier=identifier,
+        source_paths=[{"repo_id": "acme-api", "path": identifier, "blob_sha": "deadbeef"}],
+    )
+
+    assert adapter.layout(node) == Path("contracts/openapi/foo-bar-yaml")
+
+
 def test_layout_still_calls_is_reserved_dest_even_though_it_cannot_fire_today() -> None:
     """Not a behavior test -- a structural one, so a future `root` change that DOES reach `_scc`
     is still caught. Monkeypatches is_reserved_dest via the module's own import binding rather

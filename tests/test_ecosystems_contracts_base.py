@@ -207,3 +207,51 @@ def test_the_real_contracts_registry_is_a_total_bijection_over_contractkind() ->
         "shared_lib",
         "thrift",
     }
+
+
+def test_discover_raises_on_a_stateful_registered_instance_naming_it_and_its_attributes() -> None:
+    """§12.47's core enforcement mechanism (`base.py:161-169`) has no prior test anywhere in this
+    file or its siblings -- every adapter test file proves ITS OWN adapter happens to be stateless,
+    never that `discover()` would actually catch one that wasn't. `register()` itself does not
+    check statelessness (it only guards duplicate `kind`/missing `kind` -- see
+    `test_duplicate_kind_registration_raises_naming_both_claimants` and
+    `test_register_without_a_declared_kind_raises` above); the check lives only in `discover()`'s
+    per-instance loop.
+
+    Sabotages a REAL registered instance (rather than a fake test-local adapter class) so the
+    `discover(force=True)` re-scan hits the exact `for inst in _BY_KIND.values(): if vars(inst):
+    raise ...` loop with a real singleton already in place -- `force=True` re-enters that loop
+    even though `_BY_KIND` is non-empty (so no module reload actually happens; the check runs
+    regardless, which is also what the short-circuit sibling test below relies on)."""
+    discover(force=True)
+    adapter = for_kind(ContractKind.PROTO)
+    adapter.__dict__["_leaked_state"] = "should never survive a real re-scan"
+    try:
+        with pytest.raises(RuntimeError, match=r"stateful ContractAdapter") as excinfo:
+            discover(force=True)
+        message = str(excinfo.value)
+        assert "proto" in message
+        assert "_leaked_state" in message
+    finally:
+        del adapter.__dict__["_leaked_state"]
+
+
+def test_discover_short_circuits_without_rechecking_statelessness_once_already_discovered() -> (
+    None
+):
+    """`discover()`'s `if _DISCOVERED and not force: return dict(_BY_KIND)` (`base.py:137-138`)
+    is the caching fast path every ordinary caller (e.g. `fleet build`'s repeated PASS 2b calls)
+    takes after the first real scan. No existing test distinguishes it from simply calling the
+    full scan-and-verify path twice with nothing having changed -- both would pass. This sabotages
+    a live registered instance's state AFTER a real `discover(force=True)`, then calls a plain
+    `discover()`: if the short circuit is real, the sabotage is never re-checked and no error is
+    raised; if the short circuit were removed (mutation), the per-instance statelessness loop
+    would re-run and raise on the sabotaged instance."""
+    discover(force=True)
+    adapter = for_kind(ContractKind.PROTO)
+    adapter.__dict__["_leaked"] = "state a real re-scan would reject"
+    try:
+        result = discover()  # force=False -- must short-circuit, not re-verify
+        assert result[ContractKind.PROTO] is adapter
+    finally:
+        del adapter.__dict__["_leaked"]

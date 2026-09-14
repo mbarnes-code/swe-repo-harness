@@ -64,6 +64,21 @@ def test_neutral_targets_returns_empty_list() -> None:
     assert adapter.neutral_targets(node) == []
 
 
+def test_binding_target_falls_back_to_lib_when_identifier_has_no_trailing_segment() -> None:
+    """`base_name = contract.identifier.rsplit(".", 1)[-1] or "lib"` (`shared_lib.py:58`) has no
+    prior test anywhere in this file -- every existing fixture uses an identifier whose trailing
+    segment is non-empty ("utils"), so the `or "lib"` fallback has never actually been exercised.
+    An identifier ending in "." (still `min_length=1`-valid on `ContractNode`) makes
+    `rsplit(".", 1)[-1]` return `""`, which is falsy -- proving the fallback fires rather than
+    silently emitting a target named `"_pypi"`."""
+    adapter = SharedLibContractAdapter()
+    node = _shared_lib_node(identifier="acme.common.", hoist_target_path="libs/acme/common-utils")
+
+    binding = adapter.binding_target(node, Ecosystem.PYPI, "py_library")
+
+    assert binding.name == "lib_pypi"
+
+
 def test_binding_target_carries_its_own_srcs_with_no_neutral_target_to_depend_on() -> None:
     adapter = SharedLibContractAdapter()
     node = _shared_lib_node()
