@@ -15847,3 +15847,24 @@ REVALIDATION)`, catch `RevalidationBudgetExhausted` → `settle_revalidation(bud
 MECHANISM, M, includes the `VerifyPipelineWorker` fix above) lands first; B2 (the §12.39 case (ii)
 two-round fixture proving `BUDGET_EXHAUSTED` through the real path — TEST-ONLY, S/M) lands only
 after B1. §12.39 stays OUT of the `<n> of 48` count until both land.
+
+### ADR-0137 — Wave 6 spot-check batch grouping (§15.1 item 3)
+
+**Context.** `worker-mutation-scope-report.md` sized Waves 0-5 exactly but left Wave 6 (spot-check
+of ~40 remaining bucket-A files never touched by `334edeb`) as a suggestion only: "sample rather
+than exhaustively re-run... batch into 3-4 groups of ~4-5 files," naming `budgets.py`,
+`scheduler.py`, `enums.py`, `tasks.py`, `worktree.py`, `bazel/*.py` as candidates.
+
+**Decision.** The controller grouped Wave 6 directly from that candidate list, a deterministic
+grouping task (Rule 5: code/routing, not judgment) rather than a research dispatch:
+- Batch 22: `orchestrator/budgets.py`, `orchestrator/scheduler.py`
+- Batch 23: `models/enums.py`, `models/tasks.py`
+- Batch 24: `sandbox/worktree.py`, `bazel/generators.py`, `bazel/layout.py`, `bazel/lockfile.py`,
+  `bazel/query.py`
+- Batch 25: `graph/build.py`, `graph/cycles.py`, `llm/cache.py`, `llm/calls.py`, `llm/roles.py`,
+  `llm/schemas.py`
+
+This is a spot-check sample, not exhaustive coverage of bucket A's remaining ~40 files — the
+scope report's own explicit call, made because project history shows sustained Rule-12 discipline
+in this bucket. Any bucket-A file outside these 4 batches is deliberately left unsampled this
+round.

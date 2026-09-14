@@ -11603,3 +11603,22 @@ class of cross-ecosystem leakage `334edeb` closed in the three sibling adapters,
 coordinate is excluded. Deliberately not attempted here — this entry is a scoping-only finding
 per the discovering task's own coverage-only brief; a dedicated fix dispatch is recommended as a
 follow-up.
+
+## D140 — OPEN. `obs/events.py`'s exception-wrapper branch around `_build_row()` builds an
+`EmitResult` that omits `failures=`, so `.ok`/`.failures` disagree with `failed_emits` bookkeeping
+on a real emit failure
+
+Found by round VIII's `worker-mutation-batch21`
+(`.superpowers/sdd/round-VIII-qa-qc/worker-mutation-batch21-report.md`) while writing a
+mutation-proof test for the `except Exception` wrapper around `_build_row()` (naive-datetime
+rejection path). The `except` branch's returned `EmitResult` does not set `failures=`, so callers
+reading `.failures`/`.ok` see a false-clean result even though the emitter's own `failed_emits`
+counter is incremented for the same event — a real observability gap (a caller relying on
+`.ok` would not learn about a genuinely dropped emit). Independently confirmed by
+`review-mutation-batch21` (`.superpowers/sdd/round-VIII-qa-qc/review-mutation-batch21-report.md`):
+verified against source and confirmed the branch is not currently consumed anywhere in `src/`
+in a way that would make this a live-user-facing bug today (Rule 3: correctly not fixed in that
+batch, out of its scope). Allocated centrally by the controller at dispatch time, not by either
+lane. Not yet fixed — queue for a future dispatch (small, TEST-ONLY-to-S fix: set `failures=` in
+the except branch and add a discriminating test showing `.ok`/`.failures` now agree with
+`failed_emits`).
