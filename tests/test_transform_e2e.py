@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import shutil
 import sqlite3
 import subprocess
 from collections.abc import Iterator
@@ -636,6 +637,54 @@ def test_a_failing_repo_does_not_stop_its_siblings_or_the_wave(fleet: Path) -> N
     assert len(commits_on_branch(fleet, "acme-app-ts")) == 3
 
 
+def test_a_missing_phase_one_worktree_is_contained_not_a_wave_crash(fleet: Path) -> None:
+    """`_transform_impl`'s wave loop wraps each repo's `_prepare_repo` call in `except
+    (TransformStepUnavailableError, GitError, OSError): await _abandon_repo(...)` (cli.py) --
+    containment for a repo whose GIT PREPARATION cannot proceed, distinct from the test above's
+    worker-level `RULE_MISS` (which fires downstream, inside `_run_transform_wave`, after
+    `_prepare_repo` already succeeded and commits had already landed).
+
+    No existing test drives that clause AS IT APPEARS INSIDE `_transform_impl`: `tests/
+    test_cli.py::test_a_timed_out_resolve_routes_to_abandon_not_a_branch_reset` replicates the
+    exact same `try/except` body directly against a standalone `_prepare_repo` call, and its own
+    docstring says why -- "so a future refactor of either side ... fails this test without needing
+    the whole orchestrator wired up." That is a deliberate, disclosed narrowing: it proves the
+    clause's BODY is correct in isolation, never that `_transform_impl`'s wave loop actually
+    reaches it, still calls `_run_transform_wave` for the wave afterward, and leaves every OTHER
+    member of the same wave dispatched normally. A mutation that removed this call site's `try/
+    except` entirely (letting `TransformStepUnavailableError` propagate up through the `TaskGroup`
+    that also runs the sibling's real work) would still pass every existing test in this file and
+    in `test_cli.py`.
+
+    Triggers `_prepare_repo`'s FIRST check -- "no Phase 1 worktree" -- by deleting one already
+    Phase-1-cut worktree between `scan` and `transform`, exactly the `TransformStepUnavailableError`
+    `_prepare_repo`'s own docstring names as this catch clause's reason to exist. No git mocking:
+    real git, real worktrees, one directory removed.
+    """
+    scanned(fleet)
+    shutil.rmtree(worktree(fleet, "acme-app-ts"))
+
+    result = transform(fleet)
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, result.output
+
+    statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 2"))
+    assert statuses["acme-app-ts"] == "REQUIRES_HUMAN_INTERVENTION", statuses
+    for survivor in ("acme-lib-ts", "acme-lib-py", "acme-app-py"):
+        assert statuses[survivor] == "SUCCEEDED", statuses
+
+    failure = query(
+        fleet,
+        "SELECT failure_class, last_error FROM phases WHERE repo_id = 'acme-app-ts' AND phase = 2",
+    )
+    assert failure[0][0] == "PREFLIGHT", failure
+    assert "no Phase 1 worktree" in str(failure[0][1]), failure
+
+    # The wave still closed and the untouched sibling's commits landed for real -- the failure
+    # was contained to exactly the one repo, never propagated to the `TaskGroup` running the rest
+    # of the wave.
+    assert len(commits_on_branch(fleet, "acme-lib-ts")) >= 1
+
+
 def test_a_provider_failing_in_an_earlier_wave_blocks_its_later_wave_dependent_in_one_run(
     fleet: Path,
 ) -> None:
@@ -1191,6 +1240,48 @@ def test_dry_run_emits_the_plan_and_writes_nothing(fleet: Path) -> None:
     assert query(fleet, "SELECT COUNT(*) FROM phases WHERE phase = 2") == [(0,)]
     branches = git(worktree(fleet, "acme-app-ts"), "branch", "--list", "migrate/*")
     assert branches == "", f"--dry-run created a branch: {branches}"
+
+
+def test_dry_run_reports_not_preparable_for_a_missing_worktree_without_crashing(
+    fleet: Path,
+) -> None:
+    """`_transform_dry_run`'s per-repo loop has a branch the test above never reaches: `if dest is
+    None or not await asyncio.to_thread((worktree / ".git").exists): plan[repo_id] = {"wave":
+    index, "plan": None, "reason": "not preparable"}`. A literal grep for "not preparable" across
+    this repo's tree (source and tests both) turns up exactly one hit -- the line that writes it --
+    before this test: the branch has never been exercised.
+
+    Reuses the same fixture-sabotage (delete an already-Phase-1-cut worktree) this file's
+    `test_a_missing_phase_one_worktree_is_contained_not_a_wave_crash` uses to reach `_prepare_
+    repo`'s identical first check, but through `--dry-run` instead: `_transform_dry_run` never
+    calls `_prepare_repo` at all (`--dry-run` returns from `_transform_impl` before the real
+    preparation path runs, per `_transform_impl`'s own docstring), so this proves the check is
+    genuinely duplicated for the read-only preview path, not merely inherited from the real one --
+    a mutation deleting this branch (e.g. always taking the `sources = await _tracked_at(...)` arm)
+    would raise `FileNotFoundError` out of `_tracked_at` on the missing worktree instead of
+    reporting the repo as not preparable, turning one repo's already-known gap into a dry-run
+    crash for the whole fleet.
+    """
+    scanned(fleet)
+    shutil.rmtree(worktree(fleet, "acme-app-ts"))
+
+    result = transform(fleet, "--dry-run")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    plan = dict(payload(result)["plan"])
+    assert set(plan) == set(DESTINATIONS), plan
+    assert plan["acme-app-ts"]["plan"] is None, plan["acme-app-ts"]
+    assert plan["acme-app-ts"]["reason"] == "not preparable", plan["acme-app-ts"]
+    assert "moves" not in plan["acme-app-ts"], plan["acme-app-ts"]
+
+    for repo_id in DESTINATIONS:
+        if repo_id == "acme-app-ts":
+            continue
+        assert "moves" in plan[repo_id], plan[repo_id]
+        assert "reason" not in plan[repo_id], plan[repo_id]
+
+    # Still a preview: nothing written, for the missing-worktree repo or its siblings.
+    assert query(fleet, "SELECT COUNT(*) FROM phases WHERE phase = 2") == [(0,)]
 
 
 def test_deterministic_only_reaches_no_model(fleet: Path) -> None:

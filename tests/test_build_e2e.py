@@ -2851,6 +2851,166 @@ def test_the_build_side_sweep_respects_stub_blocked_from_a_resume_continuation(
     assert after_guarded[_STUB_CONSUMER] == "PENDING", after_guarded
 
 
+def test_the_sweep_is_scoped_to_its_own_phase_not_any_rhi_row_for_the_repo(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    resolver: FakeResolver,
+) -> None:
+    """`_repropagate_terminal_providers`'s own SELECT is `WHERE run_id = ? AND phase = ? AND
+    status = 'REQUIRES_HUMAN_INTERVENTION'` — every dedicated regression test for this function
+    (this file's and `tests/test_transform_e2e.py`'s) drives exactly ONE phase's RHI row per
+    sweep call, so the `AND phase = ?` clause has never been asked to actually discriminate: a
+    mutation deleting it (or widening it to match any phase) would still pass every one of them,
+    because in every existing fixture the ONLY RHI row on record for the provider already belongs
+    to the phase being swept.
+
+    Proves the isolation directly: `acme-lib-py` (`_STUB_PROVIDER`) is hand-seeded
+    `REQUIRES_HUMAN_INTERVENTION` at BUILD (phase 3) only, while `acme-app-py`'s (`_STUB_CONSUMER`)
+    TRANSFORM (phase 2) row is hand-set to `PENDING` — a state a real pipeline cannot reach this
+    way (Phase 2 is long past `SUCCEEDED` by the time Phase 3 has a row at all), used here purely
+    to ask the sweep's own SELECT the question it exists to answer. Sweeping `Phase.TRANSFORM`
+    must leave that PENDING row untouched, because the only RHI record on file is BUILD's, not
+    TRANSFORM's.
+
+    **The positive control (CLAUDE.md's "validate against a known-bad state"):** the same fixture,
+    with `acme-lib-py`'s TRANSFORM row ALSO set RHI, sweeping `Phase.TRANSFORM` a second time DOES
+    block the consumer — proving the sweep is reachable and correct when the phase genuinely
+    matches, so the first assertion is a real negative, not a scheduler/graph misconfiguration
+    silently no-op'ing every case.
+    """
+    transformed(fleet)
+
+    run_id = str(query(fleet, "SELECT run_id FROM runs")[0][0])
+    db_path = fleet / "state" / "fleet.db"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # BUILD (phase 3) has no row yet — `build()` was never invoked in this test — so the
+        # provider's abandonment is recorded ONLY at BUILD, never at TRANSFORM.
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, blocked_by, updated_at) "
+            "VALUES (?, ?, 3, 'REQUIRES_HUMAN_INTERVENTION', '[]', '2026-01-01T00:00:00+00:00')",
+            (run_id, _STUB_PROVIDER),
+        )
+        # The consumer's real TRANSFORM row is SUCCEEDED post-`transformed()`; force it back to
+        # PENDING so `append_blocked_by`'s own terminal-status skip cannot be the reason nothing
+        # moves — the ONLY thing this test wants to isolate is the sweep's phase filter.
+        conn.execute(
+            "UPDATE phases SET status = 'PENDING', blocked_by = '[]' "
+            " WHERE run_id = ? AND repo_id = ? AND phase = 2",
+            (run_id, _STUB_CONSUMER),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    settings = FleetSettings.load(fleet / "config")
+
+    async def _sweep() -> None:
+        async with cli.StateWriter(db_path, owner="test") as writer:
+            read_conn = await cli.connect_ro(db_path)
+            try:
+                await cli._repropagate_terminal_providers(
+                    read_conn, writer, run_id, cli.Phase.TRANSFORM, settings, stub_blocked=False
+                )
+            finally:
+                await read_conn.close()
+
+    asyncio.run(_sweep())
+    after_build_only = {
+        repo_id: (status, blocked_by)
+        for repo_id, status, blocked_by in query(
+            fleet, "SELECT repo_id, status, blocked_by FROM phases WHERE phase = 2"
+        )
+    }
+    assert after_build_only[_STUB_CONSUMER] == ("PENDING", "[]"), (
+        "TRANSFORM's own sweep moved a phase-2 row using a phase-3-only RHI record -- the "
+        f"`AND phase = ?` isolation this test exists to prove did not hold: {after_build_only}"
+    )
+
+    # --- positive control: the SAME provider, now ALSO RHI at TRANSFORM ---------------------
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE phases SET status = 'REQUIRES_HUMAN_INTERVENTION', blocked_by = '[]' "
+            " WHERE run_id = ? AND repo_id = ? AND phase = 2",
+            (run_id, _STUB_PROVIDER),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    asyncio.run(_sweep())
+    after_both = {
+        repo_id: (status, blocked_by)
+        for repo_id, status, blocked_by in query(
+            fleet, "SELECT repo_id, status, blocked_by FROM phases WHERE phase = 2"
+        )
+    }
+    assert after_both[_STUB_CONSUMER] == ("BLOCKED", json.dumps([_STUB_PROVIDER])), (
+        "the sweep never fired even once the provider genuinely carried a TRANSFORM-phase RHI "
+        f"row -- reachability itself is broken, not merely over-permissive: {after_both}"
+    )
+
+
+def test_transform_statuses_reads_only_transform_not_a_later_phases_row_for_the_same_repo(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resolver: FakeResolver,
+) -> None:
+    """`cli._transform_statuses` is `cli._phase_statuses(conn, run_id, Phase.TRANSFORM)` — a
+    `SELECT repo_id, status FROM phases WHERE run_id = ? AND phase = ? ORDER BY repo_id`. Every
+    existing caller of either function reads it back before any LATER phase has a row for the same
+    repo at all: `_transform_impl` calls `_transform_statuses` once, at the end of its own wave
+    loop, strictly before `fleet build`/`fleet verify` have ever run for this run. So the `AND
+    phase = ?` clause (and the `int(phase)` cast feeding it) has never been asked to discriminate
+    between two DIFFERENT status strings recorded for the SAME `repo_id` under different phases —
+    a dict comprehension keyed by `repo_id` would silently let a later phase's row win if that
+    clause were ever lost, weakened, or lost precision (e.g. `phase = ?` compared to a `str(phase)`
+    against an `int` column), and every existing test would still pass, because in every one of
+    them the two phases' rows never coexist with different values at the moment either function is
+    called.
+
+    `_STUB_PROVIDER` genuinely disagrees here once BUILD has run: TRANSFORM (phase 2) reads
+    `SUCCEEDED` (`transformed()` below) while BUILD (phase 3) reads
+    `REQUIRES_HUMAN_INTERVENTION` (the fake bazel failure). Calling `_transform_statuses` directly
+    — AFTER both rows exist — must still report phase 2's `SUCCEEDED`, never phase 3's status
+    leaking through for the same repo_id.
+    """
+    fake = FakeBazel(
+        fleet / "artifacts" / "fake-bazel", fail={("build", DESTINATIONS[_STUB_PROVIDER]): 34}
+    )
+    monkeypatch.setattr(cli, "BAZEL_RUNNER", fake)
+    monkeypatch.setattr(cli, "FILTER_REPO_RUNNER", FakeFilterRepo())
+
+    transformed(fleet)
+    result = build(fleet, "--no-sandbox")
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, result.output
+
+    phase2 = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 2"))
+    phase3 = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 3"))
+    assert phase2[_STUB_PROVIDER] == "SUCCEEDED", phase2
+    assert phase3[_STUB_PROVIDER] == "REQUIRES_HUMAN_INTERVENTION", phase3
+
+    run_id = str(query(fleet, "SELECT run_id FROM runs")[0][0])
+    db_path = fleet / "state" / "fleet.db"
+
+    async def _read() -> dict[str, str]:
+        read_conn = await cli.connect_ro(db_path)
+        try:
+            statuses = await cli._transform_statuses(read_conn, run_id)
+        finally:
+            await read_conn.close()
+        return {repo_id: str(status) for repo_id, status in statuses.items()}
+
+    statuses = asyncio.run(_read())
+    assert statuses[_STUB_PROVIDER] == "SUCCEEDED", (
+        "_transform_statuses reported BUILD's (phase 3) status for this repo instead of "
+        f"TRANSFORM's (phase 2) own -- the phase filter did not hold: {statuses}"
+    )
+
+
 # ---------------------------------------------------------------------------------------
 # 3. the wave gate — Phase 4 never starts for a repo whose Phase 3 did not succeed
 # ---------------------------------------------------------------------------------------
