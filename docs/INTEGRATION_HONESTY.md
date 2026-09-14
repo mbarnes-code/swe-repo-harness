@@ -11500,7 +11500,8 @@ confirmed to fail against the pre-fix `client = ctx.llm` (both rows collapse to
 `context_policy IS NULL` / the empty-set digest) and pass against the fix. See
 `.superpowers/sdd/round-VIII-qa-qc/worker-d137-fix-report.md` for the full report.
 
-## D138 — OPEN. `workers/clone.py::_interrupted()` never distinguishes a genuine timeout from a
+## D138 — FIXED, LANDED (`0b8a192`, round VIII Wave 18, branch `agent/roundviii-d138-fix`, not yet
+merged to `main`). `workers/clone.py::_interrupted()` never distinguishes a genuine timeout from a
 genuine cancellation — both report `status="cancelled"`, so a repo that always times out never
 charges an attempt and can loop forever instead of escalating
 
@@ -11545,3 +11546,16 @@ their `failure_class` selection to key off the same discriminant rather than a h
 `TIMEOUT`. Fix and mutation-proof tests deliberately not attempted here — this entry is a
 scoping-only finding per the discovering task's own read-mostly brief; a dedicated fix dispatch is
 recommended as a follow-up.
+
+> **[Dated note, 2026-09-14, round VIII Wave 18 fix — heading moved to FIXED, LANDED, this is not
+> a new leg.]** `clone.py::_interrupted()` now takes a keyword-only `timed_out: bool = False`,
+> threaded from its `ctx.expired(now)` call site (`clone.py:328-330`); the other call site
+> (`clone.py:311`) only ever checks `ctx.cancelled()`, so it passes no `timed_out` and keeps the
+> default. `_interrupted()` reports `status="timeout"`/`FailureClass.TIMEOUT` when `timed_out`,
+> `status="cancelled"`/`FailureClass.TRANSIENT_INFRA` otherwise — the exact shape `334edeb`
+> established in the four sibling workers. `rdepverify.py::_refused()` and
+> `buildgen.py::_interrupted()` now key `failure_class` off the same `ctx.cancelled()` check
+> already driving `status`, closing the narrower instance too. Mutation-proof: all three fixes
+> reverted to their pre-fix shape, confirmed non-empty diff against a backup, confirmed the new
+> discriminating test(s) went RED, restored to byte-identical, confirmed GREEN. Full report:
+> `.superpowers/sdd/round-VIII-qa-qc/worker-d138-fix-report.md`.

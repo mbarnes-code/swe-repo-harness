@@ -547,6 +547,39 @@ async def test_rdepverify_refuses_re_entry_when_phase_3_did_not_succeed(tmp_path
     ), "a branch name is not an immutable snapshot; building against it is the §3.3 race"
 
 
+async def test_rdepverify_cancelled_before_dispatch_reports_status_cancelled_not_an_attempt(
+    tmp_path,
+) -> None:
+    """A genuine `ctx.cancelled()` is an operator decision and stays `cancelled` (not an
+    attempt) -- `TRANSIENT_INFRA`, never charged against the ladder. Before this fix,
+    `_refused()` unconditionally set `failure_class=FailureClass.TIMEOUT` regardless of which
+    condition (`ctx.cancelled()` vs `ctx.expired()`) actually fired (D138)."""
+    ctx = make_ctx(tmp_path)
+    ctx.cancel.set()
+    result = await RdepverifyWorker().run(
+        ctx, RdepverifyInput(dest="java/com/acme/widget", integration_ref=SNAPSHOT)
+    )
+    assert result.status == "cancelled"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.TRANSIENT_INFRA
+
+
+async def test_rdepverify_expired_before_dispatch_reports_status_timeout_and_charges_an_attempt(
+    tmp_path,
+) -> None:
+    """A genuine `ctx.expired()` (deadline already passed, no operator cancel) must be a
+    chargeable `timeout` result with `failure_class=TIMEOUT` (§11) -- conflating it with
+    `cancelled`'s failure class would misdescribe a real expiry's retry/backoff accounting
+    (D138)."""
+    ctx = make_ctx(tmp_path, seconds_left=-1.0)
+    result = await RdepverifyWorker().run(
+        ctx, RdepverifyInput(dest="java/com/acme/widget", integration_ref=SNAPSHOT)
+    )
+    assert result.status == "timeout"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.TIMEOUT
+
+
 # =======================================================================================
 # (3) buildgen: deterministic emission, and a model pin code refuses
 # =======================================================================================
@@ -617,6 +650,38 @@ async def test_buildgen_renders_both_files_from_code_and_resolves_versions_by_mv
     module_text = read(out.module_bazel_path)
     assert 'bazel_dep(name = "rules_jvm_external", version = "6.0")' in module_text
     assert '"1.5"' in module_text
+
+
+async def test_buildgen_cancelled_before_dispatch_reports_status_cancelled_not_an_attempt(
+    tmp_path,
+) -> None:
+    """A genuine `ctx.cancelled()` is an operator decision and stays `cancelled` (not an
+    attempt) -- `TRANSIENT_INFRA`, never charged against the ladder. Before this fix,
+    `_interrupted()` unconditionally set `failure_class=FailureClass.TIMEOUT` regardless of
+    which condition (`ctx.cancelled()` vs `ctx.expired()`) actually fired (D138). `ingest=None`
+    (the default, and the only value `cli.py` ever constructs -- see the NOTE above
+    `BuildgenWorker.run`) means step 2's `_stopped()` check is the first one reached, with
+    nothing yet in `completed`."""
+    ctx = make_ctx(tmp_path)
+    ctx.cancel.set()
+    result = await BuildgenWorker().run(ctx, BuildgenInput(unit=_unit()))
+    assert result.status == "cancelled"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.TRANSIENT_INFRA
+
+
+async def test_buildgen_expired_before_dispatch_reports_status_timeout_and_charges_an_attempt(
+    tmp_path,
+) -> None:
+    """A genuine `ctx.expired()` (deadline already passed, no operator cancel) must be a
+    chargeable `timeout` result with `failure_class=TIMEOUT` (§11) -- conflating it with
+    `cancelled`'s failure class would misdescribe a real expiry's retry/backoff accounting
+    (D138)."""
+    ctx = make_ctx(tmp_path, seconds_left=-1.0)
+    result = await BuildgenWorker().run(ctx, BuildgenInput(unit=_unit()))
+    assert result.status == "timeout"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.TIMEOUT
 
 
 async def test_a_model_pin_that_hides_a_violated_spec_is_rejected_before_it_is_written(

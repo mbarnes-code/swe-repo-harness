@@ -325,8 +325,9 @@ class CloneWorker(BaseWorker[CloneInput, CloneOutput]):
 
             cut_worktree = "worktree" in owed and preflight.head_sha is not None
             if cut_worktree:
-                if ctx.expired(loop_now()) or ctx.cancelled():
-                    return self._interrupted(completed, owed)
+                now = loop_now()
+                if ctx.expired(now) or ctx.cancelled():
+                    return self._interrupted(completed, owed, timed_out=ctx.expired(now))
                 await self._materialize_worktree(ctx, mirror, worktree, preflight)
                 completed.append("worktree")
         except (GitCommandError, GitError, OSError) as exc:
@@ -655,18 +656,30 @@ class CloneWorker(BaseWorker[CloneInput, CloneOutput]):
         return Git(path, runner=self._runner, deadline=ctx.deadline)
 
     def _interrupted(
-        self, completed: Sequence[str], owed: Sequence[str]
+        self,
+        completed: Sequence[str],
+        owed: Sequence[str],
+        *,
+        timed_out: bool = False,
     ) -> WorkerResult[CloneOutput]:
         """Stopped between units. `partial` when something landed, so re-entry resumes at the
-        rest; a bare `cancelled` when nothing did, because `partial` with nothing completed is
-        `failed` wearing a friendlier name."""
+        rest.
+
+        Nothing landed means nothing to resume from: a genuine `ctx.cancelled()` is an operator
+        decision and stays `cancelled` (not an attempt), but `ctx.expired()` is a real timeout
+        and must be a chargeable `timeout` result (§11) -- conflating the two into `cancelled`
+        would let a repo that times out on every attempt never escalate to
+        REQUIRES_HUMAN_INTERVENTION.
+        """
         done = [unit for unit in UNITS if unit in set(completed)]
         remaining = [unit for unit in owed if unit not in set(done)]
         if not done:
             return WorkerResult[CloneOutput](
-                status="cancelled",
+                status="timeout" if timed_out else "cancelled",
                 error=WorkerError(
-                    failure_class=FailureClass.TIMEOUT,
+                    failure_class=(
+                        FailureClass.TIMEOUT if timed_out else FailureClass.TRANSIENT_INFRA
+                    ),
                     retryable=True,
                     stderr_tail="cancelled before any unit landed",
                 ),

@@ -657,12 +657,16 @@ class BuildgenWorker(BaseWorker[BuildgenInput, BuildgenOutput]):
                 completed_units=completed,
                 remaining_units=owed,
             )
+        # A genuine `ctx.cancelled()` is an operator decision, not a chargeable attempt, so its
+        # `failure_class` must not read `TIMEOUT` -- that misdescribes an operator cancel as a
+        # real expiry for retry/backoff accounting purposes.
+        cancelled = ctx.cancelled()
         return WorkerResult[BuildgenOutput](
-            status="cancelled" if ctx.cancelled() else "timeout",
+            status="cancelled" if cancelled else "timeout",
             output=output,
             remaining_units=owed,
             error=WorkerError(
-                failure_class=FailureClass.TIMEOUT,
+                failure_class=FailureClass.TRANSIENT_INFRA if cancelled else FailureClass.TIMEOUT,
                 retryable=True,
                 stderr_tail=f"{self.name}: stopped before {owed}",
             ),
