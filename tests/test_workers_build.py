@@ -1305,6 +1305,287 @@ async def test_attribute_hoist_break_is_a_noop_when_nothing_matches(tmp_path) ->
         assert output.hoist_broke_matched_line == "", name
 
 
+# =======================================================================================
+# `BuildPipelineWorker` itself: `preconditions_hold`, the `run()` dispatch, and `_handoff` -- the
+# composite worker's OWN orchestration, as distinct from the two registered steps it chains.
+# Wave 7.5 batch 41 (round VIII §15.1 item 3): none of the five branches below were reachable
+# through any existing test -- test_cli.py exercises `_publish`/`_publish_module_lock` directly
+# and one narrow `run()` happy path with VERIFY_UNIT alone remaining, and
+# test_wave_composition_projects_mid_wave.py monkeypatches the whole class out with a stub, so
+# `preconditions_hold`, the GENERATE_UNIT failure short-circuit, the `build_checkpoint_rejected`
+# regenerate branch (both its success and failure sub-branches), the PUBLISH_UNIT branch inside
+# `run()`, and `_handoff`'s default-error synthesis were all untested at this level.
+# =======================================================================================
+
+
+async def test_build_pipeline_preconditions_hold_requires_a_re_entry_and_a_live_worktree(
+    tmp_path: Path,
+) -> None:
+    """`BuildPipelineWorker.preconditions_hold` is distinct from the per-step preconditions the
+    two registered steps ask themselves (the docstring says so explicitly): a FRESH dispatch
+    (`remaining_units is None`) is never admitted through this path at all, and a checkpointed
+    re-entry is admitted only while `ctx.workdir` still names a directory that exists on disk --
+    the worktree the checkpoint was cut from (§7.1)."""
+    from fleet.cli import VERIFY_UNIT
+
+    worker = BuildPipelineWorker()
+    fresh = _a_hoist_watch_build_input(hoist_watch=())
+    assert fresh.remaining_units is None
+    assert not await worker.preconditions_hold(make_ctx(tmp_path), fresh), (
+        "a fresh dispatch (remaining_units is None) must never be re-admitted, regardless of "
+        "whether ctx.workdir happens to exist"
+    )
+
+    reentry = fresh.model_copy(update={"remaining_units": (VERIFY_UNIT,)})
+    assert await worker.preconditions_hold(make_ctx(tmp_path), reentry), (
+        "a checkpointed re-entry whose worktree still exists must be admitted"
+    )
+    assert not await worker.preconditions_hold(make_ctx(tmp_path / "gone"), reentry), (
+        "a checkpointed re-entry whose worktree is gone must be refused"
+    )
+
+
+async def test_run_generate_unit_failure_short_circuits_before_verify_ever_runs(
+    tmp_path: Path,
+) -> None:
+    """A `GENERATE_UNIT` failure must return via `_handoff` immediately: `VERIFY_UNIT` must never
+    be attempted over a `BUILD.bazel` generation never wrote, and nothing must be recorded as
+    landed."""
+    from fleet.cli import BUILD_UNITS, BUILDGEN_STEP, BUILDVERIFY_STEP
+
+    class _FailingBuildgen:
+        async def run(self, ctx: object, payload: object) -> WorkerResult[Any]:
+            return WorkerResult[Any](
+                status="failed",
+                output=None,
+                error=WorkerError(
+                    failure_class=FailureClass.BUILD_ERROR, retryable=True, stderr_tail="boom"
+                ),
+            )
+
+    class _AssertNeverRunBuildverify:
+        async def preconditions_hold(self, ctx: object, payload: object) -> bool:
+            raise AssertionError("buildverify.preconditions_hold must not be called")
+
+        async def run(self, ctx: object, payload: object) -> WorkerResult[Any]:
+            raise AssertionError("buildverify.run must not be called after a GENERATE failure")
+
+    worker = BuildPipelineWorker()
+    worker._workers[BUILDGEN_STEP] = _FailingBuildgen()  # type: ignore[index]
+    worker._workers[BUILDVERIFY_STEP] = _AssertNeverRunBuildverify()  # type: ignore[index]
+    payload = _a_hoist_watch_build_input(hoist_watch=())
+    assert payload.remaining_units is None
+
+    result = await worker.run(make_ctx(tmp_path), payload)
+
+    assert result.status == "failed"
+    assert result.completed_units == []
+    assert result.remaining_units == list(BUILD_UNITS)
+    assert result.error is not None and result.error.stderr_tail == "boom"
+
+
+async def test_run_checkpoint_rejected_regenerates_before_verify_on_a_stale_reentry(
+    tmp_path: Path,
+) -> None:
+    """The `build_checkpoint_rejected` path (§7.1): a re-entry whose `buildverify` preconditions
+    do NOT hold (the generated file the checkpoint describes is gone) must regenerate via
+    `buildgen` FIRST and only then run the real `buildverify` against the freshly generated tree.
+
+    Also asserts the `owed`-is-exactly-`remaining_units` mechanics: a checkpoint naming only
+    `VERIFY_UNIT` reports `PUBLISH_UNIT` as already landed even though this dispatch never
+    touched it, because `PUBLISH_UNIT` was simply never owed."""
+    from fleet.cli import BUILDGEN_STEP, BUILDVERIFY_STEP, GENERATE_UNIT, PUBLISH_UNIT, VERIFY_UNIT
+    from fleet.workers.buildgen import BuildgenOutput
+    from fleet.workers.buildverify import BuildverifyOutput, StepRecord
+
+    class _RegeneratingBuildgen:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, ctx: object, payload: object) -> WorkerResult[BuildgenOutput]:
+            self.calls += 1
+            return WorkerResult[BuildgenOutput](
+                status="ok",
+                output=BuildgenOutput(build_bazel_path="libs/widget/BUILD.bazel"),
+                completed_units=["generate"],
+            )
+
+    class _StaleThenGreenBuildverify:
+        def __init__(self) -> None:
+            self.precondition_calls = 0
+            self.run_calls = 0
+
+        async def preconditions_hold(self, ctx: object, payload: object) -> bool:
+            self.precondition_calls += 1
+            return False
+
+        async def run(self, ctx: object, payload: Any) -> WorkerResult[BuildverifyOutput]:
+            self.run_calls += 1
+            return WorkerResult[BuildverifyOutput](
+                status="ok",
+                output=BuildverifyOutput(
+                    dest=payload.dest,
+                    integration_ref=payload.integration_ref,
+                    build_ok=True,
+                    test_ok=True,
+                    tests_ran=True,
+                    steps=[
+                        StepRecord(unit="test", exit_code=0, log_path="artifacts/logs/t.log")
+                    ],
+                ),
+                completed_units=["build", "test"],
+            )
+
+    buildgen = _RegeneratingBuildgen()
+    buildverify = _StaleThenGreenBuildverify()
+    worker = BuildPipelineWorker()
+    worker._workers[BUILDGEN_STEP] = buildgen  # type: ignore[index]
+    worker._workers[BUILDVERIFY_STEP] = buildverify  # type: ignore[index]
+    log = RecordingLog()
+    payload = _a_hoist_watch_build_input(hoist_watch=()).model_copy(
+        update={"remaining_units": (VERIFY_UNIT,)}
+    )
+
+    result = await worker.run(make_ctx(tmp_path, log=log), payload)
+
+    assert buildverify.precondition_calls == 1
+    assert buildgen.calls == 1, "the stale checkpoint must trigger exactly one regenerate"
+    assert buildverify.run_calls == 1, "the real buildverify must still run after regenerating"
+    [(_event, kwargs)] = [(e, k) for e, k in log.lines if e == "build_checkpoint_rejected"]
+    assert kwargs["step"] == BUILDVERIFY_STEP
+    assert kwargs["dest"] == payload.dest
+    assert result.status == "ok"
+    assert result.output is not None
+    assert result.output.build_ok is True
+    assert result.output.test_ok is True
+    assert result.completed_units == [GENERATE_UNIT, PUBLISH_UNIT, VERIFY_UNIT], (
+        "GENERATE_UNIT and PUBLISH_UNIT were never touched this dispatch but are still reported "
+        "landed because neither was owed -- owed is exactly remaining_units, nothing more"
+    )
+    assert result.remaining_units == []
+    assert result.evidence == [payload.integration_ref, "artifacts/logs/t.log"]
+
+
+async def test_run_checkpoint_rejected_handoff_carries_the_regenerate_failure_not_verifys(
+    tmp_path: Path,
+) -> None:
+    """The regenerate call inside the `build_checkpoint_rejected` branch is itself gated: if
+    regenerating the tree the checkpoint could not verify against ALSO fails, `_handoff` must
+    carry THAT failure -- and the real `buildverify.run` must never be reached, because there is
+    still no generated file to verify against."""
+    from fleet.cli import BUILDGEN_STEP, BUILDVERIFY_STEP, GENERATE_UNIT, PUBLISH_UNIT, VERIFY_UNIT
+
+    class _FailingRegenerate:
+        async def run(self, ctx: object, payload: object) -> WorkerResult[Any]:
+            return WorkerResult[Any](
+                status="failed",
+                output=None,
+                error=WorkerError(
+                    failure_class=FailureClass.TRANSIENT_INFRA,
+                    retryable=True,
+                    stderr_tail="disk full during regenerate",
+                ),
+            )
+
+    class _StaleAndUnreachedBuildverify:
+        async def preconditions_hold(self, ctx: object, payload: object) -> bool:
+            return False
+
+        async def run(self, ctx: object, payload: object) -> WorkerResult[Any]:
+            raise AssertionError("must not run: the regenerate it depends on failed")
+
+    worker = BuildPipelineWorker()
+    worker._workers[BUILDGEN_STEP] = _FailingRegenerate()  # type: ignore[index]
+    worker._workers[BUILDVERIFY_STEP] = _StaleAndUnreachedBuildverify()  # type: ignore[index]
+    payload = _a_hoist_watch_build_input(hoist_watch=()).model_copy(
+        update={"remaining_units": (VERIFY_UNIT,)}
+    )
+
+    result = await worker.run(make_ctx(tmp_path, log=RecordingLog()), payload)
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.stderr_tail == "disk full during regenerate"
+    assert result.completed_units == [GENERATE_UNIT, PUBLISH_UNIT], (
+        "only what was already landed before this dispatch (neither owed) counts as done"
+    )
+    assert result.remaining_units == [VERIFY_UNIT]
+
+
+async def test_run_publish_only_reentry_reports_partial_on_failure_and_ok_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-entry owing only `PUBLISH_UNIT` already has GENERATE_UNIT and VERIFY_UNIT landed
+    (neither is owed): a publish failure must report `partial` -- not `failed` -- because work
+    already landed, with `remaining_units=[PUBLISH_UNIT]` and the failure attached; a publish
+    success must land PUBLISH_UNIT too and report `ok` with nothing left owed."""
+    from fleet.cli import GENERATE_UNIT, PUBLISH_UNIT, VERIFY_UNIT
+
+    payload = _a_hoist_watch_build_input(hoist_watch=()).model_copy(
+        update={"remaining_units": (PUBLISH_UNIT,)}
+    )
+    worker = BuildPipelineWorker()
+    failure = WorkerError(
+        failure_class=FailureClass.TRANSIENT_INFRA, retryable=True, stderr_tail="disk full"
+    )
+
+    async def failing_publish(self: object, ctx: object, payload: object, output: object) -> Any:
+        return failure
+
+    monkeypatch.setattr(BuildPipelineWorker, "_publish", failing_publish)
+    result = await worker.run(make_ctx(tmp_path), payload)
+    assert result.status == "partial"
+    assert result.completed_units == [GENERATE_UNIT, VERIFY_UNIT]
+    assert result.remaining_units == [PUBLISH_UNIT]
+    assert result.error is failure
+
+    async def succeeding_publish(
+        self: object, ctx: object, payload: object, output: object
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(BuildPipelineWorker, "_publish", succeeding_publish)
+    result = await worker.run(make_ctx(tmp_path), payload)
+    assert result.status == "ok"
+    assert result.completed_units == [GENERATE_UNIT, VERIFY_UNIT, PUBLISH_UNIT]
+    assert result.remaining_units == []
+
+
+def test_handoff_synthesizes_an_error_when_a_failed_step_carries_none() -> None:
+    """`_handoff` must never hand the retry ladder a `failed`/`timeout` result with `error=None`:
+    a `RetryPolicy` reading no error has nothing to classify. This is the ONE place that
+    synthesizes a stand-in `WorkerError` (`FailureClass.UNKNOWN`, `retryable=True`) so the ladder
+    still has something to act on.
+
+    The reachable case is a `partial` step: `WorkerResult`'s own `_status_matches_its_evidence`
+    validator requires a structured `WorkerError` whenever status is `failed`/`timeout`, so a
+    `step` with `status="failed"` and `error=None` cannot even be constructed -- but `partial`
+    carries no such requirement, and `_handoff` maps `partial` to `failed` (a step's own
+    partial completion is the DISPATCH's failure) before this check runs, so a partial step with
+    no error is exactly the state that reaches it.
+    """
+    from fleet.cli import BUILD_UNITS, GENERATE_UNIT, PUBLISH_UNIT, VERIFY_UNIT
+
+    worker = BuildPipelineWorker()
+    step = WorkerResult[BuildOutput](
+        status="partial", completed_units=["build"], error=None
+    )
+    output = BuildOutput(repo_id=REPO)
+
+    result = worker._handoff(step, BUILD_UNITS, [GENERATE_UNIT], output)
+
+    assert result.error is not None
+    assert result.error.retryable is True
+    assert result.error.failure_class is FailureClass.UNKNOWN
+    assert "returned 'partial'" in (result.error.stderr_tail or ""), (
+        "the synthesized message quotes the STEP's own status (partial), never the DISPATCH's "
+        "status the same line just remapped it to (failed)"
+    )
+    assert result.status == "failed"
+    assert result.completed_units == [GENERATE_UNIT]
+    assert result.remaining_units == [VERIFY_UNIT, PUBLISH_UNIT]
+
+
 async def test_the_sandboxed_command_is_network_none_and_named_after_the_attempt(
     tmp_path,
 ) -> None:
