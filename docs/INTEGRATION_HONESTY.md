@@ -11560,9 +11560,22 @@ recommended as a follow-up.
 > discriminating test(s) went RED, restored to byte-identical, confirmed GREEN. Full report:
 > `.superpowers/sdd/round-VIII-qa-qc/worker-d138-fix-report.md`.
 
-## D139 — OPEN. `ecosystems/js.py` has NO ecosystem filter on `unit.external_coordinates`
-anywhere, unlike its four siblings (`go.py`/`py.py`/`jvm.py`/`rust.py`), which all filter
-foreign-ecosystem coordinates out before emitting workspace dependencies
+## D139 — FIXED, LANDED (`e22fe32`, round VIII Wave 26). `ecosystems/js.py` has NO ecosystem
+filter on `unit.external_coordinates` anywhere, unlike its four siblings
+(`go.py`/`py.py`/`jvm.py`/`rust.py`), which all filter foreign-ecosystem coordinates out before
+emitting workspace dependencies
+
+**Fixed 2026-09-14 (round VIII Wave 26, worker-d139-fix, `e22fe32` on
+`agent/roundviii-d139-fix`, not yet merged to `main`).** All three sites named in "Not yet built"
+below now filter on `coordinate.ecosystem is Ecosystem.NPM`: `workspace_deps()`,
+`_unit_package_json()`'s `dependencies` comprehension, and `_needs_npm_hub()` (found by this
+fix's own sweep — the JS analog of `py.py`'s "contributors" gate, previously a bare
+`bool(unit.external_coordinates or _first_party(unit))`). Three mutation-proof tests added to
+`tests/test_ecosystems.py`: `test_js_workspace_deps_excludes_a_coordinate_from_another_ecosystem`,
+`test_js_resolution_contributor_gate_ignores_a_unit_with_only_non_npm_coordinates`,
+`test_js_unit_package_json_excludes_a_non_npm_coordinate_from_a_real_contributor` — all three
+fail against the pre-fix file and pass against the fix (Rule 12 backup/restore verified). Body
+below is the original finding, left as written.
 
 **Found by round VIII's `worker-mutation-batch19` (`.superpowers/sdd/round-VIII-qa-qc/
 worker-mutation-batch19-report.md`) while mutation-auditing `ecosystems/{base,go,js,unknown}.py`
