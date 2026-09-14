@@ -7413,6 +7413,248 @@ def test_transform_max_patch_bytes_is_threaded_from_settings_to_rewrite_input(
     assert "100" in reason, "the reason must cite the CONFIGURED cap, not the 1 MiB default"
 
 
+def test_transform_payloads_threads_a_non_none_remaining_units_through_as_a_tuple(
+    tmp_path: Path,
+) -> None:
+    """`_transform_payloads`'s inner `build()`: `remaining_units=None if remaining_units is None
+    else tuple(remaining_units)`.
+
+    Every existing call site of `build()` in this file (the max-patch-bytes test above, and
+    `test_scan_payloads_...` below for the sibling factory) passes `remaining_units=None` — the
+    non-`None` half is what a retry rung with a partially-landed rewrite actually exercises
+    (`_transform_criterion`'s D49 collateral-edits docstring), and nothing pins that it survives
+    THIS function's own reconstruction of `TransformInput`.
+
+    `TransformInput.remaining_units` is itself `tuple[str, ...] | None` (`cli.py`), so pydantic
+    would coerce a list to a tuple on construction regardless of whether `_transform_payloads`
+    calls `tuple(...)` itself — that make the `tuple(...)` conversion NOT the discriminating part
+    of the ternary. What pydantic cannot catch is the ternary collapsing to always return `None`
+    (silently dropping a retry rung's remaining-unit state while every other field stays
+    correct) — that is the mutation this test is built to catch, and it is a real regression
+    shape: `None` is a legal value of the field, so a caller reading `payload.remaining_units`
+    gets a plausible-looking answer that is simply wrong.
+    """
+    from fleet.cli import Phase, _transform_payloads, _TransformPlan
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro
+    from fleet.state.repository import SqliteStateRepository
+
+    config = write_config(tmp_path)
+    settings = FleetSettings.load(config.parent)
+    plan = _TransformPlan(
+        repo_id="repo1",
+        worktree=tmp_path / "repo1",
+        branch="main",
+        dest_path="dest",
+        import_specifier="",
+        pre_commit_sha="a" * 40,
+        base_ref="main",
+        sources=(),
+        targets=("dest/file.ts",),
+    )
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    seed_run(db_path, repos=("repo1",))
+
+    async def _build_payload() -> object:
+        async with StateWriter(db_path, owner="test-remaining-units") as writer:
+            read_conn = await connect_ro(db_path)
+            try:
+                repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
+                build = _transform_payloads(
+                    settings, {"repo1": plan}, rules=[],
+                    repository=repository, read_conn=read_conn, run_id=RUN_ID,
+                )
+                return await build(
+                    repo_id="repo1",
+                    phase=Phase.TRANSFORM,
+                    attempt=2,
+                    # a LIST, not a tuple, so a survived `tuple(...)` call is exercised even
+                    # though it is not the discriminating half of the mutation this test targets
+                    remaining_units=["unit-a", "unit-b"],
+                )
+            finally:
+                await read_conn.close()
+
+    payload = asyncio.run(_build_payload())
+    assert payload.remaining_units == ("unit-a", "unit-b"), (
+        f"a non-None remaining_units must reach TransformInput verbatim (as a tuple), not "
+        f"collapse to None: {payload.remaining_units!r}"
+    )
+
+
+def test_validate_transform_flags_refuses_a_max_attempts_below_one(tmp_path: Path) -> None:
+    """`_validate_transform_flags`'s `if max_attempts < 1: raise UsageError(...)` — the sibling
+    refusal (`max_attempts > declared`) has a direct CLI-level proof
+    (`test_transform_refuses_the_flags_it_cannot_honour` in `tests/test_transform_e2e.py`), but
+    nothing in the suite drives `--max-attempts 0` (or negative) for TRANSFORM: the analogous
+    SCAN refusal is proven at `tests/test_cli_scan_worker_and_helpers.py:569`, and that is a
+    different function (`_validate_scan_flags`) guarding a different flag. Without this test, a
+    mutation deleting this `if` (or flipping `< 1` to `<= 0`, wrongly admitting 0) is invisible:
+    every other transform test passes a positive `--max-attempts` or none at all.
+    """
+    from fleet.cli import _validate_transform_flags
+    from fleet.settings import FleetSettings
+
+    config = write_config(tmp_path)
+    settings = FleetSettings.load(config.parent)
+
+    with pytest.raises(UsageError, match="must be at least 1"):
+        _validate_transform_flags(
+            settings,
+            max_attempts=0,
+            deterministic_only=False,
+            stub_blocked=False,
+            context_policy=(),
+        )
+
+
+def test_apply_anchoring_override_threads_the_flag_in_both_directions(tmp_path: Path) -> None:
+    """`_apply_anchoring_override` has exactly one production call site (`cli.py`'s
+    `--no-anchoring-guard` handling) and it is ALWAYS invoked with `enabled=False` — so a
+    mutation that ignores the `enabled` parameter and hardcodes `False` into the `model_copy`
+    update would change nothing observable in any shipped code path, and every full-pipeline
+    transform test that exercises `--no-anchoring-guard` (`tests/test_transform_e2e.py`,
+    `tests/test_workers_transform.py::test_no_anchoring_guard_applies_the_repeat_and_records_a_
+    guard_off_event`) would stay green under it. This calls the function directly with both
+    `True` and `False` to pin that the boolean actually threads through, and that the return
+    value is an independent copy (the input `settings` object must be untouched — `_run_
+    transform_wave`'s caller relies on `_apply_anchoring_override` NOT mutating the settings it
+    was handed, since the un-overridden `settings` object is what `section_digests`/drift
+    checking was already computed from upstream of this call, per this function's own
+    docstring).
+    """
+    from fleet.cli import _apply_anchoring_override
+    from fleet.settings import FleetSettings
+
+    config = write_config(tmp_path)
+    settings = FleetSettings.load(config.parent)
+    assert settings.config.transform.anchoring.enabled is True, "fixture sanity (shipped default)"
+
+    disabled = _apply_anchoring_override(settings, enabled=False)
+    assert disabled.config.transform.anchoring.enabled is False, (
+        "enabled=False must actually disable the anchoring guard"
+    )
+    assert settings.config.transform.anchoring.enabled is True, (
+        "the original settings object must not be mutated in place"
+    )
+
+    reenabled = _apply_anchoring_override(disabled, enabled=True)
+    assert reenabled.config.transform.anchoring.enabled is True, (
+        "enabled=True must actually re-enable the anchoring guard -- a mutation that hardcodes "
+        "False regardless of the parameter has NO shipped call site to catch it (the only "
+        "production call always passes enabled=False), so this direct call is the only proof"
+    )
+
+
+def test_repo_dest_path_returns_none_for_a_null_column_not_the_string_none(
+    tmp_path: Path,
+) -> None:
+    """`_repo_dest_path`: zero direct references anywhere in `tests/` (checked by name across the
+    whole suite) — its two callers (`_coarse_task_id`, and the T1 revalidation-task path near
+    `cli.py:13941`) are both exercised only through heavy multi-phase fixtures where `repos.
+    dest_path` is normally already populated by the time either call site runs, so the `rows[0][0]
+    is None` branch (a repo whose Phase 2 relocation has not been decided yet, or has REFUSED one
+    per `_dest_paths`'s docstring) is not pinned at the unit level.
+
+    A mutation dropping the `or rows[0][0] is None` half of the guard (leaving only `if not
+    rows`) would pass this NULL column straight to `str(...)`, returning the literal string
+    `"None"` instead of the `None` a caller's `dest_path or ""` fallback depends on to detect
+    "no destination decided" — `str(None) or ""` is truthy (`"None"`), so that fallback would
+    silently stop firing.
+    """
+    from fleet.cli import _repo_dest_path
+    from fleet.state.db import connect_ro
+
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    seed_run(db_path, repos=("repo-with-dest", "repo-without-dest"))
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE repos SET dest_path = ? WHERE repo_id = ?",
+            ("libs/widget", "repo-with-dest"),
+        )
+        # repo-without-dest keeps the schema default (NULL) untouched.
+    finally:
+        conn.close()
+
+    async def _read_both() -> tuple[str | None, str | None, str | None]:
+        read_conn = await connect_ro(db_path)
+        try:
+            return (
+                await _repo_dest_path(read_conn, "repo-with-dest"),
+                await _repo_dest_path(read_conn, "repo-without-dest"),
+                await _repo_dest_path(read_conn, "repo-does-not-exist"),
+            )
+        finally:
+            await read_conn.close()
+
+    with_dest, without_dest, missing = asyncio.run(_read_both())
+    assert with_dest == "libs/widget", with_dest
+    assert without_dest is None, (
+        f"a NULL dest_path column must read back as None, not {without_dest!r}"
+    )
+    assert missing is None, f"a repo_id with no `repos` row must read back as None, not {missing!r}"
+
+
+def test_open_transform_waves_scopes_the_join_to_phase_transform(tmp_path: Path) -> None:
+    """`_open_transform_waves` is a one-line delegation:
+    `_open_phase_waves(conn, run_id, Phase.TRANSFORM, wave)`. Its own docstring is explicit that
+    this differs from an unscoped join by naming TRANSFORM (`phase = 2`) specifically. Nothing
+    reaching it at the unit level pins that literal: every full-pipeline transform test seeds
+    SCAN/BUILD/VERIFY phase rows via the same fixture setup TRANSFORM uses, so a mutation
+    swapping `Phase.TRANSFORM` for a sibling `Phase` member is not guaranteed to redden anything
+    downstream (a repo unsettled in every phase looks identical from any of the four joins).
+
+    This seeds one repo whose SCAN (phase 1) row is still `RUNNING` (unsettled) and whose
+    TRANSFORM (phase 2) row is already `SUCCEEDED` (settled) — the two phases disagree about
+    whether wave 0 is open, so the mutation is forced to pick a side: real code (phase 2) must
+    report wave 0 CLOSED; a mutant that joined on phase 1 (or on phase 3/4, where this repo has
+    no row at all and therefore reads as unsettled by the `LEFT JOIN`'s NULL) would report it
+    OPEN.
+    """
+    from fleet.cli import _open_transform_waves
+    from fleet.state.db import connect_ro
+
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    seed_run(db_path, repos=("repo-x",))
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO waves (run_id, wave_index, computed_at) VALUES (?, 0, ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO wave_members (run_id, wave_index, node_kind, node_id) "
+            "VALUES (?, 0, 'REPO', 'repo-x')",
+            (RUN_ID,),
+        )
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) VALUES "
+            "(?, 'repo-x', 1, 'RUNNING', ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) VALUES "
+            "(?, 'repo-x', 2, 'SUCCEEDED', ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+    async def _read() -> tuple[int, ...]:
+        read_conn = await connect_ro(db_path)
+        try:
+            return await _open_transform_waves(read_conn, RUN_ID, None)
+        finally:
+            await read_conn.close()
+
+    waves = asyncio.run(_read())
+    assert waves == (), (
+        f"repo-x's TRANSFORM (phase 2) row is SUCCEEDED, so wave 0 must read CLOSED for "
+        f"TRANSFORM regardless of its still-RUNNING SCAN (phase 1) row: {waves}"
+    )
+
+
 def test_scan_payloads_symbol_batch_rows_prefers_the_cli_override_over_the_config_default(
     tmp_path: Path,
 ) -> None:

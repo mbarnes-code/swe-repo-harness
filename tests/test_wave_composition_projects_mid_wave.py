@@ -595,6 +595,63 @@ async def test_a_wave_refreshes_the_projection_while_it_is_still_running(
 
 
 # ======================================================================================
+# `only` (the CLI's `--repo` scoping) actually narrows admission
+# ======================================================================================
+
+
+async def test_run_transform_wave_only_admits_the_named_repos(
+    bed: _Bed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_run_transform_wave` builds `_ScopedWaveStore(SqliteSchedulerStore(...), only)` from its
+    own `only` parameter, and that is the ONLY thing in this function's body that reads it.
+
+    Checked directly: `tests/test_transform_e2e.py` has ZERO `--only`/`only=` transform
+    coverage, and this file's OWN `_drive_transform` helper (used by the projector test above)
+    always passes `only=None` — so neither the CLI e2e suite nor this file's existing composition
+    test can discriminate a mutation that drops `only` (passes `None` in its place) at this call
+    site. A `_run_transform_wave` that ignored `only` would still project correctly and still
+    write every seeded repo to SUCCEEDED, which is all the test above checks.
+
+    Pre-seeds `phases` PENDING for all three fixture repos (`_seed_phase`, same as the projector
+    test), restricts the wave to `repo-a` only, and reads the DB truth (never the projection)
+    afterward: `repo-a` must be driven to SUCCEEDED while `repo-b`/`repo-c` are never admitted at
+    all and stay PENDING — proving exclusion, not merely that the named repo ran.
+    """
+    await _seed_phase(bed, Phase.TRANSFORM)
+    _patch(
+        monkeypatch,
+        Phase.TRANSFORM,
+        bed,
+        {
+            "worker": "TransformPipelineWorker",
+            "payloads": "_transform_payloads",
+            "sink": "_TransformSink",
+        },
+    )
+    monkeypatch.setattr(cli, "_TransformClaimHook", _StubClaimHook)
+
+    await cli._run_transform_wave(
+        bed.settings,
+        repository=bed.repository,
+        writer=bed.writer,
+        read_conn=bed.read_conn,
+        db_path=bed.db_path,
+        run_id=RUN,
+        wave_index=WAVE_INDEX,
+        plans={},
+        rules=(),
+        only=("repo-a",),
+        pool=bed.pool,
+        evidence=cli._TransformEvidence(),
+    )
+
+    truth = await bed.phase_statuses(Phase.TRANSFORM)
+    assert truth == {"repo-a": "SUCCEEDED", "repo-b": "PENDING", "repo-c": "PENDING"}, (
+        f"only=('repo-a',) must exclude repo-b/repo-c from admission entirely: {truth}"
+    )
+
+
+# ======================================================================================
 # the instrument, held to the discipline it enforces
 # ======================================================================================
 
