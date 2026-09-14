@@ -521,6 +521,33 @@ def test_clone_records_an_empty_repo_as_a_finding_not_a_failure(tmp_path: Path) 
     assert not worktree.exists()
 
 
+def test_clone_interrupted_with_nothing_landed_discriminates_cancelled_from_timeout() -> None:
+    """`_interrupted()` (D138): a genuine `ctx.cancelled()` is an operator decision and stays
+    `cancelled` (not an attempt) -- `TRANSIENT_INFRA`; a genuine `ctx.expired()` is a real
+    timeout and must be a chargeable `timeout` result (§11) with `failure_class=TIMEOUT` --
+    conflating the two would let a repo that always times out cutting its worktree never
+    escalate to REQUIRES_HUMAN_INTERVENTION.
+
+    Called directly on `_interrupted()` (the codebase's own precedent for unit-testing a
+    worker's private helper, e.g. `worker._error_for` above) rather than driven through `run()`:
+    `UNITS = ("mirror", "worktree")` and the mirror unit is always appended to `completed`
+    before either of `run()`'s two call sites can be reached, so the `not done` (nothing landed)
+    branch this test targets is unreachable with an empty `completed` via `run()` itself --
+    `_interrupted()` is the unit the discrimination actually lives in.
+    """
+    worker = CloneWorker()
+
+    cancelled = worker._interrupted([], ["mirror", "worktree"], timed_out=False)
+    assert cancelled.status == "cancelled"
+    assert cancelled.error is not None
+    assert cancelled.error.failure_class is FailureClass.TRANSIENT_INFRA
+
+    timed_out = worker._interrupted([], ["mirror", "worktree"], timed_out=True)
+    assert timed_out.status == "timeout"
+    assert timed_out.error is not None
+    assert timed_out.error.failure_class is FailureClass.TIMEOUT
+
+
 # ---------------------------------------------------------------------------------------
 # (2b) clone — a probe that produced no answer must produce no verdict
 #

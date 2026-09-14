@@ -443,12 +443,16 @@ class RdepverifyWorker(BaseWorker[RdepverifyInput, RdepverifyOutput]):
     def _refused(
         self, ctx: WorkerContext, payload: RdepverifyInput, owed: list[str]
     ) -> WorkerResult[RdepverifyOutput]:
+        # A genuine `ctx.cancelled()` is an operator decision, not a chargeable attempt, so its
+        # `failure_class` must not read `TIMEOUT` -- that misdescribes an operator cancel as a
+        # real expiry for retry/backoff accounting purposes.
+        cancelled = ctx.cancelled()
         return WorkerResult[RdepverifyOutput](
-            status="cancelled" if ctx.cancelled() else "timeout",
+            status="cancelled" if cancelled else "timeout",
             output=self._output(payload, ctx, closure=None, tested_ok=False),
             remaining_units=owed,
             error=WorkerError(
-                failure_class=FailureClass.TIMEOUT,
+                failure_class=FailureClass.TRANSIENT_INFRA if cancelled else FailureClass.TIMEOUT,
                 retryable=True,
                 stderr_tail=f"{self.name}: stopped before {owed}",
             ),
