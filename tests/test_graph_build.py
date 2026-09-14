@@ -247,6 +247,20 @@ def test_a_reversed_graph_cannot_produce_these_blast_radii() -> None:
     assert blast_radii(g) == {A: 0, B: 1, C: 2}
 
 
+def test_blast_radii_is_insertion_ordered_by_sorted_node_ref() -> None:
+    """`blast_radii`'s own docstring: "Insertion-ordered by sorted `NodeRef`, so the write order
+    is reproducible." The existing dict-equality assertion above (`blast_radii(g) == {A: 0, B: 1,
+    C: 2}`) cannot discriminate this — Python dict `==` ignores key order, so a mutation that
+    built the same {ref: count} mapping by iterating `graph.G.nodes` directly (arbitrary hash/set
+    order) instead of `graph.node_refs()` (sorted) would pass every existing test unnoticed, while
+    silently reintroducing exactly the nondeterminism §11.6 forbids reaching a persisted decision.
+    `A < B < C` already holds lexicographically for this fixture's `NodeRef`s, so sorted order and
+    fixture-declaration order coincide; this checks insertion order directly rather than relying
+    on that coincidence to be visible some other way."""
+    g = chain_graph()
+    assert tuple(blast_radii(g).keys()) == g.node_refs() == (A, B, C)
+
+
 def test_blast_radius_is_ancestors_in_g_and_descendants_in_g_rev() -> None:
     """The two phrasings must agree, or `G_rev` is not the reverse of `G`.
 

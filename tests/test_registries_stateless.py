@@ -194,3 +194,59 @@ def test_every_registered_worker_overrides_preconditions_hold() -> None:
     assert workers, "the workers registry discovered nothing"
     offenders = [name for name, cls in workers.items() if not implements_preconditions(cls)]
     assert offenders == [], f"these registered workers inherit re-entry silently: {offenders}"
+
+
+# =======================================================================================
+# 4. `register_worker`'s own duplicate-name guard — untested until now, and the registry's
+#    module docstring calls it out explicitly: "A duplicate `name` is a startup error, never a
+#    silent overwrite, because two workers answering to one name means the run's provenance is a
+#    lie." Every sweep above only ever sees the REAL, already-unique registry `discover()`
+#    populates, so none of them can express a collision. Two throwaway probe classes under a name
+#    no real worker uses, with the module's global dicts snapshotted and restored via
+#    reset_registry()-equivalent surgery so this cannot leak into any other test's registry state.
+# =======================================================================================
+
+
+def _make_probe_worker(qualname: str) -> type[BaseWorker]:  # type: ignore[type-arg]
+    """A minimal, fully-concrete `BaseWorker` subclass under `registry`'s reserved probe name —
+    concrete enough to satisfy `register_worker`, which only reads `cls.name`."""
+
+    class _Probe(BaseWorker[WorkerInput, WorkerOutput]):
+        name: ClassVar[str] = "probe-duplicate-name-guard"
+        phase: ClassVar[Phase] = Phase.TRANSFORM
+        input_model: ClassVar[type[WorkerInput]] = WorkerInput
+        output_model: ClassVar[type[WorkerOutput]] = WorkerOutput
+
+        async def run(self, ctx: WorkerContext, payload: WorkerInput) -> WorkerResult[WorkerOutput]:
+            raise NotImplementedError  # pragma: no cover - never invoked
+
+        async def preconditions_hold(self, ctx: WorkerContext, payload: WorkerInput) -> bool:
+            return True
+
+    _Probe.__qualname__ = qualname
+    _Probe.__name__ = qualname
+    return _Probe
+
+
+def test_register_worker_rejects_a_duplicate_name_from_a_different_class() -> None:
+    """A mutation that dropped or weakened the `existing is not None and existing is not cls`
+    check in `register_worker` would pass every other test in this file unnoticed — they all walk
+    the real registry, which by construction never contains a collision. Restores the registry's
+    exact prior state in `finally` so this cannot perturb
+    `test_every_registered_worker_is_stateless` or any other test that runs `discover()`."""
+    saved_workers = dict(registry._WORKERS)
+    saved_discovered = registry._DISCOVERED
+    try:
+        probe_a = _make_probe_worker("_ProbeA")
+        probe_b = _make_probe_worker("_ProbeB")
+        registry.register_worker(probe_a)
+        with pytest.raises(RuntimeError, match="duplicate worker name"):
+            registry.register_worker(probe_b)
+        # re-registering the SAME class under the same name is idempotent, not a collision —
+        # module re-import (e.g. under test collection) must not spuriously raise.
+        registry.register_worker(probe_a)
+        assert registry.registry()["probe-duplicate-name-guard"] is probe_a
+    finally:
+        registry._WORKERS.clear()
+        registry._WORKERS.update(saved_workers)
+        registry._DISCOVERED = saved_discovered
