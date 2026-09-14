@@ -81,6 +81,7 @@ from fleet.models.enums import (
     ContractStatus,
     Ecosystem,
     EdgeKind,
+    FailureClass,
     NodeKind,
     SymbolKind,
 )
@@ -308,6 +309,61 @@ def _run(payload: ContractsInput) -> ContractsOutput:
         "5b must report its own totals; a step that logs nothing is one nobody can audit"
     )
     return result.output
+
+
+def _ctx_with_deadline(*, deadline: float, cancelled: bool) -> WorkerContext:
+    """`_ctx()` pins `deadline=1e12` and never sets `cancel` -- these two knobs are what the
+    cancelled-vs-timeout discrimination in `run()` reads, so they need a way in from a test."""
+    sentinel: Any = object()
+    event = asyncio.Event()
+    if cancelled:
+        event.set()
+    return WorkerContext(
+        run_id=uuid4(),
+        repo_id="contracts",
+        attempt=1,
+        workdir="/nonexistent/worktree",
+        lease_owner="test:test:1:boot",
+        lease_fence=1,
+        deadline=deadline,
+        cancel=event,
+        budget=CallBudget(remaining_tokens=0, remaining_usd=0.0, deadline=deadline),
+        db=sentinel,
+        llm=sentinel,
+        router=sentinel,
+        limits=sentinel,
+        log=cast("Any", _RecordingLog()),
+    )
+
+
+def test_cancelled_before_dispatch_reports_status_cancelled_not_an_attempt() -> None:
+    """A genuine `ctx.cancelled()` is an operator decision and stays `cancelled` (not an attempt)
+    -- `TRANSIENT_INFRA`, matching the sibling scan workers' convention (classify/interrogate/
+    symbolindex/baseline). Before this worker's own fix (`334edeb`), `run()` had NO cancellation
+    or deadline check at all and would run `_path_universe`/`discover_contracts` regardless."""
+    result = asyncio.run(
+        ContractExtractionWorker().run(
+            _ctx_with_deadline(deadline=1e12, cancelled=True), ContractsInput()
+        )
+    )
+    assert result.status == "cancelled"
+    assert result.error is not None
+    assert result.error.failure_class == FailureClass.TRANSIENT_INFRA
+
+
+def test_expired_before_dispatch_reports_status_timeout_and_charges_an_attempt() -> None:
+    """A genuine `ctx.expired()` (deadline already passed, no operator cancel) must be a
+    chargeable `timeout` result (§11) -- conflating it with `cancelled` would let a repo whose
+    contract extraction always times out loop forever instead of escalating to
+    REQUIRES_HUMAN_INTERVENTION after 3 tries."""
+    result = asyncio.run(
+        ContractExtractionWorker().run(
+            _ctx_with_deadline(deadline=-1.0, cancelled=False), ContractsInput()
+        )
+    )
+    assert result.status == "timeout"
+    assert result.error is not None
+    assert result.error.failure_class == FailureClass.TIMEOUT
 
 
 def _stable(output: ContractsOutput) -> str:
