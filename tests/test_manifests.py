@@ -52,6 +52,28 @@ def write(tmp_path: Path, name: str, body: str) -> Path:
     return path
 
 
+def test_shared_helpers_common_shape_contract(tmp_path: Path) -> None:
+    """`as_table`/`as_str`/`opt_str` are the ONE place every adapter narrows an untyped TOML/JSON
+    node into the common shape (base.py's own docstring: "the common-shape contract"). `opt_str`
+    in particular backs every optional string field across all 7 ecosystems (`version`, `name`,
+    catalog aliases) — a field that is present but whitespace-only must count as absent, or a
+    manifest that writes `version = "   "` would put a fake non-None `version_spec` in the graph
+    instead of `None`."""
+    path = tmp_path / "x.toml"
+    assert base.as_table({"a": 1}, path=path, what="t") == {"a": 1}
+    with pytest.raises(ManifestParseError, match=r"x\.toml: expected a table for t, got list"):
+        base.as_table([1, 2], path=path, what="t")
+
+    assert base.as_str("hi", path=path, what="s") == "hi"
+    with pytest.raises(ManifestParseError, match=r"x\.toml: expected a string for s, got int"):
+        base.as_str(3, path=path, what="s")
+
+    assert base.opt_str("  hi  ") == "hi"
+    assert base.opt_str("   ") is None  # whitespace-only counts as absent, not a value
+    assert base.opt_str(None) is None
+    assert base.opt_str(3) is None
+
+
 @pytest.fixture
 def isolated_registry() -> Iterator[None]:
     """Save/restore the module-global registry so a test may register throwaway adapters."""
@@ -124,6 +146,15 @@ def test_npm_scope_becomes_the_coordinate_group(tmp_path: Path) -> None:
     published = adapter.publishes(write(tmp_path, "package.json", PACKAGE_JSON))
     assert published is not None
     assert (published.key, published.version_spec) == ("npm:@acme:checkout-ui", "3.1.0")
+
+
+def test_npm_empty_package_name_fails_loud(tmp_path: Path) -> None:
+    """An empty string key in a dependency table is not a package — a corrupted/hand-edited
+    package.json with `"": "1.0.0"` must fail loud (Rule 11), not silently become a `Coordinate`
+    with an empty name that every other empty-name entry in the fleet then collides with."""
+    path = write(tmp_path, "package.json", '{"dependencies": {"": "1.0.0"}}')
+    with pytest.raises(ManifestParseError, match=r"empty package name"):
+        NpmAdapter().parse(path)
 
 
 # --------------------------------------------------------------------------------------
@@ -236,6 +267,27 @@ def test_python_setup_cfg(tmp_path: Path) -> None:
     assert published is not None and published.key == "pypi::acme-legacy"
 
 
+def test_python_dependency_group_include_group_table_entries_are_skipped(tmp_path: Path) -> None:
+    """PEP 735 `dependency-groups` entries may be a table (`{include-group = "other"}`) — an
+    indirection into another group in the SAME file, not an external requirement string. Trying
+    to `split_requirement` a table would crash the whole parse for a syntactically valid
+    pyproject.toml, dropping every dependency of that repo, not just the indirection."""
+    path = write(
+        tmp_path,
+        "pyproject.toml",
+        """
+        [dependency-groups]
+        test = ["pytest>=8.3", {include-group = "typing"}]
+        typing = ["mypy>=1.13"]
+        """,
+    )
+    deps = PythonAdapter().parse(path)
+    assert [(d.raw_id, d.scope) for d in deps] == [
+        ("pytest", "test"),
+        ("mypy", "typing"),
+    ]
+
+
 # --------------------------------------------------------------------------------------
 # maven
 # --------------------------------------------------------------------------------------
@@ -327,6 +379,31 @@ def test_maven_rejects_entity_expansion(tmp_path: Path) -> None:
         MavenAdapter().parse(path)
 
 
+def test_maven_unresolved_property_left_verbatim(tmp_path: Path) -> None:
+    """`_interpolate` documents that an unresolved `${...}` is left verbatim rather than guessed
+    or silently dropped — inventing a value, or blanking the placeholder, would put a fact in the
+    graph the pom's own bytes do not support (module docstring: "raw, as written")."""
+    path = write(
+        tmp_path,
+        "pom.xml",
+        """
+        <?xml version="1.0"?>
+        <project xmlns="http://maven.apache.org/POM/4.0.0">
+          <artifactId>x</artifactId>
+          <dependencies>
+            <dependency>
+              <groupId>g</groupId>
+              <artifactId>a</artifactId>
+              <version>${undefined.property}</version>
+            </dependency>
+          </dependencies>
+        </project>
+        """,
+    )
+    deps = MavenAdapter().parse(path)
+    assert deps[0].version_spec == "${undefined.property}"
+
+
 # --------------------------------------------------------------------------------------
 # gradle
 # --------------------------------------------------------------------------------------
@@ -401,6 +478,23 @@ def test_gradle_version_catalog(tmp_path: Path) -> None:
         ("com.squareup.okhttp3:okhttp:4.12.0", "4.12.0"),
         ("org.slf4j:slf4j-api:2.0.13", "2.0.13"),
     ]
+
+
+def test_gradle_catalog_version_require_strictly_prefer_forms(tmp_path: Path) -> None:
+    """Gradle's rich version-catalog syntax (`{ require = "..." }` / `strictly` / `prefer`) is
+    real, common syntax for range constraints — not just `version = "x"` or `version.ref`.
+    Silently returning `None` for these would drop the `version_spec` from every catalog entry
+    that uses a range constraint instead of a pin."""
+    path = write(
+        tmp_path,
+        "gradle/libs.versions.toml",
+        """
+        [libraries]
+        guava = { module = "com.google.guava:guava", version = { require = "[30.0,32.0)" } }
+        """,
+    )
+    deps = GradleAdapter().parse(path)
+    assert deps[0].version_spec == "[30.0,32.0)"
 
 
 # --------------------------------------------------------------------------------------
@@ -486,6 +580,23 @@ def test_cargo_workspace_inheritance_states_no_version(tmp_path: Path) -> None:
     assert published is not None and published.version_spec is None
 
 
+def test_cargo_virtual_workspace_root_publishes_nothing(tmp_path: Path) -> None:
+    """A virtual workspace root (`[workspace]` with no `[package]`) genuinely publishes no
+    coordinate — `[package]` is what a Cargo crate uses to name itself. Fabricating one (e.g. a
+    `None`/empty-string name) would put a fake crate node in the graph that nothing else in the
+    workspace ever depends on."""
+    path = write(
+        tmp_path,
+        "Cargo.toml",
+        """
+        [workspace]
+        members = ["crates/core", "crates/cli"]
+        resolver = "2"
+        """,
+    )
+    assert CargoAdapter().publishes(path) is None
+
+
 # --------------------------------------------------------------------------------------
 # go
 # --------------------------------------------------------------------------------------
@@ -544,6 +655,18 @@ def test_gomod_require_blocks_and_indirects(tmp_path: Path) -> None:
     assert published is not None
     # The /v2 major suffix is part of the module identity: v1 and v2 are different modules.
     assert published.key == "go:github.com/acme:billing/v2"
+
+
+def test_gomod_split_module_single_segment_and_missing_module_line(tmp_path: Path) -> None:
+    """`_split_module` backs both `coordinate()` and `publishes()`. A single-segment module path
+    (no `/` at all — a legitimate local/short Go module name) must land as `(group="", name=
+    module)`, not be silently misparsed by falling through to the multi-segment branch; and a
+    go.mod with no `module` line at all publishes nothing rather than a garbage coordinate."""
+    coord = GomodAdapter().coordinate(RawDependency(raw_id="acme", version_spec="v1.0.0"))
+    assert (coord.group, coord.name) == ("", "acme")
+
+    path = write(tmp_path, "go.mod", "go 1.22\n")
+    assert GomodAdapter().publishes(path) is None
 
 
 # --------------------------------------------------------------------------------------
@@ -659,6 +782,16 @@ def test_unrecognized_repo_falls_back_to_unknown(tmp_path: Path) -> None:
     # A real manifest is never stolen by the fallback: priority 10 000 can only ever win last.
     claimed = adapter_for(write(tmp_path, "package.json", '{"name": "x"}'))
     assert claimed is not None and claimed.name == "npm"
+
+
+def test_unknown_adapter_coordinate_uses_unknown_namespace() -> None:
+    """Whatever raw text the ADR-0008 class-2 LLM extraction slot produces for an unrecognized
+    manifest is addressed in the UNKNOWN namespace, not silently attributed to some other
+    ecosystem it happens to resemble — that would join an unresolved guess onto a real graph
+    node."""
+    coord = UnknownAdapter().coordinate(RawDependency(raw_id="mystery-thing", version_spec="1.0"))
+    assert coord.ecosystem is Ecosystem.UNKNOWN
+    assert (coord.group, coord.name, coord.version_spec) == ("", "mystery-thing", "1.0")
 
 
 def test_matches_reads_no_files(tmp_path: Path) -> None:
