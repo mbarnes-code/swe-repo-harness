@@ -383,6 +383,44 @@ async def test_the_reaper_reaps_only_the_expired_lease(repo: SqliteStateReposito
     )
 
 
+async def test_get_phase_surfaces_the_persisted_transient_retry_count(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+) -> None:
+    """`get_phase` round-trips `phases.transient_retries`, not a hardcoded 0.
+
+    Why: `orchestrator/runner.py::_drive` reloads `LadderState.transient_retries` from
+    `get_phase(...).transient_retries` (334edeb, "D-closing: reload the durable counter so a
+    crash/restart or a later wave's re-admission of a still-PENDING phase resumes the budget
+    instead of resetting it") — the whole point being that a worker that crashed after the
+    orchestrator wrote a non-zero `transient_retries` (`runner.py`'s own fenced
+    `UPDATE phases SET ... transient_retries = ? ...`) must come back with THAT count on the next
+    `_drive`, not a silently reset budget that lets a permanently-transient endpoint be retried
+    for free all over again. If `get_phase` ever went back to leaving this field out of its
+    `SELECT`/mapping (as it did before 334edeb), every caller reading `row.transient_retries`
+    would see 0 regardless of what was actually persisted, and this is the only test that reads
+    the field through `get_phase` at all — every other `transient_retries` assertion in the
+    suite reads it via a raw `SELECT` or via `LadderState`, not via `PhaseRow`.
+    """
+    store, writer = demotion_bed
+    await store.upsert_phase(RUN, REPO, Phase.TRANSFORM, now=NOW)
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        await conn.execute(
+            "UPDATE phases SET transient_retries = 3, updated_at = ? "
+            " WHERE run_id = ? AND repo_id = ? AND phase = ?",
+            (NOW.isoformat(), RUN, REPO, int(Phase.TRANSFORM)),
+        )
+
+    await writer.submit(unit)
+
+    row = await store.get_phase(RUN, REPO, Phase.TRANSFORM)
+    assert row is not None
+    assert row.transient_retries == 3, (
+        "the persisted transient-retry count must survive a get_phase round-trip so a "
+        "restarted runner resumes the budget instead of resetting it"
+    )
+
+
 async def test_the_attempt_that_reaches_max_attempts_escalates_in_the_same_statement(
     repo: SqliteStateRepository,
 ) -> None:

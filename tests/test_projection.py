@@ -60,6 +60,11 @@ def _names(directory: Path) -> list[str]:
     return sorted(p.name for p in directory.iterdir())
 
 
+def _rename(src: Path, dst: Path) -> None:
+    """Sync file access, deliberately outside the async test bodies (ruff ASYNC240)."""
+    src.rename(dst)
+
+
 def _seed(path: Path) -> None:
     """Populate the authoritative tables directly. Test setup only — the harness writes through
     `StateWriter`; here the point is to have rows the projection must reproduce faithfully."""
@@ -474,3 +479,43 @@ async def test_projector_records_a_failed_rebuild_and_re_raises_it_on_close(
     assert isinstance(projector.last_error, projmod.ProjectionError)
     with pytest.raises(projmod.ProjectionError):
         await projector.aclose()
+
+
+async def test_projector_clears_last_error_after_a_later_successful_rebuild(
+    db_path: Path, out_path: Path
+) -> None:
+    """A later success resolves an earlier failure (334edeb): `last_error` must not outlive it.
+
+    Why: `aclose()` re-raises whatever `last_error` holds (Rule 11) — exactly right while the
+    projection is genuinely stale, but wrong forever after a SUBSEQUENT successful rebuild wrote
+    a fresh, correct file. Before 334edeb, a database briefly unreachable (a transient disk
+    hiccup, a lagging mount) left `last_error` set for the rest of the run: every later
+    `aclose()` would re-raise a resolved error even though `writes` had already moved past it —
+    a false-positive Rule-11 alarm on a run that was, by then, actually fine.
+    """
+    moved = db_path.with_suffix(".moved")
+    _rename(db_path, moved)  # the DB is briefly unreachable -- the failure this simulates
+
+    projector = Projector(db_path, run_id=RUN_ID, path=out_path, min_interval_s=0.01)
+    await projector.start()
+    projector.request()
+    await asyncio.sleep(0.1)
+    error_after_outage = projector.last_error
+    assert projector.writes == 0
+    assert error_after_outage is not None, "the outage must be recorded, not swallowed"
+
+    _rename(moved, db_path)  # the DB is back
+    projector.request()
+    await asyncio.sleep(0.1)
+    # Re-read via a fresh local binding, not the same `projector.last_error` expression narrowed
+    # above: mypy's flow analysis has no model of the background `_loop` task mutating this
+    # attribute between awaits, so re-checking the same narrowed expression makes it (wrongly)
+    # conclude the code below is unreachable (`warn_unreachable`, reproduced against a minimal
+    # standalone file before landing this form).
+    error_after_recovery = projector.last_error
+    assert projector.writes == 1, "the recovered rebuild must actually run"
+    assert error_after_recovery is None, (
+        "a later success must resolve the earlier failure, or aclose() re-raises a stale error"
+    )
+
+    await projector.aclose()  # must not raise: the last rebuild succeeded
