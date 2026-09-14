@@ -356,6 +356,42 @@ def test_engine_registry_resolves_the_shipped_engines_from_config() -> None:
 
 
 # ---------------------------------------------------------------------------------------
+# 5b. an engine that violates its contract is loud, never absorbed into a finding
+# ---------------------------------------------------------------------------------------
+async def test_engine_contract_violation_for_the_wrong_path_is_never_absorbed() -> None:
+    """`pipeline.py`'s module docstring draws a hard line: a genuine rule disagreement is a
+    `RuleConflict` finding (an operator's YAML problem), while a driver returning a patch for a
+    path it was not handed is `EngineContractError` (Rule 11 — ours, not theirs) and must
+    propagate rather than being swallowed or misfiled as a finding. `EngineContractError` had
+    zero coverage anywhere in this suite before this test — nothing proved `_run_pass`'s
+    `patch.path != path` guard (`pipeline.py`) actually fires."""
+
+    class WrongPathRewriter:
+        engine = "fake"
+
+        async def apply(
+            self, rule: RewriteRule, path: str, source: str, params: dict[str, str]
+        ) -> FilePatch | None:
+            wrong_path = "pkg/other.py"
+            diff = make_unified_diff(wrong_path, source, source.replace("beta", "BETA"))
+            return FilePatch(
+                path=wrong_path, diff=diff, tier=TransformTier.DETERMINISTIC,
+                parse_probe_ok=False, rule_id=rule.id,
+            )
+
+        async def parse_probe(self, path: str) -> bool:
+            return True
+
+    from fleet.rewrite.pipeline import EngineContractError
+
+    with pytest.raises(EngineContractError) as excinfo:
+        await RewritePipeline(
+            [rule("r")], EngineRegistry([WrongPathRewriter()])
+        ).rewrite_file(PATH, SOURCE)
+    assert "pkg/other.py" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------------------
 # 6. determinism across processes
 # ---------------------------------------------------------------------------------------
 _DETERMINISM_SCRIPT = '''
@@ -455,6 +491,49 @@ async def test_libcst_driver_names_the_missing_package() -> None:
         )
 
 
+async def test_libcst_parse_probe_is_a_real_parse_not_gated_by_availability(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The module docstring draws a sharp line: `apply` is unimplemented, but `parse_probe` is
+    "real: `libcst.parse_module` on the file's current bytes." With `libcst` absent from this
+    host, that real True/False verdict logic (`parse_probe`'s try/except) has never run under
+    this suite — only the availability gate has (the test above). `importlib.util.find_spec` and
+    `importlib.import_module` are patched to simulate a host where `libcst` resolves, so the
+    genuine parse/parse-failure branches are exercised without depending on the package being
+    installed."""
+    import importlib as real_importlib
+
+    real_find_spec = real_importlib.util.find_spec
+    real_import_module = real_importlib.import_module
+
+    class _FakeLibcst:
+        @staticmethod
+        def parse_module(text: str) -> object:
+            if "BROKEN" in text:
+                raise SyntaxError("bad syntax")
+            return object()
+
+    def fake_find_spec(name: str, package: str | None = None) -> object:
+        return object() if name == "libcst" else real_find_spec(name, package)
+
+    def fake_import_module(name: str, package: str | None = None) -> object:
+        return _FakeLibcst() if name == "libcst" else real_import_module(name, package)
+
+    monkeypatch.setattr(real_importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(real_importlib, "import_module", fake_import_module)
+
+    driver = LibCstRewriter()
+    assert driver.available() is True
+
+    good = tmp_path / "good.py"
+    good.write_text("x = 1\n", encoding="utf-8")
+    bad = tmp_path / "bad.py"
+    bad.write_text("BROKEN(\n", encoding="utf-8")
+
+    assert await driver.parse_probe(str(good)) is True
+    assert await driver.parse_probe(str(bad)) is False
+
+
 async def test_tsmorph_driver_names_the_missing_half() -> None:
     """Node present but `ts-morph` unresolvable is the common host state, and it must still fail
     loudly: probing only for `node` would let the rule "run" and rewrite nothing."""
@@ -467,6 +546,28 @@ async def test_tsmorph_driver_names_the_missing_half() -> None:
     message = str(excinfo.value)
     assert "ts-morph" in message
     assert "node" in message or "npm install" in message
+
+
+async def test_tsmorph_apply_and_probe_raise_notimplemented_once_available() -> None:
+    """State-of-implementation contract (Rule 11), for the OTHER half of the driver's behavior
+    from the test above: once both availability halves resolve — `node` on PATH and `ts-morph`
+    resolvable from it — `apply`/`parse_probe` must still fail LOUDLY with `NotImplementedError`,
+    never silently no-op, since the bridge script itself is not shipped. This host has `node` but
+    not `ts-morph`, so the injected `CommandRunner` simulates the `require.resolve` half
+    succeeding — the branch nothing in this suite reaches otherwise."""
+
+    async def resolving_runner(argv: Sequence[str], **kwargs: object) -> ProcResult:
+        return ProcResult(argv=tuple(argv), exit_code=0, stdout_tail="", stderr_tail="",
+                          duration_ms=1, timed_out=False, started=True)
+
+    driver = TsMorphRewriter(runner=resolving_runner)  # type: ignore[arg-type]
+    assert await driver.available() is True
+
+    ts_rule = RewriteRule(id="r", engine="ts-morph", languages=["tsx"], rule={"pattern": "x"})
+    with pytest.raises(NotImplementedError, match="bridge script"):
+        await driver.apply(ts_rule, "web/App.tsx", "export const A = 1;\n", {})
+    with pytest.raises(NotImplementedError, match="bridge script"):
+        await driver.parse_probe("web/App.tsx")
 
 
 async def test_fenced_engines_refuse_a_rule_outside_their_language() -> None:
@@ -505,6 +606,30 @@ async def test_astgrep_builds_a_deterministic_inline_rule_invocation() -> None:
     inline = calls[0][calls[0].index("--inline-rules") + 1]
     assert "a.b" in inline and "c.d" in inline and "{{" not in inline
     assert inline.index("fix") < inline.index("id") < inline.index("language")  # sorted keys
+
+
+async def test_astgrep_apply_raises_when_the_cli_itself_reports_failure() -> None:
+    """The CLI wrapper's own failure path (Rule 11), never exercised by the tests above since
+    every injected runner there returns exit 0: `ast-grep scan --update-all` exiting non-zero —
+    e.g. `8`, ast-grep's own "this rule document is unusable" code — must raise
+    `EngineUnavailableError` naming the rule, the exit code and stderr. Absorbing this into
+    "nothing matched" (a `None` return) would ship the unrewritten file as a silent success,
+    exactly the failure `apply`'s module docstring warns against."""
+
+    async def failing_runner(argv: Sequence[str], **kwargs: object) -> ProcResult:
+        return ProcResult(
+            argv=tuple(argv), exit_code=8, stdout_tail="",
+            stderr_tail="Error: rule has no valid `rule` field", duration_ms=5,
+            timed_out=False, started=True,
+        )
+
+    driver = AstGrepRewriter(binary=sys.executable, runner=failing_runner)  # type: ignore[arg-type]
+    with pytest.raises(EngineUnavailableError) as excinfo:
+        await driver.apply(rule("busted", engine="ast-grep"), PATH, SOURCE, {})
+    message = str(excinfo.value)
+    assert "busted" in message
+    assert "exited 8" in message
+    assert "no valid" in message
 
 
 # ---------------------------------------------------------------------------------------
