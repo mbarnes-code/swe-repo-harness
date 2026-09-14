@@ -393,19 +393,31 @@ async def test_diff_stat_resolves_a_renamed_files_real_path(git: Git) -> None:
     """`git diff --numstat` compresses a rename into `common/{old => new}` (shared affix) or a
     bare `old => new` (no common affix) — not a plain path. Taking the trailing tab-separated
     field verbatim would leave `FileStat.path` a bogus compound string instead of the file's real,
-    current path (the defect this test pins)."""
-    await _sh(git.path, "mv", "a.txt", "renamed.txt")
-    (git.path / "renamed.txt").write_text("v1\nv2\n")  # keep it a rename, not a delete+add
-    stat = await git.diff_stat()
-    assert stat.paths == ("renamed.txt",)
+    current path (the defect this test pins).
 
-    # No common prefix/suffix at all: git falls back to a bare `old => new`, no braces. `git mv`
-    # alone stages the rename with nothing left in the worktree-vs-index diff `diff_stat()` reads
-    # by default, so — as with `renamed.txt` above — the file is touched again to keep it visible.
-    await _sh(git.path, "mv", "b.txt", "elsewhere.md")
-    (git.path / "elsewhere.md").write_text("keep\nmore\n")
-    stat = await git.diff_stat()
-    assert set(stat.paths) == {"renamed.txt", "elsewhere.md"}
+    Both forms appear ONLY once a rename is fully absorbed into one side of the comparison with
+    nothing left uncommitted on top of it — a plain worktree-vs-index `diff_stat()` right after
+    `git mv` never contains an arrow at all, because `git mv` itself already stages the rename
+    into the index, so the remaining worktree-vs-index diff is a same-path content diff (verified
+    empirically: `git diff --numstat` after a bare `git mv` prints e.g. `1\t0\trenamed.txt`, no
+    `=>`). The old form of this test asserted the resolved name after exactly that sequence and so
+    passed whether or not `_resolve_numstat_path` did anything at all — replacing its body with
+    `return raw` left every assertion here green. Reading the arrow/brace notation for real
+    requires diffing the rename ITSELF: `staged=True` against `HEAD`, with no further edit on top
+    (and both renames must be staged-but-uncommitted at the moment they're read — committing one
+    folds it into `HEAD` and removes it from a subsequent `staged=True` diff)."""
+    (git.path / "common").mkdir()
+    (git.path / "common" / "old.txt").write_text("shared\n")
+    await _sh(git.path, "add", "common/old.txt")
+    await _sh(git.path, "commit", "-m", "add common/old.txt")
+
+    # Bare "old => new" form: no common prefix/suffix at all.
+    await _sh(git.path, "mv", "a.txt", "renamed.txt")
+    # Brace-compressed form: a shared prefix/suffix survives outside the braces.
+    await _sh(git.path, "mv", "common/old.txt", "common/new.txt")
+
+    stat = await git.diff_stat(staged=True)
+    assert set(stat.paths) == {"renamed.txt", "common/new.txt"}
 
 
 async def test_apply_check_reverse_distinguishes_applied_from_not_applied(
@@ -428,6 +440,13 @@ async def test_apply_check_reverse_distinguishes_applied_from_not_applied(
 # real answer to the question each method asks; the fix raises `GitCommandError` on the first
 # two rather than let a clock failure be reported as the probe's negative branch. `ScriptedRunner`
 # gained a real `timed_out` (D45) precisely so these states could be pinned here.
+#
+# `current_branch`, `remote_url`, and `blob_at` (334edeb) are the SAME shape — `check=False` +
+# `_require_settled` + a `None` negative branch — but round VIII Batch 12's re-verification found
+# they had never been added to `PROBE_NAMES`: nothing exercised an unsettled `ProcResult` through
+# any of the three, so 334edeb's `_require_settled()` additions to them shipped with zero
+# discriminating coverage. Folded in here rather than given their own test bodies, since the
+# three parametrized tests below are already generic over "what does calling the probe return".
 # --------------------------------------------------------------------------------------
 async def _run_probe(name: str, git_: Git) -> object:
     if name == "resolve":
@@ -438,10 +457,24 @@ async def _run_probe(name: str, git_: Git) -> object:
         return await git_.apply_check("some.patch")
     if name == "is_ancestor":
         return await git_.is_ancestor("HEAD", "HEAD")
+    if name == "current_branch":
+        return await git_.current_branch()
+    if name == "remote_url":
+        return await git_.remote_url("origin")
+    if name == "blob_at":
+        return await git_.blob_at("HEAD", "some/path.txt")
     raise AssertionError(f"unknown probe {name!r}")
 
 
-PROBE_NAMES = ("resolve", "ref_exists", "apply_check", "is_ancestor")
+PROBE_NAMES = (
+    "resolve",
+    "ref_exists",
+    "apply_check",
+    "is_ancestor",
+    "current_branch",
+    "remote_url",
+    "blob_at",
+)
 
 
 @pytest.mark.parametrize("probe", PROBE_NAMES)
