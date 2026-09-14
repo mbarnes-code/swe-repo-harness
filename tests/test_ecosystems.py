@@ -22,7 +22,7 @@ from fleet import ecosystems
 from fleet.bazel.generators import coarse_build_targets, render_build_bazel, render_module_bazel
 from fleet.bazel.layout import LayoutNode, layout, scc_label
 from fleet.ecosystems import go as go_adapter
-from fleet.ecosystems.base import EcosystemAdapter, register, reset_adapters
+from fleet.ecosystems.base import EcosystemAdapter, register, reset_adapters, select_entrypoint
 from fleet.ecosystems.unknown import DEGRADED_TAG
 from fleet.graph.cycles import CoarsePlan, CoarseTarget
 from fleet.models.build import BuildTarget, BuildUnit, InternalDep, Resolution, WorkspaceDep
@@ -2827,3 +2827,194 @@ def test_the_registry_and_its_output_are_identical_across_processes() -> None:
     parsed = json.loads(first)
     assert parsed["order"] == ["go", "js", "jvm", "py", "rust", "unknown"]
     assert parsed["dirs"]["npm"] == "ts"
+
+
+# =======================================================================================
+# Round VIII, Wave 5 Batch 19 -- mutation-proof coverage for base.py/go.py/js.py/unknown.py
+#
+# Batch 3 (agent/roundviii-mutation-batch3) found py.py/jvm.py/rust.py do NOT share one
+# mutation shape despite superficial similarity. The same check was repeated here rather than
+# assumed, and it turned up a THIRD shape, not two: go.py already excludes a foreign-ecosystem
+# coordinate in `_go_requires` (the fix `334edeb` copied into py/jvm/rust), but js.py applies NO
+# such filter anywhere (`workspace_deps`, `_unit_package_json`) -- a real, disclosed asymmetry,
+# not something a test here papers over by asserting the unguarded behaviour is correct. See
+# `.superpowers/sdd/round-VIII-qa-qc/worker-mutation-batch19-report.md` for the finding. The four
+# tests below each target a DIFFERENT untested branch that genuinely exists in its file today.
+# =======================================================================================
+
+
+def test_select_entrypoint_prefers_the_declared_candidate_order_not_srcs_order() -> None:
+    """`base.select_entrypoint` -- the entrypoint the FOUR emitting adapters (py/jvm/rust/js)
+    delegate binary-detection to -- must return the first `candidates` entry present, never the
+    first `srcs` entry that happens to match some candidate.
+
+    **Why this is base.py's own load-bearing untested branch, not one more adapter test.** Every
+    existing `generate_targets` test (`test_py_maps_a_distribution_to_python_targets`,
+    `test_jvm_maps_a_maven_module_to_java_targets`, ...) supplies at most ONE entrypoint-shaped
+    filename per unit, so "first candidate present" and "first srcs entry that matches a
+    candidate" have never been forced to disagree -- a two-anchor case whose anchors coincide,
+    exactly the shape CLAUDE.md's Rule 12 warns reports nothing. `jvm.py`'s own preference order
+    is `("Main.java", "Application.java", "App.java")`: a unit that ships both `Application.java`
+    and `Main.java` must still pick `Main.java`, even though `Application.java` sorts first
+    alphabetically (and `package_relative` DOES sort `srcs` before an adapter ever sees them --
+    the exact `_` vs `s` ordering hazard `js.py::_test_entry_point`'s own docstring names for a
+    sibling function). Getting this wrong is not cosmetic: `jvm.py::generate_targets` would emit
+    a `java_binary(main_class=...)` naming the wrong class, a target that builds green and dies
+    at `bazel run` with `ClassNotFound` -- the same failure class `test_jvm_maps_a_maven_module_
+    to_java_targets`'s own docstring calls out for `main_class`'s OTHER derivation.
+    """
+    srcs = ["src/Application.java", "src/Main.java"]
+    candidates = ("Main.java", "Application.java", "App.java")
+    assert select_entrypoint(srcs, candidates) == "src/Main.java", (
+        "the declared preference order must win over srcs order, or an adapter's generated "
+        "binary names the wrong entry class/file"
+    )
+    # Sanity: with the preferred file absent, the next candidate in ITS preference order wins --
+    # not simply "the other file", so the test cannot pass by accident of there being only two.
+    assert select_entrypoint(["src/Application.java"], candidates) == "src/Application.java"
+    assert select_entrypoint(["src/Other.java"], candidates) is None
+
+
+def test_go_root_module_excludes_a_coordinate_from_another_ecosystem() -> None:
+    """A stray non-Go coordinate re-read from a sibling manifest never reaches the root `go.mod`
+    or the `go.sum` resolver input beside it.
+
+    **Why this is a real scenario and not a hypothetical.** `cli._external_coordinates` dispatches
+    per MANIFEST FILE, not per unit ecosystem (`_go_requires`'s own docstring says so: "a
+    Go-primary repo that also has a `package.json` carries npm coordinates here"), so
+    `unit.external_coordinates` for a Go unit can genuinely hold a non-Go entry. `_go_requires`
+    already guards this with `if coordinate.ecosystem is Ecosystem.GO and coordinate.name` -- the
+    SAME class of fix `334edeb` copied from go.py into py.py/jvm.py/rust.py (per this module's own
+    docstring reference) -- but no existing test
+    (`test_the_go_root_module_is_the_monorepos_own_and_unions_both_repos_requires`,
+    `test_two_go_repos_pinning_one_module_differently_leave_the_choice_to_gos_mvs`) ever mixes
+    ecosystems inside one Go unit's `external_coordinates`; every `_go_unit`-built fixture carries
+    exactly one, always Go.
+
+    The stray coordinate is deliberately GO-MODULE-SHAPED (`github.com/evil/pkg`, a real version)
+    so this test isolates the ecosystem filter from `_require_line`'s separate shape-validation
+    guard (`test_a_go_coordinate_that_cannot_be_a_require_line_fails_loudly` already covers that
+    one): without the ecosystem filter this coordinate would not raise, it would be silently
+    ACCEPTED into the root `go.mod` as a real-looking but wrong `require` line -- a `@com_
+    github_evil_pkg` `bazel_dep` use_repo`d from nowhere, for a package this Go repo never
+    required.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.GO)
+    unit = _unit(
+        "commons",
+        Ecosystem.GO,
+        "go/commons",
+        srcs=["main.go"],
+        published=Coordinate(ecosystem=Ecosystem.GO, group="github.com/acme", name="commons"),
+        external=[
+            Coordinate(
+                ecosystem=Ecosystem.GO,
+                group="github.com/stretchr",
+                name="testify",
+                version_spec="v1.9.0",
+            ),
+            # Re-read from a package.json this same repo also ships -- Go-module-SHAPED so a
+            # missing ecosystem filter would not merely fail to raise, it would render cleanly.
+            Coordinate(
+                ecosystem=Ecosystem.NPM,
+                group="github.com/evil",
+                name="pkg",
+                version_spec="v1.0.0",
+            ),
+        ],
+    )
+
+    files = {f.path: f for f in adapter.workspace_files([unit])}
+    go_mod_text = files["go.mod"].content
+    assert "github.com/stretchr/testify v1.9.0" in go_mod_text, go_mod_text
+    assert "evil" not in go_mod_text, (
+        f"a coordinate re-read from this repo's OTHER manifest reached the fleet's shared root "
+        f"go.mod: {go_mod_text}"
+    )
+
+    plan = adapter.resolution([unit])
+    assert plan is not None
+    resolver_go_mod = next(f for f in plan.inputs if f.path == "go.mod")
+    assert "evil" not in resolver_go_mod.content, (
+        "the resolver input must be the SAME text workspace_files declares (one renderer, called "
+        "twice) -- if the stray leaked into one it must leak into both"
+    )
+
+
+def test_js_root_targets_and_generate_targets_wire_the_hub_for_a_sibling_only_unit() -> None:
+    """A JS unit with NO external dependency but ONE linkable first-party sibling still needs its
+    own `npm_link_all_packages()` call, in both the root package and its own.
+
+    **Why this is js.py's own untested branch.** `_needs_npm_hub` is `bool(unit.external_
+    coordinates or _first_party(unit))` -- an OR of two independent reasons a unit might need the
+    `@npm` hub. Every existing test that exercises the `_first_party` disjunct
+    (`test_a_first_party_sibling_is_linked_as_an_npm_package_not_only_as_a_label`) ALSO gives the
+    unit an external dependency (`react`), so the two disjuncts have never been forced to disagree
+    -- a unit whose `unit.external_coordinates` is empty and whose only npm surface is a linkable
+    sibling has never been built. Losing the `_first_party` disjunct (e.g. narrowing it back to
+    `bool(unit.external_coordinates)`) would be invisible to every current test and would silently
+    drop the unit's own `npm_link_all_packages()` call: the label
+    `//ts/acme/ui:node_modules/@acme/tokens` the sibling test's own docstring names would then be
+    "no such target", from a package that both compiles and depends on it, exactly as `root_
+    targets`'s docstring describes for the gate it shares.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.NPM)
+    sibling = InternalDep(
+        label="//ts/acme/tokens:tokens",
+        dest="ts/acme/tokens",
+        published=Coordinate(ecosystem=Ecosystem.NPM, group="@acme", name="tokens"),
+    )
+    unit = _unit(
+        "acme-ui",
+        Ecosystem.NPM,
+        "ts/acme/ui",
+        srcs=["ts/acme/ui/src/index.ts"],
+        published=Coordinate(ecosystem=Ecosystem.NPM, group="@acme", name="ui"),
+        internal_deps=[sibling],
+        external=[],
+    )
+
+    assert unit.external_coordinates == []
+    (store,) = adapter.root_targets(unit)
+    assert (store.rule, store.package) == ("npm_link_all_packages", ""), (
+        "a unit whose only npm surface is a linkable sibling still needs the root virtual store, "
+        "or every importer's link resolves to nothing"
+    )
+    own_links = [
+        t
+        for t in adapter.generate_targets(unit)
+        if t.rule == "npm_link_all_packages" and t.package == unit.dest
+    ]
+    assert len(own_links) == 1, (
+        "this unit's own package must declare npm_link_all_packages(), or the "
+        "//ts/acme/ui:node_modules/@acme/tokens label the sibling link needs is 'no such target'"
+    )
+
+
+def test_unknown_filegroup_srcs_dedupe_a_path_declared_as_both_a_source_and_a_resource() -> None:
+    """`UnknownAdapter.generate_targets` unions `sources()`, `test_sources()` and `non_source_
+    files()` into ONE `srcs` list -- and the union must DEDUPE, or a path the driver recorded
+    under two roles (a walked source that is ALSO a declared resource -- `UnknownAdapter` accepts
+    every suffix, so nothing routes it exclusively to one or the other) reaches the generated
+    `filegroup` twice.
+
+    **Why this is untested today.** `test_unknown_falls_back_visibly_instead_of_raising` gives its
+    unit disjoint `srcs`/`test_srcs` and no `resources` at all, so the three sequences this method
+    unions have never overlapped in any existing test -- the set-union's dedupe (`sorted({*a, *b,
+    *c})`) and a naive list-concatenation (`sorted([*a, *b, *c])`) produce byte-identical output
+    on every case tried so far. A duplicated label is not cosmetic: real Bazel refuses a
+    `filegroup` (or any rule) whose `srcs` names the same label twice in one attribute.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.UNKNOWN)
+    unit = _unit(
+        "ops-scripts",
+        Ecosystem.UNKNOWN,
+        "misc/ops-scripts",
+        srcs=["misc/ops-scripts/deploy.sh"],
+        resources=["misc/ops-scripts/deploy.sh"],
+    )
+    (target,) = adapter.generate_targets(unit)
+    assert target.srcs == ["deploy.sh"], (
+        f"deploy.sh reached the filegroup's srcs more than once -- real Bazel rejects a "
+        f"duplicated label in one rule's srcs attribute: {target.srcs}"
+    )
