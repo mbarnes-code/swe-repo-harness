@@ -43,6 +43,7 @@ from fleet.migrations import (
     migrate,
     v007_logical_keys,
     v008_reservations,
+    v010_file_blobs,
 )
 from fleet.migrations._support import sha256_nul
 from fleet.models.graph import edge_key_for
@@ -986,6 +987,228 @@ def test_the_first_rung_renames_columns_without_touching_rows(tmp_path):
                       "FROM edges") == [("repo-a", "repo-b", "REPO", "REPO", None)]
     assert _query(db, "SELECT node_id, node_kind FROM wave_members") == [("repo-a", "REPO")]
     assert _query(db, "SELECT task_id, contract_id FROM tasks") == [("task-1", None)]
+
+
+# --------------------------------------------------------------------------------------
+# Wave 4 batch 15 (§15.1 item 3, bucket A-): a per-step discriminator for v003, v004, v005,
+# v006, v009 and v010 — each was previously exercised only transitively via the default
+# migrate(db, steps=STEPS) ladder, so a step whose upgrade() silently no-oped or dropped one of
+# its own statements would not have reddened any test. Each test below runs the ladder truncated
+# to a SINGLE step (mirroring test_the_first_rung_renames_columns_without_touching_rows's
+# STEPS[:1] shape), asserts the shape/content BEFORE that step is absent, then asserts it is
+# present after — so a step that runs zero of its statements, or the wrong one, reddens here
+# rather than only inside the full-ladder assertions elsewhere in this file.
+# --------------------------------------------------------------------------------------
+
+
+def test_the_second_rung_adds_anti_anchoring_columns_and_the_rejected_table(tmp_path):
+    """§6, 2 → 3: `attempts`/`llm_cache` gain the anti-anchoring columns with the documented
+    back-fill defaults, and `rejected_approaches` is created with the ladder-length CHECK baked
+    into it. A step that dropped the CHECK, or skipped the back-fill on a pre-existing row, would
+    leave a database that silently accepts a rung-4 attempt or fails to explain the boundary."""
+    db = tmp_path / "v2.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute("CREATE TABLE attempts (attempt_id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE llm_cache (cache_key TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO attempts VALUES ('attempt-1')")
+        conn.execute("INSERT INTO llm_cache VALUES ('cache-1')")
+        conn.execute("PRAGMA user_version = 2")
+    finally:
+        conn.close()
+
+    before_attempts = {row[1] for row in _query(db, "PRAGMA table_info('attempts')")}
+    before_cache = {row[1] for row in _query(db, "PRAGMA table_info('llm_cache')")}
+    assert not {"context_policy", "approach_signature"} & before_attempts
+    assert not {"context_policy", "rejected_approach_digest"} & before_cache
+    assert "rejected_approaches" not in {
+        row[0] for row in _query(db, "SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+
+    assert migrate(db, steps=STEPS[1:2]) == (2, 3)
+
+    # the back-fill on the row that already existed at the boundary
+    assert _query(db, "SELECT context_policy, approach_signature FROM attempts") == [(None, "")]
+    assert _query(
+        db, "SELECT context_policy, rejected_approach_digest FROM llm_cache"
+    ) == [(None, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")]
+
+    # the ladder-length CHECK is really there, not a table with the right name and no CHECK
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            conn.execute(
+                "INSERT INTO rejected_approaches (run_id, task_id, approach_signature, reason, "
+                "failure_class, attempt, tier, created_at) VALUES "
+                "('run-1','task-1',?,'x','BUILD',4,'WORKHORSE','2026-01-01T00:00:00Z')",
+                (SIG,),
+            )
+    finally:
+        conn.close()
+
+
+def test_the_third_rung_adds_stub_lifecycle_and_renames_the_provider_column(tmp_path):
+    """§6, 3 → 4: `stubs` gains the lifecycle columns, `stub_repo_id` becomes `provider_repo_id`,
+    and `consumer_repo_id` is back-filled from `repo_id` in the same transaction as the ALTER that
+    adds it. A step that ran the ALTER but skipped the UPDATE would leave every pre-existing stub
+    with `consumer_repo_id = ''`, silently breaking the CHECK the 6 → 7 rebuild later installs."""
+    db = tmp_path / "v3.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute("CREATE TABLE stubs (repo_id TEXT NOT NULL, stub_repo_id TEXT NOT NULL)")
+        conn.execute("CREATE TABLE tasks (task_id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO stubs VALUES ('repo-a', 'repo-b')")
+        conn.execute("PRAGMA user_version = 3")
+    finally:
+        conn.close()
+
+    before = {row[1] for row in _query(db, "PRAGMA table_info('stubs')")}
+    assert not {"state", "consumer_repo_id", "provider_repo_id"} & before
+    assert "stub_repo_id" in before
+
+    assert migrate(db, steps=STEPS[2:3]) == (3, 4)
+
+    after = {row[1] for row in _query(db, "PRAGMA table_info('stubs')")}
+    assert "stub_repo_id" not in after, "the old name must be gone, not merely superseded"
+    assert _query(
+        db,
+        "SELECT state, stub_fidelity, revalidation_round, resolved_at, provider_repo_id, "
+        "consumer_repo_id FROM stubs",
+    ) == [("ACTIVE", "PUBLISHED_ARTIFACT", 0, None, "repo-b", "repo-a")]
+    assert "revalidation_key" in {row[1] for row in _query(db, "PRAGMA table_info('tasks')")}
+
+
+def test_the_fourth_rung_adds_backend_identity_columns(tmp_path):
+    """§6, 4 → 5: `llm_cache`/`attempts` learn which backend answered. Every pre-ADR-0023 row was
+    produced by the sole `anthropic` backend, so a step that skipped the `llm_cache` defaults
+    would make a post-migration lookup silently attribute an old cache hit to the wrong backend
+    instead of just aging it out (§6's documented, intended outcome)."""
+    db = tmp_path / "v4.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute("CREATE TABLE llm_cache (cache_key TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE attempts (attempt_id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO llm_cache VALUES ('cache-1')")
+        conn.execute("INSERT INTO attempts VALUES ('attempt-1')")
+        conn.execute("PRAGMA user_version = 4")
+    finally:
+        conn.close()
+
+    before = {row[1] for row in _query(db, "PRAGMA table_info('llm_cache')")}
+    assert not {"tier", "backend", "structured_output_mode"} & before
+
+    assert migrate(db, steps=STEPS[3:4]) == (4, 5)
+
+    assert _query(
+        db, "SELECT tier, backend, structured_output_mode FROM llm_cache"
+    ) == [("WORKHORSE", "anthropic", "JSON_SCHEMA")]
+    assert _query(db, "SELECT llm_backend, llm_failovers FROM attempts") == [(None, 0)]
+
+
+def test_the_fifth_rung_deletes_the_mutations_journal_and_backfills_base_ref(tmp_path):
+    """§6, 5 → 6: `mutations` is dropped and `phases.base_ref` is back-filled ONLY for rows that
+    already recorded a pre-mutation tip. A step that back-filled unconditionally would hand a run
+    with no recorded tip a `base_ref` pointing at a ref that was never created — a rollback anchor
+    for a rollback that cannot happen; a step that skipped the DROP would leave the very shadow-VCS
+    table ADR-0024 exists to remove."""
+    db = tmp_path / "v5.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute("CREATE TABLE attempts (attempt_id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE mutations (id INTEGER PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE phases (run_id TEXT, repo_id TEXT, phase INTEGER, "
+            "pre_commit_sha TEXT)"
+        )
+        conn.execute("INSERT INTO attempts VALUES ('attempt-1')")
+        conn.execute("INSERT INTO phases VALUES ('run-1', 'repo-a', 2, 'deadbeef')")
+        conn.execute("INSERT INTO phases VALUES ('run-1', 'repo-b', 2, NULL)")
+        conn.execute("PRAGMA user_version = 5")
+    finally:
+        conn.close()
+
+    before = {row[1] for row in _query(db, "PRAGMA table_info('attempts')")}
+    assert not {"patch_id", "commit_sha", "already_applied"} & before
+    assert "mutations" in {
+        row[0] for row in _query(db, "SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+
+    assert migrate(db, steps=STEPS[4:5]) == (5, 6)
+
+    assert _query(
+        db, "SELECT patch_id, commit_sha, already_applied FROM attempts"
+    ) == [(None, None, 0)]
+    assert _query(
+        db, "SELECT repo_id, base_ref FROM phases ORDER BY repo_id"
+    ) == [
+        ("repo-a", "refs/fleet/run-1/repo-a/phase-2/base"),
+        ("repo-b", None),
+    ]
+    assert "mutations" not in {
+        row[0] for row in _query(db, "SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+
+
+def test_the_eighth_rung_adds_coordinates_version_nullable_no_backfill(tmp_path):
+    """§6, 8 → 9 (SPEC §37 Blocker B): `coordinates.version` is additive-only and NULL for every
+    pre-existing row — there is no way to recover a past scan's discarded value. A step that
+    defaulted it to `''` instead of NULL would make an un-scanned coordinate indistinguishable
+    from one this ladder never saw computed."""
+    db = tmp_path / "v8.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "CREATE TABLE coordinates (coord_key TEXT PRIMARY KEY, ecosystem TEXT, "
+            "group_name TEXT, name TEXT)"
+        )
+        conn.execute("INSERT INTO coordinates VALUES ('npm::x', 'npm', NULL, 'x')")
+        conn.execute("PRAGMA user_version = 8")
+    finally:
+        conn.close()
+
+    before = {row[1] for row in _query(db, "PRAGMA table_info('coordinates')")}
+    assert "version" not in before
+
+    assert migrate(db, steps=STEPS[7:8]) == (8, 9)
+
+    assert _query(db, "SELECT coord_key, version FROM coordinates") == [("npm::x", None)]
+
+
+def test_the_ninth_rung_creates_file_blobs_matching_the_baseline(tmp_path):
+    """§6, 9 → 10 (D114): `file_blobs` is created from `state/schema.sql` itself, so a migrated
+    database and a fresh one cannot drift. A step whose CREATE TABLE hand-copied a stale shape
+    would pass a naive "table now exists" check while still diverging column-for-column from what
+    a fresh database gets — this test would not."""
+    db = tmp_path / "v9.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute("PRAGMA user_version = 9")
+    finally:
+        conn.close()
+
+    assert not _support.table_exists(sqlite3.connect(db), "file_blobs")
+
+    assert migrate(db, steps=STEPS[8:9]) == (9, 10)
+
+    fresh = _fresh_baseline(tmp_path / "fresh.db")
+    assert _table_shape(db, "file_blobs") == _table_shape(fresh, "file_blobs")
+    assert _table_shape(db, "file_blobs"), "the shape comparison itself must not be vacuous"
+
+
+def test_the_ninth_rung_refuses_to_run_twice(tmp_path):
+    """v010's own guard: `upgrade()` raises rather than silently no-op'ing if `file_blobs` already
+    exists at `user_version = 9` — the runner never calls it twice in practice (it gates on
+    `user_version`), but the guard is real Python logic, not DDL, and deserves its own proof
+    independent of that gate."""
+    db = tmp_path / "already-has-it.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("CREATE TABLE file_blobs (path TEXT)")
+        with pytest.raises(_support.SqlTextError, match="already exists"):
+            v010_file_blobs.upgrade(conn)
+    finally:
+        conn.close()
 
 
 # --------------------------------------------------------------------------------------
