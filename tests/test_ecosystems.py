@@ -1893,6 +1893,90 @@ def test_js_resolution_survives_a_unit_that_needs_no_hub_beside_one_that_does() 
     assert adapter.resolution([bare]) is None
 
 
+def test_js_workspace_deps_excludes_a_coordinate_from_another_ecosystem() -> None:
+    """A stray non-NPM coordinate on a JS unit's `external_coordinates` must not reach
+    `npm_translate_lock` (D139, matching `334edeb`'s py/jvm/rust fix and `go.py`'s pre-existing
+    `_go_requires` filter).
+
+    **Why:** `external_coordinates` is a flat list Phase 1 populates from whatever manifests it
+    found in the unit's directory, with no guarantee every entry is NPM. Before the fix
+    `workspace_deps` spread `*unit.external_coordinates` unconditionally, so a Go coordinate
+    recorded on a JS unit (a mixed-language directory sharing a `go.mod` beside its
+    `package.json`) would silently join the `@npm` hub with a package `npm_translate_lock`
+    cannot resolve.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.NPM)
+    unit = _unit(
+        "acme-app",
+        Ecosystem.NPM,
+        "ts/acme/app",
+        srcs=["src/index.ts"],
+        external=[
+            Coordinate(ecosystem=Ecosystem.NPM, name="left-pad", version_spec="^1.0.0"),
+            Coordinate(ecosystem=Ecosystem.GO, name="github.com/acme/widget"),
+        ],
+    )
+    deps = adapter.workspace_deps(unit)
+    names = {dep.coordinate.name for dep in deps}
+    assert names == {"left-pad"}, f"the stray go coordinate reached npm_translate_lock: {names}"
+
+
+def test_js_resolution_contributor_gate_ignores_a_unit_with_only_non_npm_coordinates() -> None:
+    """A unit whose `external_coordinates` are all non-NPM must not become an npm importer or
+    trigger `root_targets`'s `npm_link_all_packages` macro — the `_needs_npm_hub` gate D139 fixed.
+
+    **Why:** before the fix, `_needs_npm_hub` was `bool(unit.external_coordinates or
+    _first_party(unit))` — truthy for ANY non-empty list, NPM or not. A unit carrying only a
+    foreign coordinate (a `go.mod` sharing this unit's directory) would then be treated as an npm
+    contributor: it would seed a `pnpm-workspace.yaml` member and an empty `package.json` for a
+    directory with zero real npm dependencies, and `root_targets` would emit
+    `npm_link_all_packages` there even though `npm_translate_lock` never wired an `@npm` entry
+    for it.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.NPM)
+    stray = _unit(
+        "acme-mixed",
+        Ecosystem.NPM,
+        "ts/acme/mixed",
+        srcs=["src/index.ts"],
+        external=[Coordinate(ecosystem=Ecosystem.GO, name="github.com/acme/widget")],
+    )
+    assert adapter.resolution([stray]) is None, (
+        "a unit with only a non-npm coordinate produced a resolution"
+    )
+    assert adapter.root_targets(stray) == [], (
+        "a unit with only a non-npm coordinate emitted npm_link_all_packages"
+    )
+
+
+def test_js_unit_package_json_excludes_a_non_npm_coordinate_from_a_real_contributor() -> None:
+    """A genuine npm contributor's stray non-NPM coordinate must not appear in the rendered
+    `package.json` `dependencies` — the filter inside `_unit_package_json` (D139).
+
+    **Why:** distinct from the contributor gate above — this unit legitimately contributes (it
+    has a real NPM coordinate too), so the gate fix alone cannot catch a poisoned manifest line.
+    Before the fix, `_unit_package_json`'s `dependencies` comprehension iterated every coordinate
+    on the unit unconditionally, so the stray Go module path would have been written into the
+    fleet's `pnpm-lock.yaml` importer manifest.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.NPM)
+    mixed = _unit(
+        "acme-app",
+        Ecosystem.NPM,
+        "ts/acme/app",
+        srcs=["src/index.ts"],
+        external=[
+            Coordinate(ecosystem=Ecosystem.NPM, name="left-pad", version_spec="^1.0.0"),
+            Coordinate(ecosystem=Ecosystem.GO, name="github.com/acme/widget"),
+        ],
+    )
+    plan = adapter.resolution([mixed])
+    assert plan is not None
+    inputs = {support.path: support for support in plan.inputs}
+    dependencies = json.loads(inputs["ts/acme/app/package.json"].content)["dependencies"]
+    assert dependencies == {"left-pad": "^1.0.0"}, dependencies
+
+
 def test_js_workspace_files_hold_one_entry_per_root_path_across_two_units() -> None:
     """Two JS repos, ONE entry per monorepo-root path — not two.
 
