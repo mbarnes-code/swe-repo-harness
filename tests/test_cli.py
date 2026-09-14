@@ -57,10 +57,12 @@ from fleet.cli import (
     _AttemptWriter,
     _BuildEvidence,
     _BuildSink,
+    _captured_module_lock,
     _extract_migration_notes,
     _PrCandidate,
     _prepare_repo,
     _promote_one_pr,
+    _read_text_or_none,
     _regenerate_pr_body,
     _report_with_stubs,
     _sequence_graph_config,
@@ -7936,6 +7938,52 @@ async def test_publish_module_lock_survives_a_crash_between_materialize_and_comm
     )
     shown = await integration_git.text(["show", f"integration:{MODULE_LOCK_PATH}"])
     assert shown == lock_content.strip()
+
+
+def test_read_text_or_none_distinguishes_absent_from_empty(tmp_path: Path) -> None:
+    """`_read_text_or_none` exists so "is this file already what I am about to write?" has *No*
+    as an answer, never an exception (its own docstring) — which only holds if a MISSING file
+    comes back `None` and not `""`. The distinction is load-bearing exactly where this module
+    worries about it elsewhere for lockfiles: an empty string and an absent file are NOT the same
+    fact, and `_captured_module_lock` below relies on getting `None` — not `""` — to know Bazel
+    wrote no lock in this worktree at all, versus a `SupportFile` around empty content.
+    """
+    present = tmp_path / "present.txt"
+    present.write_text("hello\n", encoding="utf-8")
+
+    assert _read_text_or_none(present) == "hello\n"
+    assert _read_text_or_none(tmp_path / "absent.txt") is None, (
+        "a missing file must read as None, not as an empty string — the two are different facts"
+    )
+
+
+def test_captured_module_lock_is_none_absent_and_a_support_file_when_bazel_wrote_one(
+    tmp_path: Path,
+) -> None:
+    """`_captured_module_lock` docstring: `None` means Bazel wrote no lock in this worktree, "the
+    ordinary state of a first run" — and the caller (`BuildPipelineWorker._publish`) branches on
+    exactly that `is None` check to decide whether to publish anything at all. A mutation that
+    lost the `None` passthrough (e.g. always returning a `SupportFile`, empty content and all)
+    would make every first build synthesize a lock nobody resolved — the exact defect
+    `Resolution`'s docstring elsewhere in this module says the harness must not commit.
+    """
+    from fleet.bazel.lockfile import MODULE_LOCK_PATH
+
+    empty_worktree = tmp_path / "no-lock"
+    empty_worktree.mkdir()
+    assert _captured_module_lock(empty_worktree) is None
+
+    written_worktree = tmp_path / "has-lock"
+    written_worktree.mkdir()
+    lock_text = '{"lockFileVersion": 15, "moduleFileHash": "abc"}\n'
+    (written_worktree / MODULE_LOCK_PATH).write_text(lock_text, encoding="utf-8")
+
+    captured = _captured_module_lock(written_worktree)
+    assert captured is not None
+    assert captured.path == MODULE_LOCK_PATH
+    # `FleetModel.model_config` sets `str_strip_whitespace=True`, so the trailing newline Bazel
+    # wrote is stripped by the `SupportFile` constructor itself, not by `_captured_module_lock`.
+    assert captured.content == lock_text.strip()
 
 
 async def test_migrated_test_count_reaches_repos_after_a_measured_run(
