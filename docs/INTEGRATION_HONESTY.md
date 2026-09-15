@@ -5108,7 +5108,7 @@ from the report that first raised it:
    `live_names`". A directory named `<repo_id>` is not `fleet-<run_id>-<repo>-<attempt>`, so no
    worktree the fleet actually cuts can match the glob.
 2. **The worktrees are registered in a different git dir.** `CloneWorker._materialize_worktree`
-   (`workers/clone.py:397-407`) runs `git worktree add --detach` through `self._git(mirror, ctx)`
+   (`workers/clone.py:398-410`) runs `git worktree add --detach` through `self._git(mirror, ctx)`
    — the **per-repo mirror**. `WorktreeManager` interrogates one fixed repo:
    `_git_run` (`sandbox/worktree.py:134-141`) is `git -C self.repo_dir …`, and its sole
    construction site `cli._reap_worktree_manager` (`cli.py:10464-10471`) sets
@@ -11586,7 +11586,7 @@ by the round VIII controller, form-agnostic sweep found `D138` as the highest al
 `py.py`, `jvm.py`, and `rust.py` (mutation-proven this round in `agent/roundviii-mutation-batch3`);
 `go.py` already carried the equivalent `_go_requires()` filter independently (confirmed by
 `worker-mutation-batch19`, which added the missing test for it). `js.py`'s `workspace_deps()`
-(`js.py:573-593`) instead spreads `*unit.external_coordinates` directly into the
+(`js.py:587-631`) instead spreads `*unit.external_coordinates` directly into the
 `npm_translate_lock` coordinate list with no ecosystem check at all — verified by reading the
 function directly, and confirmed by grepping `js.py` for any `Ecosystem`/`ecosystem ==` guard
 near `external_coordinates`, `workspace_deps`, or `_unit_package_json`: none exists.
