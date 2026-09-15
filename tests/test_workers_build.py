@@ -259,9 +259,7 @@ class UnavailableModelClient:
     targets — so this fake exercises exactly the path the old `model=None` constructor did.
     """
 
-    async def complete(
-        self, role, messages, response_model, **kwargs
-    ) -> ModelResponse[Any]:
+    async def complete(self, role, messages, response_model, **kwargs) -> ModelResponse[Any]:
         raise TierUnavailable(ModelTier.WORKHORSE, ("fake:fake-workhorse",))
 
     def stream(self, role, messages, response_model, **kwargs):  # pragma: no cover
@@ -511,8 +509,12 @@ async def test_a_failed_rdeps_query_is_never_read_as_a_clean_closure(tmp_path) -
             (
                 lambda p: p[1] == "query",
                 lambda parts: ProcResult(
-                    argv=parts, exit_code=1, stdout_tail="", stderr_tail="ERROR: bad query",
-                    duration_ms=1, timed_out=False,
+                    argv=parts,
+                    exit_code=1,
+                    stdout_tail="",
+                    stderr_tail="ERROR: bad query",
+                    duration_ms=1,
+                    timed_out=False,
                 ),
             )
         ]
@@ -706,9 +708,7 @@ async def test_a_model_pin_that_hides_a_violated_spec_is_rejected_before_it_is_w
             )
         }
     )
-    ctx = make_ctx(
-        tmp_path, attempt=2, context_policy=ContextPolicy.EVIDENCE_ONLY, model=model
-    )
+    ctx = make_ctx(tmp_path, attempt=2, context_policy=ContextPolicy.EVIDENCE_ONLY, model=model)
     payload = BuildgenInput(
         unit=_unit(),
         targets=[BuildTarget(package="java/com/acme/widget", name="w", rule="java_library")],
@@ -755,9 +755,7 @@ async def test_a_disclosed_override_is_accepted_and_rendered(tmp_path) -> None:
             )
         }
     )
-    ctx = make_ctx(
-        tmp_path, attempt=2, context_policy=ContextPolicy.EVIDENCE_ONLY, model=model
-    )
+    ctx = make_ctx(tmp_path, attempt=2, context_policy=ContextPolicy.EVIDENCE_ONLY, model=model)
     result = await BuildgenWorker().run(
         ctx,
         BuildgenInput(
@@ -799,12 +797,8 @@ async def test_a_conflict_at_rung_1_stays_retryable_so_the_ladder_can_reach_the_
         targets=[BuildTarget(package="java/com/acme/widget", name="w", rule="java_library")],
         workspace_deps=[_dep()],
         requirements=[
-            ExternalRequirement(
-                coord_key="maven:com.acme:commons", repo_id="a", version_spec="31"
-            ),
-            ExternalRequirement(
-                coord_key="maven:com.acme:commons", repo_id="b", version_spec="33"
-            ),
+            ExternalRequirement(coord_key="maven:com.acme:commons", repo_id="a", version_spec="31"),
+            ExternalRequirement(coord_key="maven:com.acme:commons", repo_id="b", version_spec="33"),
         ],
         ruleset_versions={"rules_jvm_external": "6.0"},
     )
@@ -848,9 +842,7 @@ async def test_build_authoring_is_reached_only_after_the_deterministic_path_fail
         {
             "build_authoring": BuildFileProposal(
                 package_path="java/com/acme/widget",
-                targets=(
-                    {"name": "widget", "rule": "java_library", "srcs": ("Widget.java",)},
-                ),
+                targets=({"name": "widget", "rule": "java_library", "srcs": ("Widget.java",)},),
                 rationale="no template covers a mixed resource/source layout",
             )
         }
@@ -862,9 +854,7 @@ async def test_build_authoring_is_reached_only_after_the_deterministic_path_fail
     assert model.roles == [], "rung 1 renders no prompt at all"
 
     rung2 = await BuildgenWorker().run(
-        make_ctx(
-            tmp_path, attempt=2, context_policy=ContextPolicy.EVIDENCE_ONLY, model=model
-        ),
+        make_ctx(tmp_path, attempt=2, context_policy=ContextPolicy.EVIDENCE_ONLY, model=model),
         empty,
     )
     assert rung2.status == "ok"
@@ -916,12 +906,8 @@ async def test_conflict_resolution_tier_outage_halts_the_run_instead_of_reportin
         targets=[BuildTarget(package="java/com/acme/widget", name="w", rule="java_library")],
         workspace_deps=[_dep()],
         requirements=[
-            ExternalRequirement(
-                coord_key="maven:com.acme:commons", repo_id="a", version_spec="31"
-            ),
-            ExternalRequirement(
-                coord_key="maven:com.acme:commons", repo_id="b", version_spec="33"
-            ),
+            ExternalRequirement(coord_key="maven:com.acme:commons", repo_id="a", version_spec="31"),
+            ExternalRequirement(coord_key="maven:com.acme:commons", repo_id="b", version_spec="33"),
         ],
         ruleset_versions={"rules_jvm_external": "6.0"},
     )
@@ -983,7 +969,10 @@ async def test_buildverify_records_the_integration_ref_it_built_against(tmp_path
     assert out is not None and out.integration_ref == SNAPSHOT
     assert SNAPSHOT in result.evidence
     assert runner.calls[0] == (
-        "bazel", "build", "//java/com/acme/widget/...", "--keep_going",
+        "bazel",
+        "build",
+        "//java/com/acme/widget/...",
+        "--keep_going",
         "--build_event_json_file=bazel-build-events.json",
     )
     assert runner.calls[1][1] == "test"
@@ -1070,21 +1059,28 @@ async def test_a_read_only_cache_miss_during_diagnosis_is_not_swallowed_by_the_a
             (
                 lambda p: True,
                 lambda parts: ProcResult(
-                    argv=parts, exit_code=1, stdout_tail="", stderr_tail="ERROR: bad code",
-                    duration_ms=90_000, timed_out=False,
+                    argv=parts,
+                    exit_code=1,
+                    stdout_tail="",
+                    stderr_tail="ERROR: bad code",
+                    duration_ms=90_000,
+                    timed_out=False,
                 ),
             )
         ]
     )
     ctx = make_ctx(
-        tmp_path, attempt=2, context_policy=ContextPolicy.EVIDENCE_ONLY,
+        tmp_path,
+        attempt=2,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
         model=_CacheMissModelClient(),
     )
     with pytest.raises(CacheMiss):
         await BuildverifyWorker(runner=runner).run(
             ctx,
             BuildverifyInput(
-                dest="java/com/acme/widget", integration_ref=SNAPSHOT,
+                dest="java/com/acme/widget",
+                integration_ref=SNAPSHOT,
                 log_dir=str(tmp_path / "logs"),
             ),
         )
@@ -1103,8 +1099,12 @@ async def test_a_test_failure_and_an_oom_are_not_the_same_failure(tmp_path) -> N
                 (
                     lambda p: p[1] == "test",
                     lambda parts: ProcResult(
-                        argv=parts, exit_code=exit_code, stdout_tail="", stderr_tail="boom",
-                        duration_ms=10, timed_out=False,
+                        argv=parts,
+                        exit_code=exit_code,
+                        stdout_tail="",
+                        stderr_tail="boom",
+                        duration_ms=10,
+                        timed_out=False,
                     ),
                 ),
             ]
@@ -1467,9 +1467,7 @@ async def test_run_checkpoint_rejected_regenerates_before_verify_on_a_stale_reen
                     build_ok=True,
                     test_ok=True,
                     tests_ran=True,
-                    steps=[
-                        StepRecord(unit="test", exit_code=0, log_path="artifacts/logs/t.log")
-                    ],
+                    steps=[StepRecord(unit="test", exit_code=0, log_path="artifacts/logs/t.log")],
                 ),
                 completed_units=["build", "test"],
             )
@@ -1605,9 +1603,7 @@ def test_handoff_synthesizes_an_error_when_a_failed_step_carries_none() -> None:
     from fleet.cli import BUILD_UNITS, GENERATE_UNIT, PUBLISH_UNIT, VERIFY_UNIT
 
     worker = BuildPipelineWorker()
-    step = WorkerResult[BuildOutput](
-        status="partial", completed_units=["build"], error=None
-    )
+    step = WorkerResult[BuildOutput](status="partial", completed_units=["build"], error=None)
     output = BuildOutput(repo_id=REPO)
 
     result = worker._handoff(step, BUILD_UNITS, [GENERATE_UNIT], output)
@@ -1734,8 +1730,12 @@ async def test_a_sandboxed_build_refuses_before_bazel_when_the_image_has_no_c_co
             (
                 lambda p: p[-3:-1] == ("sh", "-c") and "command -v gcc" in p[-1],
                 lambda parts: ProcResult(
-                    argv=parts, exit_code=1, stdout_tail="", stderr_tail="",
-                    duration_ms=40, timed_out=False,
+                    argv=parts,
+                    exit_code=1,
+                    stdout_tail="",
+                    stderr_tail="",
+                    duration_ms=40,
+                    timed_out=False,
                 ),
             ),
             (lambda p: True, ok("")),
@@ -1835,7 +1835,7 @@ async def test_a_probe_that_never_started_is_not_reported_as_a_missing_compiler(
 
 
 CONTAINER_NAME_CONFLICT = (
-    'docker: Error response from daemon: Conflict. The container name '
+    "docker: Error response from daemon: Conflict. The container name "
     '"/fleet-00000000-0000-4000-8000-0000000000b3-acme-widget-1" is already in use by container '
     '"3f2504e04f8911d39a0c0305e82c3301d785a10". You have to remove (or rename) that container to '
     "be able to reuse that name.\n"
@@ -1916,8 +1916,13 @@ async def test_a_probe_the_fleets_own_deadline_killed_is_not_reported_as_a_missi
             (
                 lambda p: p[-3:-1] == ("sh", "-c") and "command -v gcc" in p[-1],
                 lambda parts: ProcResult(
-                    argv=parts, exit_code=124, stdout_tail="", stderr_tail="",
-                    duration_ms=0, timed_out=True, started=False,
+                    argv=parts,
+                    exit_code=124,
+                    stdout_tail="",
+                    stderr_tail="",
+                    duration_ms=0,
+                    timed_out=True,
+                    started=False,
                 ),
             ),
             (lambda p: True, ok("")),
@@ -1926,7 +1931,9 @@ async def test_a_probe_the_fleets_own_deadline_killed_is_not_reported_as_a_missi
     result = await BuildverifyWorker(runner=runner).run(
         make_ctx(tmp_path),
         BuildverifyInput(
-            dest=dest, integration_ref=SNAPSHOT, image="fleet/build:latest",
+            dest=dest,
+            integration_ref=SNAPSHOT,
+            image="fleet/build:latest",
             log_dir=str(tmp_path / "logs"),
         ),
     )
@@ -1963,8 +1970,13 @@ async def test_a_probe_killed_mid_pull_is_a_substantive_timeout_not_a_missing_co
             (
                 lambda p: p[-3:-1] == ("sh", "-c") and "command -v gcc" in p[-1],
                 lambda parts: ProcResult(
-                    argv=parts, exit_code=-15, stdout_tail="", stderr_tail="",
-                    duration_ms=120_000, timed_out=True, started=True,
+                    argv=parts,
+                    exit_code=-15,
+                    stdout_tail="",
+                    stderr_tail="",
+                    duration_ms=120_000,
+                    timed_out=True,
+                    started=True,
                 ),
             ),
             (lambda p: True, ok("")),
@@ -1973,7 +1985,9 @@ async def test_a_probe_killed_mid_pull_is_a_substantive_timeout_not_a_missing_co
     result = await BuildverifyWorker(runner=runner).run(
         make_ctx(tmp_path),
         BuildverifyInput(
-            dest=dest, integration_ref=SNAPSHOT, image="fleet/build:latest",
+            dest=dest,
+            integration_ref=SNAPSHOT,
+            image="fleet/build:latest",
             log_dir=str(tmp_path / "logs"),
         ),
     )
@@ -2176,7 +2190,9 @@ async def test_the_docker_cannot_run_message_bounds_its_free_retry_claim(tmp_pat
     result = await BuildverifyWorker(runner=runner).run(
         make_ctx(tmp_path),
         BuildverifyInput(
-            dest=dest, integration_ref=SNAPSHOT, image="fleet-build:9.2.0-bookworm",
+            dest=dest,
+            integration_ref=SNAPSHOT,
+            image="fleet-build:9.2.0-bookworm",
             log_dir=str(tmp_path / "logs"),
         ),
     )
@@ -3217,9 +3233,7 @@ async def test_a_real_test_failure_still_fails_still_charges_and_still_escalates
     has to be asserted from both sides.
     """
     dest = a_package(tmp_path, "ts/acme/app")
-    payload = BuildverifyInput(
-        dest=dest, integration_ref=SNAPSHOT, log_dir=str(tmp_path / "logs")
-    )
+    payload = BuildverifyInput(dest=dest, integration_ref=SNAPSHOT, log_dir=str(tmp_path / "logs"))
     runner = bazel_exits(3, stderr="FAIL: //ts/acme/app:app_test (see …/test.log)\n")
 
     result = await BuildverifyWorker(runner=runner).run(make_ctx(tmp_path), payload)
@@ -3292,6 +3306,7 @@ def test_every_bazel_exit_code_this_classifier_reads_was_verified_against_the_bi
     the fleet's own scheduling. `retry.py` branches on `retryable` and never on message text, so
     these two columns are the entire policy.
     """
+
     def classify(code: int, *, unit: str = TEST_UNIT) -> tuple[FailureClass, bool]:
         result = ProcResult(
             argv=("bazel", unit, "//py/acme_lib_py/..."),
@@ -3338,6 +3353,7 @@ def test_no_test_targets_is_read_only_off_the_test_step_and_only_from_a_finished
     carry any status, and reading 4 out of one would report "no tests" for a build that never got
     far enough to have any — turning a `TIMEOUT` into a green repo.
     """
+
     def proc(**overrides) -> ProcResult:
         fields = {
             "argv": ("bazel", "test", "//x/..."),
@@ -3775,11 +3791,16 @@ async def test_prwriter_ingests_merge_state_and_holds_an_unmerged_dependency(tmp
     assert view is not None and view[-1] == "state,mergedAt,mergeCommit"
 
     merged_gh = gh_runner(PR_VIEW_MERGED)
-    opened = await PrwriterWorker(runner=merged_gh).run(make_ctx(tmp_path), payload.model_copy(
-        update={"dependencies": [
-            DependencyPr(repo_id="acme-commons", url="https://github.example/x/pull/7")
-        ]}
-    ))
+    opened = await PrwriterWorker(runner=merged_gh).run(
+        make_ctx(tmp_path),
+        payload.model_copy(
+            update={
+                "dependencies": [
+                    DependencyPr(repo_id="acme-commons", url="https://github.example/x/pull/7")
+                ]
+            }
+        ),
+    )
     assert opened.status == "ok"
     assert opened.output is not None
     assert opened.output.observed_states["acme-commons"] is PrState.MERGED
@@ -4267,7 +4288,7 @@ async def test_a_real_lockfile_in_the_source_repo_is_carried_over_not_reinvented
     _source_tree(tmp_path, dest)
     real = (
         "# This file is automatically @generated by Cargo.\n"
-        "version = 4\n\n[[package]]\nname = \"widget\"\n"
+        'version = 4\n\n[[package]]\nname = "widget"\n'
     )
     (tmp_path / dest / "Cargo.lock").write_text(real, encoding="utf-8")
 
@@ -4493,9 +4514,7 @@ async def test_the_root_cargo_manifest_on_disk_is_a_workspace_naming_both_rust_r
     # the same tuple (`_fleet_support_files`); the package files stay per unit.
     shared = rust.workspace_files([store, core])
     for unit in (store, core):
-        support = _resolve_support_files(
-            tmp_path, [*shared, *rust.package_files(unit)]
-        )
+        support = _resolve_support_files(tmp_path, [*shared, *rust.package_files(unit)])
         result = await BuildgenWorker().run(
             make_ctx(tmp_path),
             BuildgenInput(
@@ -4667,17 +4686,16 @@ def test_the_driver_hands_buildgen_the_fleets_load_labels_and_its_support_files(
     ]
     assert [t.name for t in importer_macros] == ["node_modules"], plan.targets
     assert {f"//{unit.dest}:{t.name}" for t in importer_macros} == {
-        label.rsplit("/", maxsplit=1)[0]
-        for label in js.external_labels(unit)
+        label.rsplit("/", maxsplit=1)[0] for label in js.external_labels(unit)
     }, "the importer macro and the labels that resolve through it are one decision"
     assert deps and toolchains is not None and requirements is not None
 
     payload = _a_build_input(plan, module_targets, [*root_files, *plan.package_files])
     forwarded = BuildPipelineWorker()._buildgen_input(payload)
     assert forwarded.module_targets == module_targets, "the D6 derivation has nothing to read"
-    assert [f.path for f in forwarded.support_files] == [
-        f.path for f in payload.support_files
-    ], "D10: the files MODULE.bazel names never reach the worker that writes them"
+    assert [f.path for f in forwarded.support_files] == [f.path for f in payload.support_files], (
+        "D10: the files MODULE.bazel names never reach the worker that writes them"
+    )
 
 
 def test_two_repos_offering_one_root_path_with_the_same_bytes_dedupe_quietly() -> None:
@@ -4706,9 +4724,7 @@ def test_two_repos_offering_one_root_path_with_the_same_bytes_dedupe_quietly() -
         ),
     }
     *_rest, root_files = _module_inputs(plans)
-    assert sorted(f.path for f in root_files) == sorted(
-        {*(f.path for f in shared), "BUILD.bazel"}
-    )
+    assert sorted(f.path for f in root_files) == sorted({*(f.path for f in shared), "BUILD.bazel"})
     # One entry per path, whatever the fleet's size — the whole point of "the root holds ONE file
     # per path".
     assert len({f.path for f in root_files}) == len(root_files)
@@ -4803,9 +4819,7 @@ def _rust_plan_unit(unit_id: str, dest: str, dep: str) -> BuildUnit:
         dest=dest,
         srcs=list(_POLYGLOT_SRCS),
         published=Coordinate(ecosystem=Ecosystem.CARGO, name=dest.rsplit("/", maxsplit=1)[-1]),
-        external_coordinates=[
-            Coordinate(ecosystem=Ecosystem.CARGO, name=dep, version_spec="1.0")
-        ],
+        external_coordinates=[Coordinate(ecosystem=Ecosystem.CARGO, name=dep, version_spec="1.0")],
     )
 
 
@@ -4920,8 +4934,9 @@ async def test_an_rdeps_test_failure_is_classified_as_a_test_failure(tmp_path) -
     assert result.error.failure_class is FailureClass.TEST_FAILURE, result.error
     assert result.error.retryable is True
     assert classify_build_failure(
-        ProcResult(argv=(), exit_code=3, stdout_tail="", stderr_tail="", duration_ms=1,
-                   timed_out=False),
+        ProcResult(
+            argv=(), exit_code=3, stdout_tail="", stderr_tail="", duration_ms=1, timed_out=False
+        ),
         unit=TEST_UNIT,
     ) == (FailureClass.TEST_FAILURE, True), "the authority this worker now defers to"
 

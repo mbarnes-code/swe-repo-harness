@@ -114,9 +114,7 @@ def _plan() -> WavePlan:
 
 async def _set_blast_radius(writer: StateWriter, repo_id: str, radius: int) -> None:
     async def unit(conn: aiosqlite.Connection) -> None:
-        await conn.execute(
-            "UPDATE repos SET blast_radius = ? WHERE repo_id = ?", (radius, repo_id)
-        )
+        await conn.execute("UPDATE repos SET blast_radius = ? WHERE repo_id = ?", (radius, repo_id))
 
     await writer.submit(unit)
 
@@ -157,7 +155,7 @@ def _scheduler(
 async def test_wave_1_does_not_open_until_wave_0_has_closed(
     wired: Wired,
 ) -> None:
-    """"Wave 2 cannot open before wave 1 closes" is the ONLY thing topological sequencing buys.
+    """ "Wave 2 cannot open before wave 1 closes" is the ONLY thing topological sequencing buys.
 
     A scheduler that opened the next layer while one member was still `PENDING` would migrate a
     dependent against a dependency that has not landed — which does not fail here, it fails in a
@@ -585,9 +583,7 @@ async def _unblock_wiring(path: Path) -> AsyncIterator[UnblockWired]:
                 cycle_findings=(),
                 excluded_repo_ids=(),
             )
-            await store.record_plan(
-                RUN, plan, now=NOW, max_usd_per_repo=UNBLOCK_MAX_USD_PER_REPO
-            )
+            await store.record_plan(RUN, plan, now=NOW, max_usd_per_repo=UNBLOCK_MAX_USD_PER_REPO)
             # Wave 0 closes; wave 1 holds the repo the recompute will free; wave 2 is untouched.
             for repo_id in UNBLOCK_PLAN[0]:
                 await _set_status(repo, repo_id, RepoStatus.SUCCEEDED, clock)
@@ -641,9 +637,9 @@ async def test_the_appended_wave_writes_only_its_own_row_and_the_members_it_move
     added = {t: after[t] - before[t] for t in tables}
     removed = {t: before[t] - after[t] for t in tables}
     assert appended == 3, "the appended index sits above every existing wave"
-    assert added["waves"] == {
-        (RUN, 3, _iso_stamp(clock), None, 1, UNBLOCK_MAX_USD_PER_REPO * 1)
-    }, "one new row, synthetic=1, its own derived ceiling, no start stamp inherited"
+    assert added["waves"] == {(RUN, 3, _iso_stamp(clock), None, 1, UNBLOCK_MAX_USD_PER_REPO * 1)}, (
+        "one new row, synthetic=1, its own derived ceiling, no start stamp inherited"
+    )
     assert removed["waves"] == set(), "no pre-existing `waves` row was rewritten or deleted"
     assert removed["wave_members"] == {(RUN, 1, "REPO", "u-freed")}
     assert added["wave_members"] == {(RUN, 3, "REPO", "u-freed")}

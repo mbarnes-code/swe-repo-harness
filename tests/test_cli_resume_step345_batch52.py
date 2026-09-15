@@ -220,7 +220,7 @@ def _init_tiny_repo(path: Path) -> None:
 def test_recreate_phase_anchor_refuses_to_guess_when_there_is_nothing_to_recover_from(
     tmp_path: Path,
 ) -> None:
-    """"Returns ... `None` when there is nothing to recover from" (the function's own docstring).
+    """ "Returns ... `None` when there is nothing to recover from" (the function's own docstring).
     Every existing caller-level test that reaches this function (`tests/test_cli.py`'s step-4
     arbitration suite) seeds a RECOVERABLE anchor -- a real, resolvable `pre_commit_sha` behind
     the missing ref -- because that is the only shape their fixtures build. Nothing exercises the
@@ -526,9 +526,7 @@ def test_apply_floor_demotions_refuses_a_repo_that_raced_to_requires_human_inter
         "applied": False,
     }
 
-    asyncio.run(
-        _apply_floor_demotions(db_path, RUN_ID, plans, report, now=datetime.now(UTC))
-    )
+    asyncio.run(_apply_floor_demotions(db_path, RUN_ID, plans, report, now=datetime.now(UTC)))
 
     assert report["demoted"] == [], "a demotion that never applied was kept as if it happened"
     assert report["applied"] is False

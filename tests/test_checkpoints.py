@@ -80,9 +80,7 @@ async def test_a_checkpoint_round_trips_through_sqlite(db_path: Path) -> None:
 
     conn = await connect_ro(db_path)
     try:
-        result = await load(
-            conn, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding
-        )
+        result = await load(conn, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding)
     finally:
         await conn.close()
 
@@ -92,7 +90,7 @@ async def test_a_checkpoint_round_trips_through_sqlite(db_path: Path) -> None:
 
 
 async def test_absent_checkpoint_is_a_rejection_not_an_error(db_path: Path) -> None:
-    """"Nothing saved yet" is the ordinary first-run case and must look like every other
+    """ "Nothing saved yet" is the ordinary first-run case and must look like every other
     "no usable checkpoint" answer, so a caller has exactly one branch to write."""
     conn = await connect_ro(db_path)
     try:
@@ -125,9 +123,7 @@ async def test_schema_version_mismatch_invalidates_and_never_raises(db_path: Pat
 
     conn = await connect_ro(db_path)
     try:
-        result = await load(
-            conn, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding
-        )
+        result = await load(conn, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding)
     finally:
         await conn.close()
 
@@ -218,9 +214,7 @@ async def test_an_envelope_model_name_disagreeing_with_the_column_invalidates(
 
     ro = await connect_ro(db_path)
     try:
-        result = await load(
-            ro, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding
-        )
+        result = await load(ro, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding)
     finally:
         await ro.close()
 
@@ -239,18 +233,14 @@ async def test_a_truncated_blob_invalidates_instead_of_raising(db_path: Path) ->
 
     conn = sqlite3.connect(db_path)
     try:
-        conn.execute(
-            "UPDATE checkpoints SET payload = ? WHERE run_id = ?", (b'{"schema_ver', RUN)
-        )
+        conn.execute("UPDATE checkpoints SET payload = ? WHERE run_id = ?", (b'{"schema_ver', RUN))
         conn.commit()
     finally:
         conn.close()
 
     ro = await connect_ro(db_path)
     try:
-        result = await load(
-            ro, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding
-        )
+        result = await load(ro, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding)
     finally:
         await ro.close()
 
@@ -282,9 +272,7 @@ async def test_data_that_no_longer_validates_invalidates(db_path: Path) -> None:
 
     ro = await connect_ro(db_path)
     try:
-        result = await load(
-            ro, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding
-        )
+        result = await load(ro, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding)
     finally:
         await ro.close()
 
@@ -309,9 +297,7 @@ async def test_saving_twice_replaces_rather_than_duplicates(db_path: Path) -> No
     try:
         async with conn.execute("SELECT COUNT(*) FROM checkpoints") as cursor:
             count = await cursor.fetchone()
-        result = await load(
-            conn, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding
-        )
+        result = await load(conn, run_id=RUN_ID, repo_id=REPO, phase=Phase.SCAN, model=CycleFinding)
     finally:
         await conn.close()
 

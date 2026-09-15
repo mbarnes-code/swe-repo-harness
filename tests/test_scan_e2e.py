@@ -140,10 +140,7 @@ FIXTURE_REPOS: dict[str, dict[str, str]] = {
     },
     "acme-lib-py": {
         "pyproject.toml": (
-            "[project]\n"
-            'name = "acme-lib-py"\n'
-            'version = "2.0.1"\n'
-            "dependencies = []\n"
+            '[project]\nname = "acme-lib-py"\nversion = "2.0.1"\ndependencies = []\n'
         ),
         "acme_lib_py/__init__.py": (
             "def normalize(name: str) -> str:\n"
@@ -256,9 +253,7 @@ def _write_config(
     config.mkdir(parents=True, exist_ok=True)
     (config / "fleet.yaml").write_text(fleet_yaml, encoding="utf-8")
     (config / "models.yaml").write_text(MODELS_YAML, encoding="utf-8")
-    entries = "".join(
-        f"  - name: {name}\n    url: {sources[name]}\n" for name in names
-    )
+    entries = "".join(f"  - name: {name}\n    url: {sources[name]}\n" for name in names)
     (config / "repos.yaml").write_text(
         f"version: 1\ndefaults:\n  ref: main\nrepos:\n{entries}", encoding="utf-8"
     )
@@ -278,8 +273,7 @@ def _fresh_db(path: Path) -> Path:
 def fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """A workspace holding five real git repos, a config bundle naming them, and a fresh db."""
     sources = {
-        name: _make_repo(tmp_path / "sources", name, files)
-        for name, files in FIXTURE_REPOS.items()
+        name: _make_repo(tmp_path / "sources", name, files) for name, files in FIXTURE_REPOS.items()
     }
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -346,8 +340,7 @@ def test_scan_persists_the_phase_1_evidence_tables(fleet: Path) -> None:
     published = dict(
         query(
             fleet,
-            "SELECT coord_key, owner_repo_id FROM coordinates "
-            " WHERE owner_repo_id IS NOT NULL",
+            "SELECT coord_key, owner_repo_id FROM coordinates  WHERE owner_repo_id IS NOT NULL",
         )
     )
     assert published["npm:@acme:lib"] == "acme-lib-ts"
@@ -358,9 +351,7 @@ def test_scan_persists_the_phase_1_evidence_tables(fleet: Path) -> None:
     )
     assert ("npm::left-pad",) in external, "an external dependency is still a coordinate"
 
-    symbols = dict(
-        query(fleet, "SELECT repo_id, COUNT(*) FROM symbols GROUP BY repo_id")
-    )
+    symbols = dict(query(fleet, "SELECT repo_id, COUNT(*) FROM symbols GROUP BY repo_id"))
     assert symbols["acme-lib-ts"] > 0, "the TypeScript library indexed no symbols"
     assert symbols["acme-lib-py"] > 0, "the Python library indexed no symbols"
 
@@ -381,9 +372,7 @@ def test_an_empty_repo_is_skipped_with_a_finding_and_the_fleet_continues(fleet: 
     for name in (*LIBRARIES, *APPLICATIONS):
         assert statuses[name] == "SUCCEEDED", f"{name} did not survive the empty repo"
 
-    findings = query(
-        fleet, "SELECT kind FROM findings WHERE repo_id = 'acme-empty' ORDER BY kind"
-    )
+    findings = query(fleet, "SELECT kind FROM findings WHERE repo_id = 'acme-empty' ORDER BY kind")
     assert ("EmptyRepo",) in findings
 
     assert query(fleet, "SELECT COUNT(*) FROM manifests WHERE repo_id = 'acme-empty'") == [(0,)]
@@ -725,9 +714,7 @@ def test_a_second_sequence_leaves_waves_and_wave_members_unchanged(fleet: Path) 
         dict(query(fleet, "SELECT node_kind || ':' || node_id, wave_index FROM wave_members"))
         == before_members
     ), "a re-sequence reassigned a node to a different wave"
-    assert (
-        query(fleet, "SELECT wave_index, max_usd FROM waves ORDER BY wave_index") == before_waves
-    )
+    assert query(fleet, "SELECT wave_index, max_usd FROM waves ORDER BY wave_index") == before_waves
 
 
 def test_an_interrupted_scan_resumes_without_losing_completed_work(fleet: Path) -> None:
@@ -741,9 +728,7 @@ def test_an_interrupted_scan_resumes_without_losing_completed_work(fleet: Path) 
     landed — no re-clone, no duplicated manifest, no reset attempt counter.
     """
     assert scan(fleet, "--only", "acme-lib-*").exit_code == ExitCode.SUCCESS
-    landed = query(
-        fleet, "SELECT repo_id, path, sha256 FROM manifests ORDER BY repo_id, path"
-    )
+    landed = query(fleet, "SELECT repo_id, path, sha256 FROM manifests ORDER BY repo_id, path")
     assert {row[0] for row in landed} == set(LIBRARIES)
 
     # The crash: `acme-app-ts` was claimed and the orchestrator died holding the lease.
@@ -770,9 +755,7 @@ def test_an_interrupted_scan_resumes_without_losing_completed_work(fleet: Path) 
 
     statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 1"))
     assert statuses["acme-app-ts"] == "SUCCEEDED", "the reaped lease was never re-admitted"
-    assert all(
-        statuses[name] == "SUCCEEDED" for name in (*LIBRARIES, *APPLICATIONS)
-    ), statuses
+    assert all(statuses[name] == "SUCCEEDED" for name in (*LIBRARIES, *APPLICATIONS)), statuses
     final = query(fleet, "SELECT repo_id, path, sha256 FROM manifests ORDER BY repo_id, path")
     assert set(landed) <= set(final), "the resume rewrote the first pass's manifests"
     assert len(final) == len(set(final)) == 4, f"a manifest was duplicated: {final}"
@@ -1024,11 +1007,7 @@ def test_sequence_refuses_the_cycle_flags_it_cannot_thread(fleet: Path) -> None:
 # actually writes — for the two remaining §3.1 step 1 hazards that file's fixture never plants.
 
 
-_LFS_POINTER = (
-    "version https://git-lfs.github.com/spec/v1\n"
-    "oid sha256:" + "0" * 64 + "\n"
-    "size 123\n"
-)
+_LFS_POINTER = "version https://git-lfs.github.com/spec/v1\noid sha256:" + "0" * 64 + "\nsize 123\n"
 """A real Git LFS pointer file's content — the small, fixed text format LFS substitutes for the
 tracked blob in the repository proper. `CloneWorker._has_lfs` reads `.gitattributes`, never the
 blob a pointer resolves to, so this is a complete fixture without the megabyte the pointer names."""
@@ -1307,14 +1286,10 @@ def _make_internal_import_fleet(
             "acme-shared-py",
             {
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-shared-py"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-shared-py"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
                 "acme_shared_py/__init__.py": (
-                    "def helper(name: str) -> str:\n"
-                    "    return name.upper()\n"
+                    "def helper(name: str) -> str:\n    return name.upper()\n"
                 ),
             },
         ),
@@ -1470,10 +1445,7 @@ def _make_shared_resource_fleet(
             "acme-orders-svc",
             {
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-orders-svc"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-orders-svc"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
                 "acme_orders_svc/schema.py": (
                     'TABLE_DDL = "CREATE TABLE orders (id INTEGER PRIMARY KEY)"\n'
@@ -1485,10 +1457,7 @@ def _make_shared_resource_fleet(
             "acme-orders-report",
             {
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-orders-report"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-orders-report"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
                 "acme_orders_report/schema.py": (
                     f'TABLE_DDL = "CREATE TABLE {other_table} (id INTEGER PRIMARY KEY)"\n'
@@ -1541,12 +1510,20 @@ def test_two_repos_naming_the_same_table_produce_a_real_shared_resource_edge(
     )
     assert edges == [
         (
-            "acme-orders-report", "acme-orders-svc", "SHARED_RESOURCE",
-            "acme_orders_report/schema.py", 1, 0.5,
+            "acme-orders-report",
+            "acme-orders-svc",
+            "SHARED_RESOURCE",
+            "acme_orders_report/schema.py",
+            1,
+            0.5,
         ),
         (
-            "acme-orders-svc", "acme-orders-report", "SHARED_RESOURCE",
-            "acme_orders_svc/schema.py", 1, 0.5,
+            "acme-orders-svc",
+            "acme-orders-report",
+            "SHARED_RESOURCE",
+            "acme_orders_svc/schema.py",
+            1,
+            0.5,
         ),
     ], edges
 
@@ -1599,15 +1576,9 @@ def _make_dynamic_ref_fleet(
             "acme-dynref-lib",
             {
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-dynref-lib"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-dynref-lib"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
-                "internal/registry.py": (
-                    "def build_widget(name: str) -> str:\n"
-                    "    return name\n"
-                ),
+                "internal/registry.py": ("def build_widget(name: str) -> str:\n    return name\n"),
             },
         ),
         "acme-dynref-app": _make_repo(
@@ -1615,10 +1586,7 @@ def _make_dynamic_ref_fleet(
             "acme-dynref-app",
             {
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-dynref-app"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-dynref-app"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
                 "acme_dynref_app/loader.py": (
                     "import importlib\n"
@@ -1647,9 +1615,7 @@ def dynamic_ref_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def dynamic_ref_fleet_unresolvable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The same two repos, but the dynamic string names a function nobody defines."""
-    return _make_dynamic_ref_fleet(
-        tmp_path, monkeypatch, target="internal.registry.missing_widget"
-    )
+    return _make_dynamic_ref_fleet(tmp_path, monkeypatch, target="internal.registry.missing_widget")
 
 
 def test_a_string_built_import_of_a_real_symbol_produces_a_real_dynamic_ref_edge(
@@ -1675,8 +1641,12 @@ def test_a_string_built_import_of_a_real_symbol_produces_a_real_dynamic_ref_edge
     )
     assert edges == [
         (
-            "acme-dynref-app", "acme-dynref-lib", "DYNAMIC_REF",
-            "acme_dynref_app/loader.py", 5, 0.3,
+            "acme-dynref-app",
+            "acme-dynref-lib",
+            "DYNAMIC_REF",
+            "acme_dynref_app/loader.py",
+            5,
+            0.3,
         )
     ], edges
 
@@ -1738,10 +1708,7 @@ def api_contract_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             {
                 "api/widgets.proto": _GRPC_WIDGET_PROTO,
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-grpc-provider"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-grpc-provider"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
             },
         ),
@@ -1750,10 +1717,7 @@ def api_contract_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "acme-grpc-consumer",
             {
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-grpc-consumer"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-grpc-consumer"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
                 "acme_grpc_consumer/widgets_pb2_grpc.py": (
                     "class WidgetServiceStub(object):\n"
@@ -1822,10 +1786,7 @@ def test_a_grpc_stub_naming_a_different_service_produces_no_api_contract_edge(
             {
                 "api/widgets.proto": _GRPC_WIDGET_PROTO,
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-grpc-provider"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-grpc-provider"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
             },
         ),
@@ -1834,10 +1795,7 @@ def test_a_grpc_stub_naming_a_different_service_produces_no_api_contract_edge(
             "acme-grpc-consumer",
             {
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-grpc-consumer"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-grpc-consumer"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
                 "acme_grpc_consumer/other_pb2_grpc.py": (
                     "class OtherServiceStub(object):\n"
@@ -1912,10 +1870,7 @@ def http_contract_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
             {
                 "openapi/widgets.yaml": _OPENAPI_WIDGET_SPEC,
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-http-provider"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-http-provider"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
             },
         ),
@@ -1924,10 +1879,7 @@ def http_contract_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
             "acme-http-consumer",
             {
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-http-consumer"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-http-consumer"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
                 "acme_http_consumer/default_api.py": (
                     "class DefaultApi:\n"
@@ -1995,10 +1947,7 @@ def test_an_openapi_consumer_naming_an_undefined_path_produces_no_api_contract_e
             {
                 "openapi/widgets.yaml": _OPENAPI_WIDGET_SPEC,
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-http-provider"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-http-provider"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
             },
         ),
@@ -2007,10 +1956,7 @@ def test_an_openapi_consumer_naming_an_undefined_path_produces_no_api_contract_e
             "acme-http-consumer",
             {
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-http-consumer"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-http-consumer"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
                 "acme_http_consumer/other_api.py": (
                     "class OtherApi:\n"
@@ -2058,10 +2004,7 @@ def test_an_fstring_path_literal_does_not_produce_a_spurious_api_contract_edge(
             {
                 "openapi/widgets.yaml": _OPENAPI_WIDGET_SPEC,
                 "pyproject.toml": (
-                    "[project]\n"
-                    'name = "acme-http-provider"\n'
-                    'version = "1.0.0"\n'
-                    "dependencies = []\n"
+                    '[project]\nname = "acme-http-provider"\nversion = "1.0.0"\ndependencies = []\n'
                 ),
             },
         ),

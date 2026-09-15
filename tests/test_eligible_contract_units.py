@@ -48,9 +48,7 @@ def _stamp_contract_status(workspace: Path, *, contract_id: str, status: str) ->
 
     conn = sqlite3.connect(workspace / "state" / "fleet.db", isolation_level=None)
     try:
-        conn.execute(
-            "UPDATE contracts SET status = ? WHERE contract_id = ?", (status, contract_id)
-        )
+        conn.execute("UPDATE contracts SET status = ? WHERE contract_id = ?", (status, contract_id))
         assert (
             conn.execute(
                 "SELECT COUNT(*) FROM contracts WHERE contract_id = ? AND status = ?",
@@ -83,7 +81,8 @@ def test_a_failed_contract_is_never_re_ingested_by_build(
     # -- anti-vacuity: the fixture really hoisted BEFORE the stamp, exactly like the sibling ---
     # -- tests in test_build_e2e.py -------------------------------------------------------------
     assert query(
-        workspace, "SELECT status, hoist_target_path FROM contracts WHERE contract_id = ?",
+        workspace,
+        "SELECT status, hoist_target_path FROM contracts WHERE contract_id = ?",
         (PROTO_ID,),
     ) == [("HOISTED", "proto/acme/identity/v1")], "the fixture must really hoist first"
 
@@ -107,9 +106,9 @@ def test_a_failed_contract_is_never_re_ingested_by_build(
     # -- the FAILED contract was never re-ingested: no second (or first, post-stamp) hoist ------
     # -- merge for it, and no ContractIngestFailed finding either (it must be SKIPPED, not -------
     # -- attempted-and-failed) -------------------------------------------------------------------
-    assert query(
-        workspace, "SELECT payload FROM findings WHERE kind = 'ContractIngestFailed'"
-    ) == [], "a FAILED contract must be skipped, not attempted"
+    assert (
+        query(workspace, "SELECT payload FROM findings WHERE kind = 'ContractIngestFailed'") == []
+    ), "a FAILED contract must be skipped, not attempted"
     hoist_shas = (
         git(
             monorepo,
@@ -125,6 +124,6 @@ def test_a_failed_contract_is_never_re_ingested_by_build(
         f"a FAILED contract must never land a hoist merge on `integration`: {hoist_shas}"
     )
     # And the status is untouched: `_eligible_contract_units` is read-only over `contracts`.
-    assert query(
-        workspace, "SELECT status FROM contracts WHERE contract_id = ?", (PROTO_ID,)
-    ) == [("FAILED",)]
+    assert query(workspace, "SELECT status FROM contracts WHERE contract_id = ?", (PROTO_ID,)) == [
+        ("FAILED",)
+    ]

@@ -108,7 +108,9 @@ def _git_init(repo: Path) -> None:
     ):
         subprocess.run(  # noqa: S603
             ["git", *args],  # noqa: S607 - `git` from PATH, as every other suite does
-            cwd=repo, check=True, capture_output=True,
+            cwd=repo,
+            check=True,
+            capture_output=True,
         )
 
 
@@ -153,9 +155,7 @@ async def test_two_rules_over_one_file_compose_into_one_patch() -> None:
             "b-second": lambda t: t.replace("gamma", "GAMMA"),
         }
     )
-    outcome = await pipeline([rule("a-first"), rule("b-second")], engine).rewrite_file(
-        PATH, SOURCE
-    )
+    outcome = await pipeline([rule("a-first"), rule("b-second")], engine).rewrite_file(PATH, SOURCE)
 
     seen_by_b = next(text for rid, text in engine.seen if rid == "b-second")
     assert "ALPHA" in seen_by_b, "rule B was handed the original file, not rule A's output"
@@ -317,9 +317,7 @@ async def test_order_is_priority_then_id_under_every_registration_order() -> Non
     ids = ["b-rule", "a-rule", "c-rule"]
     expected = ["low-priority", "a-rule", "b-rule", "c-rule"]
     for order in permutations([*ids, "low-priority"]):
-        rules = [
-            rule(rid, priority=10 if rid == "low-priority" else 100) for rid in order
-        ]
+        rules = [rule(rid, priority=10 if rid == "low-priority" else 100) for rid in order]
         engine = FakeRewriter({})  # every rule is a no-op; only the call order is under test
         await pipeline(rules, engine).rewrite_file(PATH, SOURCE)
         assert [rid for rid, _ in engine.seen] == expected
@@ -375,8 +373,11 @@ async def test_engine_contract_violation_for_the_wrong_path_is_never_absorbed() 
             wrong_path = "pkg/other.py"
             diff = make_unified_diff(wrong_path, source, source.replace("beta", "BETA"))
             return FilePatch(
-                path=wrong_path, diff=diff, tier=TransformTier.DETERMINISTIC,
-                parse_probe_ok=False, rule_id=rule.id,
+                path=wrong_path,
+                diff=diff,
+                tier=TransformTier.DETERMINISTIC,
+                parse_probe_ok=False,
+                rule_id=rule.id,
             )
 
         async def parse_probe(self, path: str) -> bool:
@@ -385,16 +386,16 @@ async def test_engine_contract_violation_for_the_wrong_path_is_never_absorbed() 
     from fleet.rewrite.pipeline import EngineContractError
 
     with pytest.raises(EngineContractError) as excinfo:
-        await RewritePipeline(
-            [rule("r")], EngineRegistry([WrongPathRewriter()])
-        ).rewrite_file(PATH, SOURCE)
+        await RewritePipeline([rule("r")], EngineRegistry([WrongPathRewriter()])).rewrite_file(
+            PATH, SOURCE
+        )
     assert "pkg/other.py" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------------------
 # 6. determinism across processes
 # ---------------------------------------------------------------------------------------
-_DETERMINISM_SCRIPT = '''
+_DETERMINISM_SCRIPT = """
 import asyncio, json, sys
 from fleet.models.enums import TransformTier
 from fleet.models.tasks import FilePatch
@@ -429,7 +430,7 @@ rules = [rule(r) for r in ("r-gamma", "r-delta", "r-alpha")]
 pipe = RewritePipeline(rules, EngineRegistry([Fake()]))
 out = asyncio.run(pipe.rewrite_files({"pkg/b.py": SOURCE, "pkg/a.py": SOURCE}))
 print(json.dumps([[o.path, o.patch.diff, list(o.applied_rule_ids)] for o in out]))
-'''
+"""
 
 
 def _run_pipeline_in_subprocess(script: Path, hashseed: str) -> str:
@@ -557,8 +558,15 @@ async def test_tsmorph_apply_and_probe_raise_notimplemented_once_available() -> 
     succeeding — the branch nothing in this suite reaches otherwise."""
 
     async def resolving_runner(argv: Sequence[str], **kwargs: object) -> ProcResult:
-        return ProcResult(argv=tuple(argv), exit_code=0, stdout_tail="", stderr_tail="",
-                          duration_ms=1, timed_out=False, started=True)
+        return ProcResult(
+            argv=tuple(argv),
+            exit_code=0,
+            stdout_tail="",
+            stderr_tail="",
+            duration_ms=1,
+            timed_out=False,
+            started=True,
+        )
 
     driver = TsMorphRewriter(runner=resolving_runner)  # type: ignore[arg-type]
     assert await driver.available() is True
@@ -590,8 +598,14 @@ async def test_astgrep_builds_a_deterministic_inline_rule_invocation() -> None:
     async def fake_runner(argv: Sequence[str], **kwargs: object) -> ProcResult:
         calls.append(tuple(argv))
         _stand_in_for_ast_grep(argv[-1])
-        return ProcResult(argv=tuple(argv), exit_code=0, stdout_tail="", stderr_tail="",
-                          duration_ms=1, timed_out=False)
+        return ProcResult(
+            argv=tuple(argv),
+            exit_code=0,
+            stdout_tail="",
+            stderr_tail="",
+            duration_ms=1,
+            timed_out=False,
+        )
 
     driver = AstGrepRewriter(binary=sys.executable, runner=fake_runner)  # type: ignore[arg-type]
     target_rule = RewriteRule(
@@ -618,9 +632,13 @@ async def test_astgrep_apply_raises_when_the_cli_itself_reports_failure() -> Non
 
     async def failing_runner(argv: Sequence[str], **kwargs: object) -> ProcResult:
         return ProcResult(
-            argv=tuple(argv), exit_code=8, stdout_tail="",
-            stderr_tail="Error: rule has no valid `rule` field", duration_ms=5,
-            timed_out=False, started=True,
+            argv=tuple(argv),
+            exit_code=8,
+            stdout_tail="",
+            stderr_tail="Error: rule has no valid `rule` field",
+            duration_ms=5,
+            timed_out=False,
+            started=True,
         )
 
     driver = AstGrepRewriter(binary=sys.executable, runner=failing_runner)  # type: ignore[arg-type]
@@ -668,8 +686,10 @@ async def test_astgrep_parse_probe_rejects_typescript_that_does_not_parse(
     refusing it, so an exit-code probe calls a wrecked file healthy and the rewrite ships."""
     driver = AstGrepRewriter()
     assert await driver.parse_probe(_staged(tmp_path, "bad.ts", BROKEN_TS)) is False
-    assert await driver.parse_probe(_staged(tmp_path, "half.ts", "function f( {\n  const y = ;\n")
-    ) is False
+    assert (
+        await driver.parse_probe(_staged(tmp_path, "half.ts", "function f( {\n  const y = ;\n"))
+        is False
+    )
 
 
 async def test_astgrep_parse_probe_accepts_valid_typescript_with_nothing_to_match(
@@ -722,18 +742,46 @@ async def test_astgrep_probe_indeterminate_is_not_engine_unavailable(tmp_path: P
 
     cases: list[ProcResult] = [
         # Killed at its deadline: SIGTERM honoured.
-        ProcResult(argv=("ast-grep",), exit_code=-15, stdout_tail="", stderr_tail="",
-                   duration_ms=60_000, timed_out=True, started=True),
+        ProcResult(
+            argv=("ast-grep",),
+            exit_code=-15,
+            stdout_tail="",
+            stderr_tail="",
+            duration_ms=60_000,
+            timed_out=True,
+            started=True,
+        ),
         # Killed at its deadline: SIGTERM ignored, escalated to SIGKILL.
-        ProcResult(argv=("ast-grep",), exit_code=-9, stdout_tail="", stderr_tail="",
-                   duration_ms=60_000, timed_out=True, started=True),
+        ProcResult(
+            argv=("ast-grep",),
+            exit_code=-9,
+            stdout_tail="",
+            stderr_tail="",
+            duration_ms=60_000,
+            timed_out=True,
+            started=True,
+        ),
         # Never started: the deadline had already passed before the call.
-        ProcResult(argv=("ast-grep",), exit_code=124, stdout_tail="", stderr_tail="",
-                   duration_ms=0, timed_out=True, started=False),
+        ProcResult(
+            argv=("ast-grep",),
+            exit_code=124,
+            stdout_tail="",
+            stderr_tail="",
+            duration_ms=0,
+            timed_out=True,
+            started=False,
+        ),
         # Ran, but exited a code that is neither the pass (0) nor the fail (1) verdict — e.g.
         # ast-grep's own "this rule document is unusable" code.
-        ProcResult(argv=("ast-grep",), exit_code=8, stdout_tail="", stderr_tail="",
-                   duration_ms=5, timed_out=False, started=True),
+        ProcResult(
+            argv=("ast-grep",),
+            exit_code=8,
+            stdout_tail="",
+            stderr_tail="",
+            duration_ms=5,
+            timed_out=False,
+            started=True,
+        ),
     ]
     for scripted in cases:
 
@@ -799,12 +847,14 @@ async def test_the_pipeline_accepts_probe_text_as_its_injected_text_probe() -> N
     that does not."""
     probe: TextProbe = AstGrepRewriter().probe_text
     py_rule = RewriteRule(
-        id="wreck", engine="fake", languages=["python"], applies_to=["**/*.py"],
+        id="wreck",
+        engine="fake",
+        languages=["python"],
+        applies_to=["**/*.py"],
         rule={"pattern": "wreck"},
     )
     valid, broken = "def f(x):\n    return x\n", "def f(:\n    return ???\n"
-    for rewritten, expected in ((valid.replace("return x", "return x + 1"), True),
-                                (broken, False)):
+    for rewritten, expected in ((valid.replace("return x", "return x + 1"), True), (broken, False)):
         engine = FakeRewriter({"wreck": _constant(rewritten)})
         outcomes = await RewritePipeline(
             [py_rule], EngineRegistry([engine]), probe=probe
@@ -912,8 +962,9 @@ def real_rule(
     )
 
 
-def ts_console_rule(rule_id: str = "console-to-logger", *, fix: str = "logger.info($A)")\
-        -> RewriteRule:
+def ts_console_rule(
+    rule_id: str = "console-to-logger", *, fix: str = "logger.info($A)"
+) -> RewriteRule:
     return real_rule(rule_id, language="typescript", pattern="console.log($A)", fix=fix)
 
 
@@ -929,7 +980,10 @@ def _repo_with(tmp_path: Path, rel_path: str, text: str) -> Path:
 def _git_out(repo: Path, *args: str) -> str:
     proc = subprocess.run(  # noqa: S603
         ["git", *args],  # noqa: S607 - `git` from PATH, as every other suite does
-        cwd=repo, check=True, capture_output=True, text=True,
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     return proc.stdout.strip()
 
@@ -961,8 +1015,9 @@ async def test_astgrep_rewrites_real_typescript_to_exact_bytes(tmp_path: Path) -
     assert await AstGrepRewriter().parse_probe(str(tmp_path / "app.ts")) is True
 
 
-async def test_a_mutated_fix_and_an_unmatched_pattern_both_diverge_from_the_expected_bytes(
-) -> None:
+async def test_a_mutated_fix_and_an_unmatched_pattern_both_diverge_from_the_expected_bytes() -> (
+    None
+):
     """Intent: prove the byte assertion above cannot pass without a real rewrite — a different
     `fix` must produce different bytes, and a pattern that matches nothing must produce `None`.
 
@@ -1012,8 +1067,9 @@ async def test_astgrep_rewrites_every_match_in_a_multi_match_file() -> None:
 async def test_astgrep_rewrites_real_python_bytes_through_the_same_driver() -> None:
     """Intent: `language_for_path` routing is real, not a TypeScript special case — a `.py` file
     goes through ast-grep's python grammar and comes back rewritten to exact bytes."""
-    py_rule = real_rule("print-to-logger", language="python", pattern="print($A)",
-                        fix="logger.info($A)")
+    py_rule = real_rule(
+        "print-to-logger", language="python", pattern="print($A)", fix="logger.info($A)"
+    )
     patch = await AstGrepRewriter().apply(py_rule, PY_PATH, REAL_PY_SOURCE, {})
 
     assert patch is not None and patch.path == PY_PATH

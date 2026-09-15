@@ -262,9 +262,7 @@ def _stub_worker_class(phase: Phase, projection: Path) -> type[BaseWorker[Any, A
         def __init__(self, **_kwargs: Any) -> None:
             """`**_kwargs` so `BuildPipelineWorker(bazel_runner=...)`'s call shape still fits."""
 
-        async def run(
-            self, ctx: WorkerContext, payload: _StubInput
-        ) -> WorkerResult[_StubOutput]:
+        async def run(self, ctx: WorkerContext, payload: _StubInput) -> WorkerResult[_StubOutput]:
             index = REPOS.index(ctx.repo_id)
             if index:
                 await _await_projection(projection, phase, REPOS[:index])

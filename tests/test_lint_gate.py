@@ -352,7 +352,18 @@ def test_ruff_check_is_clean_across_the_whole_repository():
 # dirty list is IDENTICAL to the prior 125-file set minus exactly those 3 files (comm-diffed both
 # ways: zero newly-dirty, exactly those 3 newly-clean-by-exclusion). 125 - 3 = 122; no other
 # file's dirty status changed.
-_RUFF_FORMAT_DIRTY_BASELINE = 122
+# Round VIII's §15.1 item 3 mutation-audit sweep (35 batches, 12 new test files + 21 extended)
+# introduced format drift the sweep's own per-batch `ruff check` runs never caught, because none
+# of them ran `ruff format --check` — only `ruff check` (a different tool pass). The final
+# whole-round review caught this as new drift (133 dirty, up from 122) rather than pre-existing
+# debt: 7 of the 12 brand-new files were unformatted. Fix: ran `ruff format` on every file this
+# session touched (33 files, `git diff --stat <session-base>..main -- tests/`) rather than the
+# whole repo (pre-existing dirty files outside this session's own footprint stay out of scope,
+# per `docs/CRITERIA_PLAN.md` §2's done bar) — 20 of the 33 needed reformatting. Re-measured
+# directly post-format: `ruff format --check --no-cache .` -> **113** dirty, net lower than the
+# prior 122 baseline (this session's new files, once formatted, count as clean; no file outside
+# this session's touched set changed status). No test behavior changed (formatting only).
+_RUFF_FORMAT_DIRTY_BASELINE = 113
 
 _FORMAT_PER_FILE = re.compile(
     r"^(?P<path>\S+):\d+:\d+: unformatted: File would be reformatted$", re.MULTILINE

@@ -11664,3 +11664,29 @@ bug:
   `_build_impl` at all.
 
 So the class is fully accounted for: one real bug (this entry), three benign/disclosed no-ops.
+
+**Correction (2026-09-15, post-review, final-review-fix-wave re-review).** The class-sweep note
+above misattributes a claim: it says `_build_impl`'s docstring (`cli.py:12134-12139`) states the
+BUILD-phase render is "unconditional and data-driven off the `stubs` table" — that phrase does not
+appear there. What `_build_impl`'s docstring at those lines actually says is that its own
+`stub_blocked` *parameter* is "NOT operator-facing" (unlike `_transform_impl`'s same-named
+parameter) and that "`fleet build` itself has no `--stub-blocked` flag and never will." The
+"unconditional and data-driven" phrase belongs to a different comment, at `cli.py:11907`
+(`_run_build_wave`'s inline comment on the render call), not to `_build_impl`'s docstring. The
+substantive claim in the correction's own sweep — that `_validate_build_flags`'s discard is benign
+because `build()` never passes `stub_blocked` to `_build_impl` — is independently confirmed still
+true; only the citation was wrong.
+
+**Adjacent, pre-existing defect surfaced by re-checking this citation** (not introduced by this
+round, `_build_impl`'s docstring was not touched by any of this round's 35 batches):
+`_build_impl`'s docstring's own claim — "`fleet build` itself has no `--stub-blocked` flag and
+never will" — is factually false. `build()`'s CLI signature (`cli.py:3102`) declares exactly that
+flag: `stub_blocked: Annotated[bool, typer.Option("--stub-blocked")] = False`. The flag exists,
+is accepted, and is threaded into `_validate_build_flags` — it is simply never passed on to
+`_build_impl`, the same "accepted, not a switch" shape SPEC documents for `--regen-build-files`.
+The docstring is stale prose from before `--stub-blocked` was added to `build()`'s signature, not
+a functional defect (the code's actual behavior already matches SPEC's own "accepted not a
+switch" description) — filed here as a disclosed prose inaccuracy rather than a new D-number,
+since no incorrect *behavior* results. A future docstring pass on `_build_impl` should correct
+"has no `--stub-blocked` flag and never will" to describe the flag's actual accepted-but-unthreaded
+status.

@@ -161,8 +161,12 @@ def _seed_run_and_repos(db_path: Path, *, repos: Sequence[str]) -> None:
         for repo_id in repos:
             conn.execute(
                 "INSERT INTO repos (repo_id, name, url, updated_at) VALUES (?, ?, ?, ?)",
-                (repo_id, repo_id, f"https://example.invalid/{repo_id}",
-                 "2026-09-14T00:00:00+00:00"),
+                (
+                    repo_id,
+                    repo_id,
+                    f"https://example.invalid/{repo_id}",
+                    "2026-09-14T00:00:00+00:00",
+                ),
             )
     finally:
         conn.close()
@@ -182,14 +186,28 @@ async def test_coordinate_claims_skips_a_manifest_with_an_unrecognized_ecosystem
         conn.execute(
             "INSERT INTO manifests (repo_id, path, ecosystem, adapter, adapter_version, sha256, "
             "    publishes_key, parsed_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
-            ("acme-a", "pyproject.toml", "not-a-real-ecosystem", "py", "0" * 64,
-             "pypi:acme:widgets", "2026-09-14T00:00:00+00:00"),
+            (
+                "acme-a",
+                "pyproject.toml",
+                "not-a-real-ecosystem",
+                "py",
+                "0" * 64,
+                "pypi:acme:widgets",
+                "2026-09-14T00:00:00+00:00",
+            ),
         )
         conn.execute(
             "INSERT INTO manifests (repo_id, path, ecosystem, adapter, adapter_version, sha256, "
             "    publishes_key, parsed_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
-            ("acme-b", "package.json", "npm", "npm", "1" * 64,
-             "npm::acme-lib", "2026-09-14T00:00:00+00:00"),
+            (
+                "acme-b",
+                "package.json",
+                "npm",
+                "npm",
+                "1" * 64,
+                "npm::acme-lib",
+                "2026-09-14T00:00:00+00:00",
+            ),
         )
     finally:
         conn.close()
@@ -228,9 +246,7 @@ def test_owns_hints_falls_back_to_hint_order_when_no_hinting_repo_actually_publi
         repos = _FakeRepos()
 
     # Neither acme-a nor acme-b actually publishes "widgets" in the claims set.
-    claims = (
-        CoordinateClaim(coord_key="widgets", repo_id="acme-c", ecosystem=Ecosystem.NPM),
-    )
+    claims = (CoordinateClaim(coord_key="widgets", repo_id="acme-c", ecosystem=Ecosystem.NPM),)
     hints = _owns_hints(_FakeSettings(), claims)  # type: ignore[arg-type]
     assert hints == {"widgets": "acme-a"}, (
         "no hinting repo publishes 'widgets', so the fallback must pick the first hinting NAME "
@@ -273,8 +289,14 @@ async def test_owner_index_excludes_external_unowned_coordinates(db_path: Path) 
         conn.execute(
             "INSERT INTO coordinates (coord_key, ecosystem, grp, name, owner_repo_id, "
             "    first_seen_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ("npm::owned-thing", "npm", "", "owned-thing", "acme-owner",
-             "2026-09-14T00:00:00+00:00"),
+            (
+                "npm::owned-thing",
+                "npm",
+                "",
+                "owned-thing",
+                "acme-owner",
+                "2026-09-14T00:00:00+00:00",
+            ),
         )
         conn.execute(
             "INSERT INTO coordinates (coord_key, ecosystem, grp, name, owner_repo_id, "
@@ -387,8 +409,7 @@ async def test_persist_blast_radii_computes_and_persists_real_descendant_counts(
     finally:
         conn.close()
     assert rows == {"acme-lib": 1, "acme-app": 0}, (
-        "acme-lib has one descendant (acme-app) and acme-app has none -- got "
-        f"{rows!r}"
+        f"acme-lib has one descendant (acme-app) and acme-app has none -- got {rows!r}"
     )
 
 
@@ -449,14 +470,22 @@ async def test_scan_run_id_picks_the_run_with_the_latest_started_at_not_last_ins
         conn.execute(
             "INSERT INTO runs (run_id, started_at, config_sha256, config_digests, "
             "                  harness_version) VALUES (?, ?, ?, '{}', ?)",
-            ("11111111-1111-4111-8111-000000000001", "2026-09-14T23:00:00+00:00", "a" * 64,
-             "0.1.0"),
+            (
+                "11111111-1111-4111-8111-000000000001",
+                "2026-09-14T23:00:00+00:00",
+                "a" * 64,
+                "0.1.0",
+            ),
         )
         conn.execute(
             "INSERT INTO runs (run_id, started_at, config_sha256, config_digests, "
             "                  harness_version) VALUES (?, ?, ?, '{}', ?)",
-            ("11111111-1111-4111-8111-000000000002", "2026-09-14T01:00:00+00:00", "a" * 64,
-             "0.1.0"),
+            (
+                "11111111-1111-4111-8111-000000000002",
+                "2026-09-14T01:00:00+00:00",
+                "a" * 64,
+                "0.1.0",
+            ),
         )
     finally:
         conn.close()
@@ -496,9 +525,7 @@ def _repos_manifest(names: Sequence[str]) -> Any:
 
     class _Repos:
         def __init__(self) -> None:
-            self.repos = tuple(
-                RepoEntry(name=n, url=f"https://example.invalid/{n}") for n in names
-            )
+            self.repos = tuple(RepoEntry(name=n, url=f"https://example.invalid/{n}") for n in names)
 
     class _Settings:
         def __init__(self) -> None:
@@ -568,7 +595,10 @@ def test_validate_scan_flags_refuses_concurrency_below_one(tmp_path: Path) -> No
     opts = GlobalOptions(config_path=config_dir / "fleet.yaml")
     with pytest.raises(UsageError, match="must be at least 1"):
         _validate_scan_flags(
-            opts, repos=config_dir / "repos.yaml", refresh=False, preflight_only=False,
+            opts,
+            repos=config_dir / "repos.yaml",
+            refresh=False,
+            preflight_only=False,
             concurrency=0,
         )
     # concurrency=1 is the floor, not refused.
@@ -642,13 +672,21 @@ def test_primary_ecosystem_picks_the_ecosystem_of_the_lowest_sorting_coordinate_
     `Ecosystem` member instead (plain `Enum`, unordered) would raise or silently pick the wrong
     one on a tie in some other field."""
     npm_ref = ManifestRef(
-        repo_id="acme-a", path="package.json", ecosystem=Ecosystem.NPM, adapter="npm",
-        adapter_version=1, sha256="0" * 64,
+        repo_id="acme-a",
+        path="package.json",
+        ecosystem=Ecosystem.NPM,
+        adapter="npm",
+        adapter_version=1,
+        sha256="0" * 64,
         publishes=Coordinate(ecosystem=Ecosystem.NPM, name="zzz-last"),
     )
     pypi_ref = ManifestRef(
-        repo_id="acme-a", path="pyproject.toml", ecosystem=Ecosystem.PYPI, adapter="py",
-        adapter_version=1, sha256="1" * 64,
+        repo_id="acme-a",
+        path="pyproject.toml",
+        ecosystem=Ecosystem.PYPI,
+        adapter="py",
+        adapter_version=1,
+        sha256="1" * 64,
         publishes=Coordinate(ecosystem=Ecosystem.PYPI, name="aaa-first"),
     )
     # "npm:...:zzz-last" sorts before "pypi:...:aaa-first" ('n' < 'p'), even though "aaa-first"
@@ -672,8 +710,13 @@ async def test_scan_rows_never_writes_a_dependents_version_spec_into_an_unowned_
     published version."""
     _seed_run_and_repos(db_path, repos=["acme-app"])
     manifest = ManifestRef(
-        repo_id="acme-app", path="pyproject.toml", ecosystem=Ecosystem.PYPI, adapter="py",
-        adapter_version=1, sha256="0" * 64, publishes=None,
+        repo_id="acme-app",
+        path="pyproject.toml",
+        ecosystem=Ecosystem.PYPI,
+        adapter="py",
+        adapter_version=1,
+        sha256="0" * 64,
+        publishes=None,
     )
     # `version_spec` set on the COORDINATE itself (not just the `RawDependency` below), matching
     # how a real `ManifestDependency.coordinate` carries the declared range through -- a
@@ -718,11 +761,19 @@ async def test_scan_rows_writes_the_owning_repos_own_published_version(db_path: 
     _seed_run_and_repos(db_path, repos=["acme-lib"])
     published_coord = Coordinate(ecosystem=Ecosystem.PYPI, name="acme-lib", version_spec="3.1.0")
     manifest = ManifestRef(
-        repo_id="acme-lib", path="pyproject.toml", ecosystem=Ecosystem.PYPI, adapter="py",
-        adapter_version=1, sha256="0" * 64, publishes=published_coord,
+        repo_id="acme-lib",
+        path="pyproject.toml",
+        ecosystem=Ecosystem.PYPI,
+        adapter="py",
+        adapter_version=1,
+        sha256="0" * 64,
+        publishes=published_coord,
     )
     interrogate = InterrogateOutput(
-        repo_id="acme-lib", manifests=(manifest,), dependencies=(), ecosystems=(Ecosystem.PYPI,),
+        repo_id="acme-lib",
+        manifests=(manifest,),
+        dependencies=(),
+        ecosystems=(Ecosystem.PYPI,),
     )
     output = ScanOutput(repo_id="acme-lib", interrogate=interrogate)
 
@@ -793,7 +844,10 @@ def test_scan_evidence_records_gated_only_for_a_failed_preflight_not_a_passing_o
     gated_output = ScanOutput(
         repo_id="acme-empty",
         clone=CloneOutput(
-            repo_id="acme-empty", url="https://x", mirror_path="/m", preflight_ok=False,
+            repo_id="acme-empty",
+            url="https://x",
+            mirror_path="/m",
+            preflight_ok=False,
             findings=("EmptyRepo",),
         ),
         findings=("EmptyRepo",),
@@ -880,7 +934,11 @@ async def test_scan_sink_inserts_every_symbol_across_every_batch(db_path: Path) 
     evidence = _ScanEvidence()
     sink = _ScanSink(writer=writer, repository=repository, run_id="run-1", evidence=evidence)  # type: ignore[arg-type]
     symbol = SymbolRef(
-        repo_id="acme-a", fqn="acme.a.Widget", kind=SymbolKind.CLASS, path="a.py", line=1,
+        repo_id="acme-a",
+        fqn="acme.a.Widget",
+        kind=SymbolKind.CLASS,
+        path="a.py",
+        line=1,
         language="py",
         is_definition=True,
     )
@@ -935,7 +993,10 @@ async def test_scan_pipeline_worker_stops_after_a_gated_clone_without_running_la
     (it can only see the end state, not whether a later worker's `.run()` was ever entered)."""
     worker = ScanPipelineWorker()
     clone_output = CloneOutput(
-        repo_id="acme-a", url="https://x", mirror_path="/m", preflight_ok=False,
+        repo_id="acme-a",
+        url="https://x",
+        mirror_path="/m",
+        preflight_ok=False,
         findings=("EmptyRepo",),
     )
     clone_worker = _FakeStepWorker(WorkerResult[CloneOutput](status="ok", output=clone_output))
@@ -982,8 +1043,9 @@ async def test_scan_pipeline_worker_reports_partial_with_correct_remaining_units
     `partial`, with `completed_units == ["clone"]` and `remaining_units` holding exactly the
     steps that never ran -- the checkpoint a resumed scan re-enters at."""
     worker = ScanPipelineWorker()
-    clone_output = CloneOutput(repo_id="acme-a", url="https://x", mirror_path="/m",
-                                preflight_ok=True)
+    clone_output = CloneOutput(
+        repo_id="acme-a", url="https://x", mirror_path="/m", preflight_ok=True
+    )
 
     ctx = make_ctx(tmp_path)
 
@@ -994,13 +1056,16 @@ async def test_scan_pipeline_worker_reports_partial_with_correct_remaining_units
         WorkerResult[CloneOutput](status="ok", output=clone_output), on_call=_cancel_after_clone
     )
     never_called = _FakeStepWorker(WorkerResult[Any](status="ok", output=object()))
-    worker._workers = cast(Any, {
-        "clone": clone_worker,
-        "interrogate": never_called,
-        "classify": never_called,
-        "baseline": never_called,
-        "symbolindex": never_called,
-    })
+    worker._workers = cast(
+        Any,
+        {
+            "clone": clone_worker,
+            "interrogate": never_called,
+            "classify": never_called,
+            "baseline": never_called,
+            "symbolindex": never_called,
+        },
+    )
     payload = _scan_input()
     result = await worker.run(ctx, payload)
     assert result.status == "partial"

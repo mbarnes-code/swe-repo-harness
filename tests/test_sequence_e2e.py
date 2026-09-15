@@ -172,9 +172,7 @@ def _scan(root: Path, *extra: str) -> Any:
 
 
 def _sequence(root: Path, *extra: str) -> Any:
-    return runner.invoke(
-        app, [*_base(root), "--json", "sequence", *extra], catch_exceptions=False
-    )
+    return runner.invoke(app, [*_base(root), "--json", "sequence", *extra], catch_exceptions=False)
 
 
 def _query(root: Path, sql: str, params: tuple[object, ...] = ()) -> list[tuple[Any, ...]]:
@@ -483,9 +481,7 @@ def test_a_scc_beyond_hard_max_refuses_sequencing_with_exit_6_through_the_real_c
     assert "resolved MANUAL and can never be sequenced" in result.output, result.output
     # the plan is never persisted for a MANUAL-resolved SCC: no repo may get a wave index, or an
     # operator reading `wave_members` would see a plan the harness itself refused to commit to.
-    assert _query(
-        cycle_fleet_low_scc_hard_max, "SELECT COUNT(*) FROM wave_members"
-    ) == [(0,)]
+    assert _query(cycle_fleet_low_scc_hard_max, "SELECT COUNT(*) FROM wave_members") == [(0,)]
 
 
 # =======================================================================================
@@ -844,19 +840,17 @@ def test_a_not_shared_after_retarget_contract_is_rejected_through_the_real_cli(
     # Confirm the premise before seeding anything: real 5b detection genuinely rejects this
     # contract with only 1 real file-carrying consumer -- the seed step adds a SECOND declared
     # consumer, it does not fabricate the whole row.
-    assert _query(
-        not_shared_fleet, "SELECT extractable, status, status_detail FROM contracts"
-    ) == [(0, ContractStatus.REJECTED.value, "min_consumers")]
+    assert _query(not_shared_fleet, "SELECT extractable, status, status_detail FROM contracts") == [
+        (0, ContractStatus.REJECTED.value, "min_consumers")
+    ]
 
-    before_attempts = sorted(
-        _query(not_shared_fleet, "SELECT repo_id, attempts FROM phases")
-    )
+    before_attempts = sorted(_query(not_shared_fleet, "SELECT repo_id, attempts FROM phases"))
     assert before_attempts, "the phases table must be non-empty or the equality below is vacuous"
 
     _seed_second_consumer_with_no_edge_evidence(not_shared_fleet)
-    assert _query(
-        not_shared_fleet, "SELECT extractable, status FROM contracts"
-    ) == [(1, ContractStatus.EXTRACTABLE.value)], "seed did not take"
+    assert _query(not_shared_fleet, "SELECT extractable, status FROM contracts") == [
+        (1, ContractStatus.EXTRACTABLE.value)
+    ], "seed did not take"
 
     result = _sequence(not_shared_fleet)
     assert result.exit_code == ExitCode.SUCCESS, result.output
@@ -871,13 +865,15 @@ def test_a_not_shared_after_retarget_contract_is_rejected_through_the_real_cli(
 
     # `contracts.status='REJECTED'` for that contract, with the Leg A detail string.
     assert _query(
-        not_shared_fleet, "SELECT status, status_detail FROM contracts WHERE contract_id = ?",
+        not_shared_fleet,
+        "SELECT status, status_detail FROM contracts WHERE contract_id = ?",
         (NOT_SHARED_ID,),
     ) == [(ContractStatus.REJECTED.value, "not_shared_after_retarget")]
 
     # one findings row, kind='ContractNotShared'.
     findings = _query(
-        not_shared_fleet, "SELECT kind, severity, repo_id FROM findings WHERE kind = ?",
+        not_shared_fleet,
+        "SELECT kind, severity, repo_id FROM findings WHERE kind = ?",
         ("ContractNotShared",),
     )
     assert findings == [("ContractNotShared", "warn", "acme-hub")]
@@ -904,11 +900,14 @@ def test_a_not_shared_after_retarget_contract_is_rejected_through_the_real_cli(
 # (round VI task 55, controller-review fix wave)
 # =======================================================================================
 
-LOWERED_MIN_CONSUMERS_FLEET_YAML = FLEET_YAML + """\
+LOWERED_MIN_CONSUMERS_FLEET_YAML = (
+    FLEET_YAML
+    + """\
 scan:
   contracts:
     min_consumers: 1
 """
+)
 """Same bundle as `FLEET_YAML`, plus `scan.contracts.min_consumers: 1` -- the operator-configured
 value `cli._sequence_impl` must pass to `break_cycles(...)`. If it silently fell back to
 `ContractsSection()`'s hardcoded field default (`2`) instead of this value, the fixture below
@@ -995,7 +994,8 @@ def test_the_configured_min_consumers_value_actually_reaches_the_6c_h_check(
         "`status_detail` (`_hoisted_contract_rows`), so it stays the empty string 5b left it at"
     )
     assert _query(
-        not_shared_fleet_min_consumers_1, "SELECT COUNT(*) FROM findings WHERE kind = ?",
+        not_shared_fleet_min_consumers_1,
+        "SELECT COUNT(*) FROM findings WHERE kind = ?",
         ("ContractNotShared",),
     ) == [(0,)], "no rejection finding when the hoist is actually committed"
 

@@ -159,9 +159,7 @@ def _insert_stub(
         conn.close()
 
 
-async def _ro[T](
-    db_path: Path, fn: Callable[[aiosqlite.Connection], Awaitable[T]]
-) -> T:
+async def _ro[T](db_path: Path, fn: Callable[[aiosqlite.Connection], Awaitable[T]]) -> T:
     conn = await connect_ro(db_path)
     try:
         return await fn(conn)
@@ -207,9 +205,7 @@ def test_stub_workspace_deps_excludes_an_empty_failing_stub_even_alongside_a_qua
     OTHER half — that a second, EMPTY_FAILING row for the SAME run does not also render — has
     never been checked directly."""
     db_path = fresh_db(tmp_path / "state" / "fleet.db")
-    _seed_run_and_repos(
-        db_path, repos=("acme-commons-java", "acme-abandoned-lib", "acme-consumer")
-    )
+    _seed_run_and_repos(db_path, repos=("acme-commons-java", "acme-abandoned-lib", "acme-consumer"))
     _insert_coordinate(
         db_path,
         coord_key="maven:com.acme:commons",
@@ -627,7 +623,7 @@ def test_scratch_build_files_omits_a_build_file_that_is_not_valid_utf8(tmp_path:
     driven directly; every real-gazelle fixture's generator output is UTF-8 BUILD text."""
     good = tmp_path / "go" / "commons" / "BUILD.bazel"
     good.parent.mkdir(parents=True)
-    good.write_text("go_library(name = \"commons\")\n", encoding="utf-8")
+    good.write_text('go_library(name = "commons")\n', encoding="utf-8")
     bad = tmp_path / "go" / "svc" / "BUILD.bazel"
     bad.parent.mkdir(parents=True)
     bad.write_bytes(b"\xff\xfe\x00bad-bytes")

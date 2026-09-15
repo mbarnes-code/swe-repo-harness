@@ -228,9 +228,7 @@ def forge(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeForge]:
 
 
 def run_pr(root: Path, *extra: str) -> Any:
-    return runner.invoke(
-        app, [*base_args(root), "--json", "pr", *extra], catch_exceptions=False
-    )
+    return runner.invoke(app, [*base_args(root), "--json", "pr", *extra], catch_exceptions=False)
 
 
 def digest_of(root: Path) -> dict[str, Any]:
@@ -377,7 +375,10 @@ def cycles_through_the_projection(root: Path) -> list[Any]:
 
 
 def test_pr_opens_one_pr_per_eligible_repo_with_the_argv_base_and_body_spec_names(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """`fleet pr` really composes `PrwriterWorker`, and the PR it opens is the one §3.4 describes.
 
@@ -435,7 +436,10 @@ def test_pr_opens_one_pr_per_eligible_repo_with_the_argv_base_and_body_spec_name
 
 
 def test_pr_sync_ingests_merge_state_and_a_gate_blocked_on_merged_becomes_satisfied(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """`fleet pr --sync` is the difference between a fleet that finishes and one that deadlocks.
 
@@ -497,7 +501,10 @@ def test_pr_sync_ingests_merge_state_and_a_gate_blocked_on_merged_becomes_satisf
 
 
 def test_pr_sync_fires_t1_and_enqueues_a_revalidate_task_for_a_merged_providers_stub(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """D101 Half B / D102: `fleet pr --sync` observing a provider's PR go `MERGED` must itself
     fire T1 (`orchestrator.stubs.supersede`) for every stub naming that provider — the trigger had
@@ -556,7 +563,10 @@ def test_pr_sync_fires_t1_and_enqueues_a_revalidate_task_for_a_merged_providers_
 
 
 def test_pr_sync_sweeps_a_pre_merged_providers_stub_left_active_by_a_prior_crash(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """D103 gap 1: the per-repo loop above fires T1 only for a PR OBSERVED going `MERGED` in the
     SAME `--sync` invocation. `_pr_sync_impl`'s three per-repo transactions (PR record write,
@@ -625,7 +635,10 @@ def test_pr_sync_sweeps_a_pre_merged_providers_stub_left_active_by_a_prior_crash
 
 
 def test_a_degraded_repos_pr_is_a_draft_with_the_stub_banner_and_is_never_marked_ready(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """A stub is a lie with a known shape; the PR has to say so, and no flag may un-say it.
 
@@ -667,7 +680,10 @@ def test_a_degraded_repos_pr_is_a_draft_with_the_stub_banner_and_is_never_marked
 
 
 def test_pr_ready_refuses_a_superseded_stub_the_same_as_an_active_one(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """§12.38's refusal set is `{ACTIVE, SUPERSEDED}`, not `ACTIVE` alone (§3.5.1: `SUPERSEDED`
     is a stub whose provider merged but whose revalidation round has not yet PASSed — the label
@@ -733,7 +749,10 @@ def resolve_stub(root: Path, repo_id: str) -> None:
 
 
 def test_pr_ready_succeeds_once_a_stub_is_genuinely_resolved(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """§12.38's positive half: `fleet pr --ready` succeeds — not merely "does not refuse" — once
     every `stubs` row for the repo is `RESOLVED`. The refusal test above (and every prior test in
@@ -767,7 +786,10 @@ def test_pr_ready_succeeds_once_a_stub_is_genuinely_resolved(
 
 
 def test_a_failed_mark_ready_does_not_lose_the_pr_or_recreate_it(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """`gh pr create` landing followed by a `gh pr ready` that fails must not lose the PR:
     `PrwriterWorker.run()` used to return with `output.pr` still `None` after `create_pr` had
@@ -833,7 +855,10 @@ def hold_pr(root: Path, repo_id: str) -> None:
 
 
 def test_pr_attempts_promotion_of_an_already_open_held_pr_once_its_stub_resolves(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """§12.38/D94's TRIGGER, exercised through `fleet pr` itself, not through the private
     functions directly (those are `tests/test_cli.py`'s job).
@@ -876,7 +901,8 @@ def test_pr_attempts_promotion_of_an_already_open_held_pr_once_its_stub_resolves
     assert "could not read the remote tip of" in body["failed"]["acme-lib-py"], body["failed"]
     assert "does not exist" not in body["failed"]["acme-lib-py"], (
         "D115 is fixed: migrate/acme-lib-py must exist locally by the time this runs, so the "
-        "FIRST precondition check must not be the one that fires", body["failed"]
+        "FIRST precondition check must not be the one that fires",
+        body["failed"],
     )
     assert body["already_open"] == ["acme-lib-py"], body
     assert body["promoted"] == {}, body
@@ -890,7 +916,10 @@ def test_pr_attempts_promotion_of_an_already_open_held_pr_once_its_stub_resolves
 
 
 def test_re_running_fleet_pr_leaves_a_genuinely_already_open_pr_out_of_failed(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """The control for the promotion test above: a plain re-run over PRs that were never `HELD`
     must not even ATTEMPT promotion, so `failed` stays empty and the exit code stays SUCCESS —
@@ -949,8 +978,7 @@ def pr_record(root: Path, repo_id: str) -> dict[str, Any]:
     projects `state` — some assertions (`url`, `revalidation_round`) need the whole record."""
     rows = query(
         root,
-        "SELECT payload FROM findings WHERE kind = 'PullRequest' AND repo_id = ? "
-        "ORDER BY repo_id",
+        "SELECT payload FROM findings WHERE kind = 'PullRequest' AND repo_id = ? ORDER BY repo_id",
         (repo_id,),
     )
     assert rows, f"no PullRequestDraft for {repo_id}"
@@ -958,7 +986,10 @@ def pr_record(root: Path, repo_id: str) -> dict[str, Any]:
 
 
 def test_pr_promotes_an_already_open_held_pr_through_the_real_cli_end_to_end(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """§12.38/D94's resolution mechanics (clauses 6-12), driven through the REAL `fleet pr` CLI
     end to end — the gap research-31 found: the trigger test above proves the promotion is
@@ -1021,10 +1052,12 @@ def test_pr_promotes_an_already_open_held_pr_through_the_real_cli_end_to_end(
         call for call in forge.commands("pr", "create") if "migrate/acme-lib-py" in call
     ]
     assert len(creates_for_acme_lib_py) == 1, (
-        "clause 12 (positive half): no second `gh pr create` for this repo", forge.calls
+        "clause 12 (positive half): no second `gh pr create` for this repo",
+        forge.calls,
     )
     assert not forge.commands("pr", "close"), (
-        "clause 12 (negative half): a resolution never closes and re-opens a PR", forge.calls
+        "clause 12 (negative half): a resolution never closes and re-opens a PR",
+        forge.calls,
     )
 
     integration_tip = _git_rev(remote, "integration")
@@ -1041,7 +1074,10 @@ def test_pr_promotes_an_already_open_held_pr_through_the_real_cli_end_to_end(
 
 
 def test_a_repo_whose_dependency_pr_is_not_merged_is_held_and_never_shipped(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """HELD is a first-class, pollable state — not a failure, and not a silent skip.
 
@@ -1075,7 +1111,10 @@ def test_a_repo_whose_dependency_pr_is_not_merged_is_held_and_never_shipped(
 
 
 def test_re_running_fleet_pr_opens_no_second_pr(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """A duplicate PR is the one side effect this harness cannot roll back.
 
@@ -1211,7 +1250,10 @@ def verified_through_a_planted_cycle(root: Path) -> list[Any]:
 
 
 def test_an_atomic_wave_scc_ships_one_pr_shared_by_every_member(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """§12.19's remaining leg: `PullRequestDraft.scc_id` -- not just `CycleFinding.scc_id` -- is
     shared by every ATOMIC_WAVE member, and exactly ONE `gh pr create` fires for the whole SCC.
@@ -1257,7 +1299,10 @@ def test_an_atomic_wave_scc_ships_one_pr_shared_by_every_member(
 
 
 def test_an_atomic_wave_member_is_not_blocked_on_its_own_scc_mates_pr(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """The deadlock hazard `research-11`/task 18's brief found: `ATOMIC_WAVE` does not suppress
     the intra-SCC ordering edge, so `acme-lib-ts` -> `acme-app-ts` (planted by `plant_cycle`) is a
@@ -1290,7 +1335,10 @@ def test_an_atomic_wave_member_is_not_blocked_on_its_own_scc_mates_pr(
 
 
 def test_pr_refuses_the_flags_it_cannot_honour(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    forge: FakeForge,  # noqa: F811
 ) -> None:
     """§10: a flag either does what it says or is an exit-2 refusal naming why.
 
@@ -1308,7 +1356,8 @@ def test_pr_refuses_the_flags_it_cannot_honour(
 
 
 def test_pr_names_every_failed_repo_with_its_reason_sorted_and_counted(
-    fleet: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+    fleet: Path,
+    monkeypatch: pytest.MonkeyPatch,  # noqa: F811
 ) -> None:
     """`pr()`'s own `if failed: raise PrEmissionError(f"forge {...!r} failed for {len(failed)} "
     f"repo(s) — {listed}")` composes THREE things from `_pr_impl`'s `result["failed"]` mapping
@@ -1637,7 +1686,10 @@ def gitea(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeGitea]:
 
 
 def test_pr_runs_against_the_forge_config_names_and_never_touches_gh(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, gitea: FakeGitea  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    gitea: FakeGitea,  # noqa: F811
 ) -> None:
     """`fleet pr` with `pr.forge: gitea` drives the Gitea driver end to end — create, sync, ship.
 
@@ -1680,7 +1732,10 @@ def test_pr_runs_against_the_forge_config_names_and_never_touches_gh(
 
 
 def test_the_gitea_token_reaches_no_argv_the_harness_persists(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, gitea: FakeGitea  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    gitea: FakeGitea,  # noqa: F811
 ) -> None:
     """The credential lives in a mode-600 file and in nothing else. Non-negotiable (§11.4).
 
@@ -1717,7 +1772,10 @@ def test_the_gitea_token_reaches_no_argv_the_harness_persists(
 
 
 def test_a_forge_failure_names_the_configured_forge_and_not_gh(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    monkeypatch: pytest.MonkeyPatch,  # noqa: F811
 ) -> None:
     """A failure message must send the operator to the host they configured.
 
@@ -1824,8 +1882,11 @@ def test_fleet_pr_persists_the_llm_findings_its_own_run_computed(
         "the PRs must still open — a model that cannot answer is a degraded body, not a failure"
     )
 
-    rows = query(fleet, "SELECT repo_id, severity, payload FROM findings WHERE kind = ?",
-                 ("CapabilityDrift",))
+    rows = query(
+        fleet,
+        "SELECT repo_id, severity, payload FROM findings WHERE kind = ?",
+        ("CapabilityDrift",),
+    )
     assert rows, (
         "`fleet pr` computed the drift and threw it away: no PhaseRunner, therefore no drain"
     )
@@ -2080,8 +2141,6 @@ def test_fleet_pr_persists_its_llm_findings_even_when_the_command_fails_partway(
         "every finding went out with the failure"
     )
     assert {json.loads(r[0])["actual"] for r in rows} == {"PROMPTED"}
-
-
 
 
 # ---------------------------------------------------------------------------------------

@@ -302,8 +302,7 @@ def fleet(
     `BASELINE_BUILD_DISABLED_YAML`'s own docstring above.
     """
     sources = {
-        name: _make_repo(tmp_path / "sources", name, files)
-        for name, files in FIXTURE_REPOS.items()
+        name: _make_repo(tmp_path / "sources", name, files) for name, files in FIXTURE_REPOS.items()
     }
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1402,9 +1401,7 @@ def test_a_units_own_completion_still_clears_it_from_unresolved() -> None:
 
     # Attempt 2: C is (spuriously) re-reported unresolved alongside a genuinely-failing D.
     evidence.record(
-        TransformOutput(
-            repo_id="repo1", rewritten=[], unresolved=["dest/c.py", "dest/d.py"]
-        ),
+        TransformOutput(repo_id="repo1", rewritten=[], unresolved=["dest/c.py", "dest/d.py"]),
         completed_units=[],
     )
 

@@ -284,15 +284,19 @@ def test_contract_rows_deletes_a_no_longer_detected_contract_on_rebuild(tmp_path
             await aconn.commit()
 
     asyncio.run(_apply(_Output((node_a,))))
-    first = sqlite3.connect(db_path).execute(
-        "SELECT contract_id FROM contracts WHERE run_id = ?", (RUN_ID,)
-    ).fetchall()
+    first = (
+        sqlite3.connect(db_path)
+        .execute("SELECT contract_id FROM contracts WHERE run_id = ?", (RUN_ID,))
+        .fetchall()
+    )
     assert first == [("proto:acme.identity.v1",)], first
 
     asyncio.run(_apply(_Output((node_b,))))
-    second = sqlite3.connect(db_path).execute(
-        "SELECT contract_id FROM contracts WHERE run_id = ?", (RUN_ID,)
-    ).fetchall()
+    second = (
+        sqlite3.connect(db_path)
+        .execute("SELECT contract_id FROM contracts WHERE run_id = ?", (RUN_ID,))
+        .fetchall()
+    )
     assert second == [("proto:acme.billing.v1",)], (
         f"contract A must be GONE after a rebuild that no longer detects it, got {second}"
     )

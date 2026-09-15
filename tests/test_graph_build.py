@@ -69,9 +69,7 @@ K = ("CONTRACT", CONTRACT_ID)
 
 
 def coord(name: str, *, version: str | None = None) -> Coordinate:
-    return Coordinate(
-        ecosystem=Ecosystem.MAVEN, group="com.acme", name=name, version_spec=version
-    )
+    return Coordinate(ecosystem=Ecosystem.MAVEN, group="com.acme", name=name, version_spec=version)
 
 
 def manifest(repo_id: str) -> ManifestRef:
@@ -85,12 +83,14 @@ def manifest(repo_id: str) -> ManifestRef:
     )
 
 
-def dependency(*, repo_id: str, on: str, version: str | None = "^1.0", line: int = 12,
-               scope: str | None = None) -> ManifestDependency:
+def dependency(
+    *, repo_id: str, on: str, version: str | None = "^1.0", line: int = 12, scope: str | None = None
+) -> ManifestDependency:
     return ManifestDependency(
         manifest=manifest(repo_id),
-        raw=RawDependency(raw_id=f"com.acme:{on}", version_spec=version, scope=scope,
-                          source_line=line),
+        raw=RawDependency(
+            raw_id=f"com.acme:{on}", version_spec=version, scope=scope, source_line=line
+        ),
         coordinate=coord(on, version=version),
     )
 
@@ -129,20 +129,60 @@ def contract_node() -> ContractNode:
 def full_input() -> InferenceInput:
     """The chain, a contract, and one symbol of every symbol-derived kind."""
     symbols = [
-        SymbolRef(repo_id="acme-d", fqn="com.acme.c.Util", kind=SymbolKind.IMPORT,
-                  path="src/main/java/D.java", line=7, language="java", is_definition=False),
-        SymbolRef(repo_id="acme-c", fqn="acme.identity.v1.IdentityService",
-                  kind=SymbolKind.GRPC_SERVICE, path="idl/identity.proto", line=12,
-                  language="proto", is_definition=True),
-        SymbolRef(repo_id="acme-d", fqn="acme.identity.v1.IdentityService",
-                  kind=SymbolKind.GRPC_SERVICE, path="src/main/java/Client.java", line=30,
-                  language="java", is_definition=False),
-        SymbolRef(repo_id="acme-a", fqn="users", kind=SymbolKind.DB_TABLE,
-                  path="db/001_init.sql", line=3, language="sql", is_definition=True),
-        SymbolRef(repo_id="acme-d", fqn="users", kind=SymbolKind.DB_TABLE,
-                  path="sql/read.sql", line=9, language="sql", is_definition=False),
-        SymbolRef(repo_id="acme-d", fqn="com.acme.b.Bootstrap", kind=SymbolKind.DYNAMIC_REF,
-                  path="src/main/java/Boot.java", line=44, language="java", is_definition=False),
+        SymbolRef(
+            repo_id="acme-d",
+            fqn="com.acme.c.Util",
+            kind=SymbolKind.IMPORT,
+            path="src/main/java/D.java",
+            line=7,
+            language="java",
+            is_definition=False,
+        ),
+        SymbolRef(
+            repo_id="acme-c",
+            fqn="acme.identity.v1.IdentityService",
+            kind=SymbolKind.GRPC_SERVICE,
+            path="idl/identity.proto",
+            line=12,
+            language="proto",
+            is_definition=True,
+        ),
+        SymbolRef(
+            repo_id="acme-d",
+            fqn="acme.identity.v1.IdentityService",
+            kind=SymbolKind.GRPC_SERVICE,
+            path="src/main/java/Client.java",
+            line=30,
+            language="java",
+            is_definition=False,
+        ),
+        SymbolRef(
+            repo_id="acme-a",
+            fqn="users",
+            kind=SymbolKind.DB_TABLE,
+            path="db/001_init.sql",
+            line=3,
+            language="sql",
+            is_definition=True,
+        ),
+        SymbolRef(
+            repo_id="acme-d",
+            fqn="users",
+            kind=SymbolKind.DB_TABLE,
+            path="sql/read.sql",
+            line=9,
+            language="sql",
+            is_definition=False,
+        ),
+        SymbolRef(
+            repo_id="acme-d",
+            fqn="com.acme.b.Bootstrap",
+            kind=SymbolKind.DYNAMIC_REF,
+            path="src/main/java/Boot.java",
+            line=44,
+            language="java",
+            is_definition=False,
+        ),
     ]
     base = chain_input()
     return InferenceInput(
@@ -179,8 +219,15 @@ def edge_fingerprint() -> str:
     lines = [
         "|".join(
             [
-                e.edge_key, e.src_kind.value, e.src_id, e.dst_kind.value, e.dst_id or "",
-                e.kind.value, e.evidence_path, str(e.evidence_line), f"{e.confidence:.12f}",
+                e.edge_key,
+                e.src_kind.value,
+                e.src_id,
+                e.dst_kind.value,
+                e.dst_id or "",
+                e.kind.value,
+                e.evidence_path,
+                str(e.evidence_line),
+                f"{e.confidence:.12f}",
             ]
         )
         for e in infer_edges(full_input())
@@ -364,7 +411,8 @@ def test_an_edge_kind_outside_dag_edge_kinds_does_not_constrain_ordering() -> No
     """
     g = full_graph()
     advisory = [
-        e for e in infer_edges(full_input())
+        e
+        for e in infer_edges(full_input())
         if e.kind in {EdgeKind.SHARED_RESOURCE, EdgeKind.DYNAMIC_REF}
     ]
     assert advisory, "the fixture must actually produce advisory edges"
@@ -418,18 +466,27 @@ def test_the_two_contract_kinds_are_mandatory_members_of_dag_edge_kinds() -> Non
     assert EdgeKind.CONTRACT_IMPL in DAG_EDGE_KINDS
     assert EdgeKind.CONTRACT_CONSUME in DAG_EDGE_KINDS
     # The §3.1 default membership, and the shipped `fleet.yaml` default, are the same six kinds.
-    assert set(GraphSection().dag_edge_kinds) == set(DAG_EDGE_KINDS) == {
-        EdgeKind.DECLARED_DEP, EdgeKind.PUBLISHED_ARTIFACT, EdgeKind.INTERNAL_IMPORT,
-        EdgeKind.API_CONTRACT, EdgeKind.CONTRACT_IMPL, EdgeKind.CONTRACT_CONSUME,
-    }
+    assert (
+        set(GraphSection().dag_edge_kinds)
+        == set(DAG_EDGE_KINDS)
+        == {
+            EdgeKind.DECLARED_DEP,
+            EdgeKind.PUBLISHED_ARTIFACT,
+            EdgeKind.INTERNAL_IMPORT,
+            EdgeKind.API_CONTRACT,
+            EdgeKind.CONTRACT_IMPL,
+            EdgeKind.CONTRACT_CONSUME,
+        }
+    )
 
     for missing in (EdgeKind.CONTRACT_IMPL, EdgeKind.CONTRACT_CONSUME):
         with pytest.raises(ConfigError, match=missing.value):
             validate_dag_edge_kinds(DAG_EDGE_KINDS - {missing}, hoist_contracts=True)
     # With hoisting off, the pre-ADR-0019 ladder is recovered exactly and the set may narrow.
-    assert validate_dag_edge_kinds(
-        DAG_EDGE_KINDS - CONTRACT_KINDS, hoist_contracts=False
-    ) == DAG_EDGE_KINDS - CONTRACT_KINDS
+    assert (
+        validate_dag_edge_kinds(DAG_EDGE_KINDS - CONTRACT_KINDS, hoist_contracts=False)
+        == DAG_EDGE_KINDS - CONTRACT_KINDS
+    )
 
 
 CONTRACT_KINDS = frozenset({EdgeKind.CONTRACT_IMPL, EdgeKind.CONTRACT_CONSUME})
@@ -481,7 +538,11 @@ def test_inference_is_deterministic_across_pythonhashseed(seed: str) -> None:
     }
     probe = "from tests.test_graph_build import edge_fingerprint; print(edge_fingerprint())"
     out = subprocess.run(  # noqa: S603
-        [sys.executable, "-c", probe], env=env, capture_output=True, text=True, check=True,
+        [sys.executable, "-c", probe],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
         cwd=str(REPO_ROOT),
     )
     assert out.stdout.strip() == edge_fingerprint().strip()
@@ -494,25 +555,43 @@ def test_edge_key_is_the_documented_recipe_and_nothing_else() -> None:
     a cycle-break decision recorded under one key can never be found under the other.
     """
     expected = hashlib.sha256(
-        "\x00".join(["REPO", "acme-a", "REPO", "maven:com.acme:b", "DECLARED_DEP", "pom.xml", "12"])
-        .encode()
+        "\x00".join(
+            ["REPO", "acme-a", "REPO", "maven:com.acme:b", "DECLARED_DEP", "pom.xml", "12"]
+        ).encode()
     ).hexdigest()
     edge = next(
         e for e in infer_edges(chain_input()) if e.src_id == "acme-a" and e.dst_id == "acme-b"
     )
     assert edge.edge_key == expected
-    assert edge_key_for(
-        src_kind=NodeKind.REPO, src_id="acme-a", dst_kind=NodeKind.REPO,
-        dst_ref="maven:com.acme:b", kind=EdgeKind.DECLARED_DEP, evidence_path="pom.xml",
-        evidence_line=12,
-    ) == expected
+    assert (
+        edge_key_for(
+            src_kind=NodeKind.REPO,
+            src_id="acme-a",
+            dst_kind=NodeKind.REPO,
+            dst_ref="maven:com.acme:b",
+            kind=EdgeKind.DECLARED_DEP,
+            evidence_path="pom.xml",
+            evidence_line=12,
+        )
+        == expected
+    )
     # A missing line hashes as -1, matching `edges.evidence_line INTEGER NOT NULL DEFAULT -1`.
     assert edge_key_for(
-        src_kind=NodeKind.REPO, src_id="a", dst_kind=NodeKind.REPO, dst_ref="k",
-        kind=EdgeKind.DECLARED_DEP, evidence_path="p", evidence_line=None,
+        src_kind=NodeKind.REPO,
+        src_id="a",
+        dst_kind=NodeKind.REPO,
+        dst_ref="k",
+        kind=EdgeKind.DECLARED_DEP,
+        evidence_path="p",
+        evidence_line=None,
     ) == edge_key_for(
-        src_kind=NodeKind.REPO, src_id="a", dst_kind=NodeKind.REPO, dst_ref="k",
-        kind=EdgeKind.DECLARED_DEP, evidence_path="p", evidence_line=-1,
+        src_kind=NodeKind.REPO,
+        src_id="a",
+        dst_kind=NodeKind.REPO,
+        dst_ref="k",
+        kind=EdgeKind.DECLARED_DEP,
+        evidence_path="p",
+        evidence_line=-1,
     )
 
 
@@ -566,8 +645,10 @@ def test_confidence_is_reconstructible_from_confidence_factors_alone() -> None:
     assert edge.confidence == product
 
     pinned = infer_edges(
-        InferenceInput(owners=owner_index(),
-                       dependencies=[dependency(repo_id="acme-a", on="b", version="1.4.0")])
+        InferenceInput(
+            owners=owner_index(),
+            dependencies=[dependency(repo_id="acme-a", on="b", version="1.4.0")],
+        )
     )[0]
     assert pinned.kind is EdgeKind.PUBLISHED_ARTIFACT
     assert pinned.confidence == EDGE_BASE_CONFIDENCE[EdgeKind.PUBLISHED_ARTIFACT]
@@ -580,7 +661,9 @@ def test_a_truncated_symbol_index_caps_confidence_and_says_so() -> None:
     reconstructs by multiplication."""
     base = full_input()
     inp = InferenceInput(
-        owners=base.owners, dependencies=base.dependencies, symbols=base.symbols,
+        owners=base.owners,
+        dependencies=base.dependencies,
+        symbols=base.symbols,
         truncated_repo_ids=frozenset({"acme-d"}),
     )
     internal = next(e for e in infer_edges(inp) if e.kind is EdgeKind.INTERNAL_IMPORT)
@@ -647,11 +730,17 @@ def test_a_dynamic_ref_matching_two_owners_is_marked_ambiguous() -> None:
         [("acme-b", coord("shared")), ("acme-e", coord("shared"))]
     )
     symbol = SymbolRef(
-        repo_id="acme-d", fqn="com.acme.shared.Bootstrap", kind=SymbolKind.DYNAMIC_REF,
-        path="src/main/java/Boot.java", line=44, language="java", is_definition=False,
+        repo_id="acme-d",
+        fqn="com.acme.shared.Bootstrap",
+        kind=SymbolKind.DYNAMIC_REF,
+        path="src/main/java/Boot.java",
+        line=44,
+        language="java",
+        is_definition=False,
     )
     dynamic = [
-        e for e in infer_edges(InferenceInput(owners=shared_owners, symbols=[symbol]))
+        e
+        for e in infer_edges(InferenceInput(owners=shared_owners, symbols=[symbol]))
         if e.kind is EdgeKind.DYNAMIC_REF
     ]
 
@@ -687,15 +776,23 @@ def test_an_external_dependency_is_not_a_node() -> None:
     persisted for the record and orders nothing (§5 `DependencyEdge.dst_id`)."""
     external = DependencyEdge(
         edge_key=edge_key_for(
-            src_kind=NodeKind.REPO, src_id="acme-a", dst_kind=NodeKind.REPO,
-            dst_ref="maven:org.slf4j:slf4j-api", kind=EdgeKind.DECLARED_DEP,
-            evidence_path="pom.xml", evidence_line=3,
+            src_kind=NodeKind.REPO,
+            src_id="acme-a",
+            dst_kind=NodeKind.REPO,
+            dst_ref="maven:org.slf4j:slf4j-api",
+            kind=EdgeKind.DECLARED_DEP,
+            evidence_path="pom.xml",
+            evidence_line=3,
         ),
         src_id="acme-a",
-        dst_coordinate=Coordinate(ecosystem=Ecosystem.MAVEN, group="org.slf4j",
-                                  name="slf4j-api", version_spec="2.0.0"),
-        kind=EdgeKind.DECLARED_DEP, base_confidence=1.0, confidence=1.0,
-        evidence_path="pom.xml", evidence_line=3,
+        dst_coordinate=Coordinate(
+            ecosystem=Ecosystem.MAVEN, group="org.slf4j", name="slf4j-api", version_spec="2.0.0"
+        ),
+        kind=EdgeKind.DECLARED_DEP,
+        base_confidence=1.0,
+        confidence=1.0,
+        evidence_path="pom.xml",
+        evidence_line=3,
     )
     g = build_graph(nodes("acme-a"), [external])
 
@@ -723,10 +820,21 @@ def _repo_edge(
     """A hand-built acme-a → acme-b row, for the cases inference cannot reach on its own."""
     return DependencyEdge(
         edge_key=edge_key_for(
-            src_kind=NodeKind.REPO, src_id="acme-a", dst_kind=NodeKind.REPO,
-            dst_ref=coord("b").key, kind=kind, evidence_path=path, evidence_line=1,
+            src_kind=NodeKind.REPO,
+            src_id="acme-a",
+            dst_kind=NodeKind.REPO,
+            dst_ref=coord("b").key,
+            kind=kind,
+            evidence_path=path,
+            evidence_line=1,
         ),
-        src_id="acme-a", dst_coordinate=coord("b"), dst_id="acme-b", kind=kind,
-        base_confidence=EDGE_BASE_CONFIDENCE[kind], confidence=confidence,
-        ordering_suppressed=suppressed, evidence_path=path, evidence_line=1,
+        src_id="acme-a",
+        dst_coordinate=coord("b"),
+        dst_id="acme-b",
+        kind=kind,
+        base_confidence=EDGE_BASE_CONFIDENCE[kind],
+        confidence=confidence,
+        ordering_suppressed=suppressed,
+        evidence_path=path,
+        evidence_line=1,
     )

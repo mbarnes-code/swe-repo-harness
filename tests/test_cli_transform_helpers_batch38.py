@@ -498,8 +498,13 @@ async def test_ordering_pairs_applies_all_three_filters_and_reverses_the_edge_di
     _fresh_db(db_path)
     conn = sqlite3.connect(db_path, isolation_level=None)
     try:
-        for repo_id in ("acme-billing", "acme-commons", "acme-suppressed-dep",
-                        "acme-low-conf-dep", "acme-wrong-kind-dep"):
+        for repo_id in (
+            "acme-billing",
+            "acme-commons",
+            "acme-suppressed-dep",
+            "acme-low-conf-dep",
+            "acme-wrong-kind-dep",
+        ):
             _insert_repo(conn, repo_id, dest_path=None)
 
         def edge(
@@ -516,8 +521,18 @@ async def test_ordering_pairs_applies_all_three_filters_and_reverses_the_edge_di
                 "                   dst_coord_key, kind, base_confidence, confidence, "
                 "                   ordering_suppressed, evidence_path, detected_at) "
                 "VALUES (?, ?, 'REPO', ?, 'REPO', ?, ?, ?, ?, ?, ?, 'pom.xml', ?)",
-                (edge_key, RUN_ID, src, dst, f"maven:x:{dst}", kind, confidence, confidence,
-                 ordering_suppressed, "2026-09-14T00:00:00Z"),
+                (
+                    edge_key,
+                    RUN_ID,
+                    src,
+                    dst,
+                    f"maven:x:{dst}",
+                    kind,
+                    confidence,
+                    confidence,
+                    ordering_suppressed,
+                    "2026-09-14T00:00:00Z",
+                ),
             )
 
         # Qualifying: acme-billing (dependent) depends on acme-commons (dependency).
@@ -538,6 +553,5 @@ async def test_ordering_pairs_applies_all_three_filters_and_reverses_the_edge_di
         pairs = await _ordering_pairs(aconn, settings, RUN_ID)
 
     assert pairs == (("acme-commons", "acme-billing"),), (
-        "exactly the one qualifying edge, as (dependency, dependent) -- reversed from storage "
-        "order"
+        "exactly the one qualifying edge, as (dependency, dependent) -- reversed from storage order"
     )

@@ -2763,7 +2763,7 @@ def test_stub_records_for_revalidation_task_excludes_a_non_superseded_row_at_the
 def test_current_stub_states_by_consumer_reads_the_latest_round_not_the_first(
     tmp_path: Path,
 ) -> None:
-    """"One row per coord_key: the row at that coord_key's own highest `revalidation_round`,
+    """ "One row per coord_key: the row at that coord_key's own highest `revalidation_round`,
     since a re-emitted stub inserts a new row rather than mutating the old one" (own docstring,
     SPEC §3.5.1's append-only audit trail). Untested directly: no test in this suite seeds two
     rounds of the SAME coord_key and reads this function back, so a regression collapsing the
@@ -3069,9 +3069,7 @@ def test_refuse_unresolved_stubs_reports_the_true_total_not_just_the_five_listed
     run_id = "99999999-9999-4999-8999-999999999999"
     conn = sqlite3.connect(db_path, isolation_level=None)
     try:
-        _seed_run_and_repos(
-            conn, run_id, (*(f"acme-{i}" for i in range(7)), "acme-provider")
-        )
+        _seed_run_and_repos(conn, run_id, (*(f"acme-{i}" for i in range(7)), "acme-provider"))
         for i in range(7):
             conn.execute(
                 "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "

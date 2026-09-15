@@ -1136,11 +1136,9 @@ POLYGLOT_REPOS: dict[str, dict[str, str]] = {
     #: failing it.
     "acme-widgets-py": {
         "pyproject.toml": (
-            "[project]\nname = \"acme-widgets-py\"\nversion = \"0.1.0\"\ndependencies = []\n"
+            '[project]\nname = "acme-widgets-py"\nversion = "0.1.0"\ndependencies = []\n'
         ),
-        "acme_widgets_py/__init__.py": (
-            "def double(value: int) -> int:\n    return value * 2\n"
-        ),
+        "acme_widgets_py/__init__.py": ("def double(value: int) -> int:\n    return value * 2\n"),
         # Self-contained rather than `from acme_widgets_py import double`: `main`'s own directory
         # and the package's `imports = ["."]` root would BOTH be on `sys.path` under a real
         # `py_test` runfiles tree, and this fixture has no need to find out whether that
@@ -1148,11 +1146,7 @@ POLYGLOT_REPOS: dict[str, dict[str, str]] = {
         # top-level statement, not a `def test_…():` `pytest` would collect but `py_test`'s
         # `main=` (no `deps` on a test framework — `py.py:test_targets()`) never calls.
         "acme_widgets_py/test_widgets.py": (
-            "def _double(value: int) -> int:\n"
-            "    return value * 2\n"
-            "\n"
-            "\n"
-            "assert _double(21) == 42\n"
+            "def _double(value: int) -> int:\n    return value * 2\n\n\nassert _double(21) == 42\n"
         ),
     },
     #: D112, round VI task 70: `acme-commons-java` above (like every other JVM fixture in this
@@ -1447,7 +1441,10 @@ def test_build_reaches_phase_three_and_lands_the_generated_files(
 
 
 def test_a_degraded_repo_with_no_rhi_repo_exits_7(
-    fleet: Path, monorepo: Path, bazel: FakeBazel, filter_repo: FakeFilterRepo  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,
+    filter_repo: FakeFilterRepo,  # noqa: F811
 ) -> None:
     """D93 / SPEC §3.5.1 point 5: a run with a `DEGRADED` repo and NO
     `REQUIRES_HUMAN_INTERVENTION` repo exits **7**, not 0 — the specific trigger D93 names,
@@ -1483,7 +1480,9 @@ def test_a_degraded_repo_with_no_rhi_repo_exits_7(
 
 
 def test_a_degraded_repo_at_phase_four_with_no_rhi_repo_exits_7(
-    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,  # noqa: F811
 ) -> None:
     """D93 / SPEC §3.5.1 point 5, Phase 4: the same trigger, at `cli.py::verify`'s own exit-code
     determination site — a genuinely separate call site from `build`'s (`_needs_human_attention`
@@ -1516,7 +1515,9 @@ def test_a_degraded_repo_at_phase_four_with_no_rhi_repo_exits_7(
 
 
 def test_a_verify_provider_reaching_rhi_in_an_earlier_wave_blocks_its_later_wave_dependent(
-    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,  # noqa: F811
 ) -> None:
     """D125 (round VI task 78): does `_verify_impl`'s wave loop have the same cross-wave
     `blocked_by` propagation gap D123 measured for `_transform_impl` (ADR-0127)? Mirrors that
@@ -1565,7 +1566,9 @@ def test_a_verify_provider_reaching_rhi_in_an_earlier_wave_blocks_its_later_wave
 
 
 def test_a_verify_provider_rhi_in_an_earlier_invocation_blocks_a_dependent_in_a_later_invocation(
-    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,  # noqa: F811
 ) -> None:
     """D126 / ADR-0130 (task-84): the VERIFY-side residual ADR-0129's own judgment call 3 flagged
     as real-but-out-of-scope — the SAME fixture the test above uses, driven across TWO SEPARATE
@@ -1619,7 +1622,9 @@ def test_a_verify_provider_rhi_in_an_earlier_invocation_blocks_a_dependent_in_a_
 
 
 def test_the_build_runs_against_the_immutable_snapshot_and_nothing_else(
-    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,  # noqa: F811
 ) -> None:
     """The argv is exactly §3.3's, and the tree it ran in is the snapshot ref on its `attempts`
     row — a real `refs/fleet/<run_id>/integration/<seq>`, reachable from `integration`.
@@ -2095,8 +2100,10 @@ def test_a_second_invocation_republishes_root_files_that_still_describe_the_whol
     pass while proving nothing — as would a second invocation that re-drove the settled wave, so
     that is asserted too.
     """
-    add_repos(fleet, ["acme-commons-java", "acme-codec-rs", "acme-case-rs",
-                      "acme-ui-ts", "acme-report-ts"])
+    add_repos(
+        fleet,
+        ["acme-commons-java", "acme-codec-rs", "acme-case-rs", "acme-ui-ts", "acme-report-ts"],
+    )
     transformed(fleet)
     waves = {
         str(row[0]): int(row[1])
@@ -2146,8 +2153,11 @@ def test_a_second_invocation_republishes_root_files_that_still_describe_the_whol
     vanished = sorted(set(before) - set(after))
     assert not vanished, f"root file(s) {vanished} were on the branch and are not any more"
     lost = {
-        path: [line for line in before[path].splitlines() if line.strip()
-               and line not in after[path].splitlines()]
+        path: [
+            line
+            for line in before[path].splitlines()
+            if line.strip() and line not in after[path].splitlines()
+        ]
         for path in sorted(before)
     }
     lost = {path: lines for path, lines in lost.items() if lines}
@@ -2206,9 +2216,7 @@ def test_repo_and_wave_narrow_dispatch_and_never_the_root_file_domain(
     assert payload(full)["waves"] != [], "the full run drove nothing, so it republished nothing"
     complete = published_root_files(monorepo)
     differing = sorted(
-        path
-        for path in set(narrowed) | set(complete)
-        if narrowed.get(path) != complete.get(path)
+        path for path in set(narrowed) | set(complete) if narrowed.get(path) != complete.get(path)
     )
     assert complete == narrowed, (
         "the root files a `--repo`-scoped `fleet build` published are not the ones the full "
@@ -2431,9 +2439,7 @@ def test_a_replan_failure_after_a_wave_published_keeps_its_unit_in_the_domain(
         "nothing was published at the moment the re-plan failed, so this run never entered the "
         "post-publication state the two failure classes differ over"
     )
-    naming = sorted(
-        path for path, text in hook.published_at_refusal.items() if dest in text
-    )
+    naming = sorted(path for path, text in hook.published_at_refusal.items() if dest in text)
     assert naming, (
         f"no root file on the branch named `{dest}` when its re-plan failed, so dropping it would "
         f"have been harmless and this test proves nothing: "
@@ -2531,9 +2537,7 @@ def test_a_replan_failure_at_a_later_wave_does_not_take_the_rest_of_the_fleet_do
     packages = published_packages(monorepo)
     assert packages == {
         f"{other}/BUILD.bazel" for repo, other in DESTINATIONS.items() if repo != victim
-    }, (
-        f"the branch does not carry exactly the packages of every repo but {victim}: {packages}"
-    )
+    }, f"the branch does not carry exactly the packages of every repo but {victim}: {packages}"
     assert f"{dest}/BUILD.bazel" not in packages, (
         f"{victim} published a package although its worktree could not be re-cut for this wave"
     )
@@ -2552,7 +2556,9 @@ def test_a_replan_failure_at_a_later_wave_does_not_take_the_rest_of_the_fleet_do
 
 
 def test_the_sandbox_really_wraps_the_build_in_a_networkless_container(
-    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,  # noqa: F811
 ) -> None:
     """Without `--no-sandbox` the command executed is a `docker run --network=none` wrapper.
 
@@ -2828,7 +2834,11 @@ def test_the_build_side_sweep_respects_stub_blocked_from_a_resume_continuation(
             read_conn = await cli.connect_ro(db_path)
             try:
                 await cli._repropagate_terminal_providers(
-                    read_conn, writer, run_id, cli.Phase.BUILD, settings,
+                    read_conn,
+                    writer,
+                    run_id,
+                    cli.Phase.BUILD,
+                    settings,
                     stub_blocked=stub_blocked,
                 )
             finally:
@@ -3057,7 +3067,9 @@ def test_phase_four_withholds_a_repo_whose_phase_three_did_not_succeed(
 
 
 def test_a_truncated_closure_forces_closure_sampled_and_the_report_discloses_it(
-    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,  # noqa: F811
 ) -> None:
     """Over the bound: `CLOSURE_SAMPLED`, with the true count, the sample size and the seed in
     the report and in the operator-facing output. Under it: the closure is verified whole.
@@ -3105,7 +3117,9 @@ def test_a_truncated_closure_forces_closure_sampled_and_the_report_discloses_it(
 
 
 def test_phase_four_reads_a_fresh_snapshot_that_carries_phase_threes_build_files(
-    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,  # noqa: F811
 ) -> None:
     """§3.4 step 1's "current integration branch tip" is a FRESH snapshot ref, and the tree it
     names really contains every repo's generated `BUILD.bazel`.
@@ -3136,7 +3150,9 @@ def test_phase_four_reads_a_fresh_snapshot_that_carries_phase_threes_build_files
 
 
 def test_phase_four_reuses_the_bazel_caches_phase_three_just_filled(
-    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,  # noqa: F811
 ) -> None:
     """§3.4's bounds table puts the persistent build cache in the PHASE 4 section — and Phase 4's
     `bazel test` over the blast radius was the one invocation in the harness naming neither flag.
@@ -3198,7 +3214,9 @@ def test_phase_four_reuses_the_bazel_caches_phase_three_just_filled(
 
 
 def test_re_running_build_duplicates_no_merge_no_commit_and_no_file(
-    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,  # noqa: F811
 ) -> None:
     """A second `fleet build` changes nothing, and a second one forced back into a settled wave
     re-ingests without duplicating the merge.
@@ -3231,9 +3249,9 @@ def test_re_running_build_duplicates_no_merge_no_commit_and_no_file(
     assert merge_trailers(monorepo) == first_merges, "the ingest guard let a merge through twice"
     assert git(monorepo, "rev-parse", "integration") == first_tip
     for repo, dest in DESTINATIONS.items():
-        assert (
-            build_worktree(fleet, repo) / dest / "BUILD.bazel"
-        ).read_text(encoding="utf-8") == files[repo], repo
+        assert (build_worktree(fleet, repo) / dest / "BUILD.bazel").read_text(
+            encoding="utf-8"
+        ) == files[repo], repo
 
 
 def test_build_refuses_without_a_monorepo_to_merge_into(fleet: Path) -> None:  # noqa: F811
@@ -3284,9 +3302,7 @@ def test_stub_blocked_on_build_is_a_no_op_when_no_stub_exists(
 
     def _bazel_files() -> dict[str, str]:
         return {
-            repo: (build_worktree(fleet, repo) / dest / "BUILD.bazel").read_text(
-                encoding="utf-8"
-            )
+            repo: (build_worktree(fleet, repo) / dest / "BUILD.bazel").read_text(encoding="utf-8")
             for repo, dest in dests.items()
         }
 
@@ -3660,9 +3676,7 @@ def test_destinations_come_from_the_adapters_not_from_the_driver(
         ("acme-tool-py", "", "acme-tool-py"),
     ):
         adapter = ecosystems.for_ecosystem(repo_ecosystem(fleet, repo_id))
-        coordinate = Coordinate(
-            ecosystem=repo_ecosystem(fleet, repo_id), group=group, name=name
-        )
+        coordinate = Coordinate(ecosystem=repo_ecosystem(fleet, repo_id), group=group, name=name)
         expected = f"{adapter.monorepo_dir}/{adapter.path_tail(coordinate)}"
         assert dests[repo_id] == expected, (repo_id, dests[repo_id], expected)
         # …and the tree really is there, merged, in the worktree the build read.
@@ -3767,13 +3781,11 @@ def test_an_unknown_ecosystem_still_falls_back_visibly(
 
     # Disclosed for that repo and ONLY that repo — the run's siblings got real rules.
     assert payload(result)["adapter_unavailable"] == ["acme-runbooks"], result.output
-    rows = query(
-        fleet, "SELECT repo_id FROM findings WHERE kind = 'EcosystemAdapterUnavailable'"
-    )
+    rows = query(fleet, "SELECT repo_id FROM findings WHERE kind = 'EcosystemAdapterUnavailable'")
     assert [str(row[0]) for row in rows] == ["acme-runbooks"], rows
-    sibling = (
-        build_worktree(fleet, "acme-ui-ts") / dests["acme-ui-ts"] / "BUILD.bazel"
-    ).read_text(encoding="utf-8")
+    sibling = (build_worktree(fleet, "acme-ui-ts") / dests["acme-ui-ts"] / "BUILD.bazel").read_text(
+        encoding="utf-8"
+    )
     assert "ts_project(" in sibling and "filegroup(" not in sibling, sibling
 
 
@@ -4091,9 +4103,7 @@ def test_an_active_published_artifact_stubs_workspace_dep_reaches_module_bazel(
         encoding="utf-8"
     )
     assert "maven.install(" in module, module
-    assert (
-        f'name = "commons",\n    version = "{_MAVEN_STUB_PINNED_VERSION}",' in module
-    ), module
+    assert f'name = "commons",\n    version = "{_MAVEN_STUB_PINNED_VERSION}",' in module, module
     # The provider's OWN scanned version must not be what got rendered for this coordinate.
     assert '"1.2.0"' not in module, module
 
@@ -4195,9 +4205,9 @@ def test_active_stubs_package_files_are_materialized_into_every_dispatchs_worktr
     published_name = cli._internal_label(published_dest).rsplit(":", 1)[-1]
     published_body = (worktree / published_dest / "BUILD.bazel").read_text(encoding="utf-8")
     assert "alias(" in published_body, published_body
-    assert (
-        f'name = "{published_name}",\n    actual = "@maven//:commons",' in published_body
-    ), published_body
+    assert f'name = "{published_name}",\n    actual = "@maven//:commons",' in published_body, (
+        published_body
+    )
 
     failing_dest = stub_dest(_EMPTY_FAILING_STUB_COORD_KEY)
     failing_name = cli._internal_label(failing_dest).rsplit(":", 1)[-1]
@@ -4317,9 +4327,7 @@ def test_a_monorepo_dir_override_really_moves_the_destination(
     adapter = ecosystems.for_ecosystem(npm)
     assert adapter.monorepo_dir != "vendored_ts", "the adapter itself must not be mutated"
     assert dests["acme-ui-ts"] == "vendored_ts/acme/ui", dests
-    assert (
-        build_worktree(fleet, "acme-ui-ts") / "vendored_ts/acme/ui" / "BUILD.bazel"
-    ).is_file()
+    assert (build_worktree(fleet, "acme-ui-ts") / "vendored_ts/acme/ui" / "BUILD.bazel").is_file()
     # The repos that carry an explicit `dest:` are NOT moved: §9's override governs the directory
     # the adapter chose, and an operator who wrote a path is not overruled by it.
     assert dests["acme-app-ts"] == DESTINATIONS["acme-app-ts"], dests
@@ -4333,9 +4341,7 @@ def test_a_monorepo_dir_override_really_moves_the_destination(
         build_worktree(fleet, "acme-ui-ts") / "vendored_ts/acme/ui", "vendored_ts/acme/ui"
     )
     assert baseline_tree, "the baseline tree must be non-empty or the comparison proves nothing"
-    assert set(override_tree) == set(baseline_tree), (
-        set(override_tree) ^ set(baseline_tree)
-    )
+    assert set(override_tree) == set(baseline_tree), set(override_tree) ^ set(baseline_tree)
     assert override_tree == baseline_tree
 
 
@@ -5098,9 +5104,10 @@ def test_the_build_file_generator_runs_once_over_every_go_root_with_static_resol
     assert tree["go.sum"] == FAKE_LOCKS["go"][1], sorted(tree)
     assert "# gazelle:prefix github.com/acme/clitool" in tree["go/clitool/BUILD.bazel"], tree
     assert "# gazelle:prefix github.com/acme/digest" in tree["go/digest/BUILD.bazel"], tree
-    assert tree["go/clitool/cmd/clitool/main.go"] == POLYGLOT_REPOS["acme-clitool-go"][
-        "cmd/clitool/main.go"
-    ], tree
+    assert (
+        tree["go/clitool/cmd/clitool/main.go"]
+        == POLYGLOT_REPOS["acme-clitool-go"]["cmd/clitool/main.go"]
+    ), tree
     assert tree["go/digest/digest.go"] == POLYGLOT_REPOS["acme-digest-go"]["digest.go"], tree
 
 
@@ -5356,11 +5363,7 @@ def test_the_captured_generator_output_is_a_function_of_the_fleet_not_of_plan_or
         fake = FakeGazelle()
         monkeypatch.setattr(cli, "GAZELLE_RUNNER", fake)
         scratch = tmp_path / f"scratch-{index}"
-        captured = asyncio.run(
-            cli._run_gazelle(
-                order, binary="gazelle", scratch=scratch
-            )
-        )
+        captured = asyncio.run(cli._run_gazelle(order, binary="gazelle", scratch=scratch))
         argvs.append(
             tuple(arg.replace(str(scratch), "<scratch>") for arg in fake.calls[0].argv)
             if fake.calls
@@ -5576,9 +5579,7 @@ def test_a_resolver_failure_is_loud_and_classified_and_never_an_empty_lock(
     detail = json.dumps(
         [
             row[0]
-            for row in query(
-                fleet, "SELECT payload FROM findings WHERE repo_id = 'acme-app-py'"
-            )
+            for row in query(fleet, "SELECT payload FROM findings WHERE repo_id = 'acme-app-py'")
         ]
     )
     assert "uv pip compile" in detail, detail
@@ -6916,9 +6917,7 @@ def build_snapshot_ref(root: Path, repo_id: str) -> str:
 
 def added_in(monorepo: Path, path: str) -> str:
     """The commit on `integration` that ADDED `path`. Exactly one, or the assertion says so."""
-    shas = git(
-        monorepo, "log", "--diff-filter=A", "--format=%H", "integration", "--", path
-    ).split()
+    shas = git(monorepo, "log", "--diff-filter=A", "--format=%H", "integration", "--", path).split()
     assert len(shas) == 1, (path, shas)
     return shas[0]
 
@@ -6996,9 +6995,10 @@ def test_a_dependencys_generated_package_is_on_the_branch_before_its_dependents_
         "the generated BUILD.bazel was already on the branch before its own repo built, so the "
         "ancestry assertion above is vacuous and proves no ordering at all"
     )
-    assert f"{DESTINATIONS[DEPENDENCY_REPO]}/BUILD.bazel" in git(
-        monorepo, "ls-tree", "-r", "--name-only", dependent_ref
-    ).split()
+    assert (
+        f"{DESTINATIONS[DEPENDENCY_REPO]}/BUILD.bazel"
+        in git(monorepo, "ls-tree", "-r", "--name-only", dependent_ref).split()
+    )
 
     # 3. and real Bazel can analyse the dependency's package out of the dependent's own tree.
     worktree = build_worktree(fleet, DEPENDENT_REPO)
@@ -7168,7 +7168,9 @@ def test_ingest_rewrites_history_not_only_the_tip(
 
 
 def test_sqlite_is_readable_after_the_two_phases(
-    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+    fleet: Path,
+    monorepo: Path,
+    bazel: FakeBazel,  # noqa: F811
 ) -> None:
     """The `attempts` rows §3.4 step 3 says the report is assembled FROM are really there, with
     the columns §6 requires of a build row.
@@ -7306,9 +7308,9 @@ def test_a_real_build_failure_naming_a_hoisted_contracts_package_is_attributed_a
 
     fail_dest = DESTINATIONS["acme-app-ts"]
     run_id = query(fleet, "SELECT run_id FROM runs")[0][0]
-    assert query(
-        fleet, "SELECT 1 FROM phases WHERE repo_id = ? AND phase = 3", ("acme-app-ts",)
-    ) == [], "sanity: Phase 3 has not even been admitted yet, so no attempt could have been spent"
+    assert (
+        query(fleet, "SELECT 1 FROM phases WHERE repo_id = ? AND phase = 3", ("acme-app-ts",)) == []
+    ), "sanity: Phase 3 has not even been admitted yet, so no attempt could have been spent"
 
     conn = sqlite3.connect(fleet / "state" / "fleet.db", isolation_level=None)
     try:
@@ -7493,10 +7495,13 @@ def test_a_hoisted_contracts_content_is_really_merged_with_the_trailer(
     assert result.exit_code == ExitCode.SUCCESS, result.output
 
     # -- anti-vacuity: no ingest failure was silently swallowed -------------------------
-    assert query(
-        workspace,
-        "SELECT payload FROM findings WHERE kind = 'ContractIngestFailed'",
-    ) == [], "a ContractIngestFailed finding means the merge below never really happened"
+    assert (
+        query(
+            workspace,
+            "SELECT payload FROM findings WHERE kind = 'ContractIngestFailed'",
+        )
+        == []
+    ), "a ContractIngestFailed finding means the merge below never really happened"
 
     # -- the merge commit exists, is real, and carries the trailer — read TWO genuinely --
     # -- different ways (Rule 12): git's own trailer parser, and a raw --grep -----------
@@ -7527,9 +7532,9 @@ def test_a_hoisted_contracts_content_is_really_merged_with_the_trailer(
     assert "proto/acme/identity/v1/identity.proto" in tree, tree
     assert "package.json" not in tree, tree
     assert "src/index.ts" not in tree, tree
-    assert git(
-        monorepo, "cat-file", "-e", f"{merge_sha}:proto/acme/identity/v1/identity.proto"
-    ) == ""
+    assert (
+        git(monorepo, "cat-file", "-e", f"{merge_sha}:proto/acme/identity/v1/identity.proto") == ""
+    )
 
     # -- idempotency: a second `fleet build` merges nothing new (already_present) -------
     result2 = build(workspace, "--no-sandbox")
@@ -7562,9 +7567,7 @@ def test_a_hoisted_contracts_content_is_really_merged_with_the_trailer(
         f"migrate/acme-identity must carry the OWNER's own merge, not the contract's: "
         f"{owner_trailer!r}"
     )
-    contract_branch_sha = git(
-        monorepo, "rev-parse", f"migrate/contract-{slug(PROTO_ID)}"
-    ).strip()
+    contract_branch_sha = git(monorepo, "rev-parse", f"migrate/contract-{slug(PROTO_ID)}").strip()
     assert contract_branch_sha == merge_sha, (contract_branch_sha, merge_sha)
 
 
@@ -7613,9 +7616,9 @@ def test_a_hoisted_contracts_carrier_path_lands_on_integration_exactly_once(
     assert result.exit_code == ExitCode.SUCCESS, result.output
 
     # -- anti-vacuity: both ingests really landed, nothing was silently swallowed ---------
-    assert query(
-        workspace, "SELECT payload FROM findings WHERE kind = 'ContractIngestFailed'"
-    ) == [], "a ContractIngestFailed finding means the contract merge never really happened"
+    assert (
+        query(workspace, "SELECT payload FROM findings WHERE kind = 'ContractIngestFailed'") == []
+    ), "a ContractIngestFailed finding means the contract merge never really happened"
     hoist_shas = [
         line
         for line in git(
@@ -7653,9 +7656,9 @@ def test_a_hoisted_contracts_carrier_path_lands_on_integration_exactly_once(
     # -- — so it would show `identity.proto` even under a correct fix, and checking it ----
     # -- directly would be a false positive against the very defect this test proves fixed.
     owner_parent1 = git(monorepo, "rev-parse", f"{owner_branch_sha}^1").strip()
-    owner_merge_diff = git(
-        monorepo, "diff", "--name-only", owner_parent1, owner_branch_sha
-    ).strip().splitlines()
+    owner_merge_diff = (
+        git(monorepo, "diff", "--name-only", owner_parent1, owner_branch_sha).strip().splitlines()
+    )
     duplicated_in_owner = [p for p in owner_merge_diff if p.endswith("identity.proto")]
     assert duplicated_in_owner == [], (
         f"D132: the owner's own merge must not itself introduce a second copy of a hoisted "
@@ -7675,9 +7678,10 @@ def test_a_hoisted_contracts_carrier_path_lands_on_integration_exactly_once(
     assert f"{owner_dest}/src/index.ts" in owner_merge_diff, owner_merge_diff
 
     # -- the contract's own merge is unaffected by the owner's later exclusion -----------
-    assert git(
-        monorepo, "cat-file", "-e", f"{hoist_shas[0]}:proto/acme/identity/v1/identity.proto"
-    ) == ""
+    assert (
+        git(monorepo, "cat-file", "-e", f"{hoist_shas[0]}:proto/acme/identity/v1/identity.proto")
+        == ""
+    )
 
 
 #: The real destination `_dest_for` computes for `CYCLE_FLEET`'s TS consumer, measured directly
@@ -7743,9 +7747,9 @@ def test_a_hoist_rollback_targets_the_real_contract_merge_not_the_owners_own_mer
     build(workspace, "--no-sandbox")  # exit code not asserted: acme-billing fails on purpose
 
     # -- anti-vacuity: the hoist merge really landed, exactly as section 7b's own test proves --
-    assert query(
-        workspace, "SELECT payload FROM findings WHERE kind = 'ContractIngestFailed'"
-    ) == [], "a ContractIngestFailed finding means the merge below never really happened"
+    assert (
+        query(workspace, "SELECT payload FROM findings WHERE kind = 'ContractIngestFailed'") == []
+    ), "a ContractIngestFailed finding means the merge below never really happened"
     hoist_shas = (
         git(
             monorepo,
@@ -7761,9 +7765,9 @@ def test_a_hoist_rollback_targets_the_real_contract_merge_not_the_owners_own_mer
     hoist_sha = hoist_shas[0]
 
     # -- the contract genuinely FAILED, attributed to the CONSUMER's build, not the owner's ----
-    assert query(
-        workspace, "SELECT status FROM contracts WHERE contract_id = ?", (PROTO_ID,)
-    ) == [("FAILED",)], "the consumer's stderr must have been attributed to this contract"
+    assert query(workspace, "SELECT status FROM contracts WHERE contract_id = ?", (PROTO_ID,)) == [
+        ("FAILED",)
+    ], "the consumer's stderr must have been attributed to this contract"
     findings = query(
         workspace, "SELECT repo_id, payload FROM findings WHERE kind = 'HoistBrokeOwner'"
     )
@@ -8674,8 +8678,7 @@ def test_real_bazel_loads_the_generated_go_tree_because_both_names_are_io_bazel_
     )
     _fail_if_registry_unreachable(queried, bazel_registry_args)
     assert queried.returncode == 0, (
-        "the generated Go tree still does not load under real Bazel:\n"
-        f"{queried.stderr[-4000:]}"
+        f"the generated Go tree still does not load under real Bazel:\n{queried.stderr[-4000:]}"
     )
     targets = {line.strip() for line in queried.stdout.splitlines() if line.strip()}
     assert {"//go/digest:digest", "//go/clitool/internal/command:command"} <= targets, targets
@@ -9114,8 +9117,6 @@ def test_a_go_module_with_no_sum_anywhere_in_the_graph_is_refused_rather_than_fe
     bazel_output_user_root.mkdir(parents=True, exist_ok=True)
 
 
-
-
 # ---------------------------------------------------------------------------------------
 # 8. §12.11 Task B — real Bazel and real sandboxed Docker, TOGETHER (round VI task 57)
 # ---------------------------------------------------------------------------------------
@@ -9149,11 +9150,7 @@ _TASK57_HAPPY_REPO: Final[dict[str, str]] = {
     ),
     "task57_happy_py/__init__.py": "def double(value: int) -> int:\n    return value * 2\n",
     "task57_happy_py/test_happy.py": (
-        "def _double(value: int) -> int:\n"
-        "    return value * 2\n"
-        "\n"
-        "\n"
-        "assert _double(9) == 18\n"
+        "def _double(value: int) -> int:\n    return value * 2\n\n\nassert _double(9) == 18\n"
     ),
 }
 
@@ -9163,11 +9160,7 @@ _TASK57_SHRINK_REPO: Final[dict[str, str]] = {
     ),
     "task57_shrink_py/__init__.py": "def triple(value: int) -> int:\n    return value * 3\n",
     "task57_shrink_py/test_shrink.py": (
-        "def _triple(value: int) -> int:\n"
-        "    return value * 3\n"
-        "\n"
-        "\n"
-        "assert _triple(7) == 21\n"
+        "def _triple(value: int) -> int:\n    return value * 3\n\n\nassert _triple(7) == 21\n"
     ),
 }
 
@@ -9358,9 +9351,7 @@ def test_a_real_bazel_lock_publish_and_a_real_sandboxed_build_happen_in_the_same
         phase_b_shrink.output
     )
 
-    shrink_attempts = [
-        row for row in attempts(fleet, 3) if row["repo_id"] == "task57-shrink-py"
-    ]
+    shrink_attempts = [row for row in attempts(fleet, 3) if row["repo_id"] == "task57-shrink-py"]
     shrink_docker_rows = [
         row for row in shrink_attempts if row["command"] and row["command"][0] == "docker"
     ]

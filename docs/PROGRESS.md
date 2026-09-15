@@ -11084,3 +11084,14 @@ this round's fix commits touches only `docs/` and one `.superpowers/` force-add,
 `tests/` changes). Full batch-by-batch detail, including the 5 fix-round batches (24, 41, 47, 49,
 51/52) and the ~52 deferred Minor findings, remains in
 `.superpowers/sdd/round-VIII-qa-qc/progress.md`.
+
+**Correction (2026-09-15, scoped re-review of this checkpoint's own fix wave).** The "Status" line
+above is wrong on two counts, caught by the re-review that closed out the final-review fix wave
+this same entry describes: (1) I3 force-added **three** gitignored reports, not one; (2) `c18bb50`
+(the I1 fix, named four sentences earlier in this very entry) touched
+`tests/test_sequence_e2e.py` — a real test-file change, not "zero `tests/` changes." Both facts
+were already stated correctly elsewhere in this same checkpoint entry; only this closing summary
+line contradicted them. No production or test-behavior claim in this checkpoint is affected —
+`c18bb50`'s change was a docstring/comment correction (Rule 12's discipline does not apply to a
+non-assertion-changing edit), and the three force-adds are exactly the three named in the
+"Final review findings and disposition" paragraph above, nothing additional.
