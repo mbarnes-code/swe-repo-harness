@@ -69,6 +69,7 @@ from fleet.vcs.filter_repo import IngestError, IntegrationMutex, SourceProvenanc
 from fleet.vcs.git import Git, GitError
 from fleet.workers.base import (
     BaseWorker,
+    UnsafeSourcePathError,
     WorkerBudget,
     WorkerContext,
     WorkerError,
@@ -674,7 +675,19 @@ class BuildgenWorker(BaseWorker[BuildgenInput, BuildgenOutput]):
 
 
 def _write(path: Path, text: str) -> None:
-    """Write a generated file, creating its package directory. Generated, never hand-edited."""
+    """Write a generated file, creating its package directory. Generated, never hand-edited.
+
+    `path.write_text()` follows an existing symlink and overwrites whatever it points at, so a
+    source repo that commits a tracked symlink at exactly one of this worker's generated paths
+    (`BUILD.bazel`, `MODULE.bazel`, or a `SupportFile.path`) could make this call clobber any
+    absolute host path the harness process can write, with no diff and no finding (security
+    finding #7, write side; `rewrite.py`'s `is_symlink()` guard is the read side). `is_symlink()`,
+    never `.exists()`/`.is_file()`, both of which follow the symlink like the write would.
+    """
+    if path.is_symlink():
+        raise UnsafeSourcePathError(
+            f"{path}: worktree path is a symlink, refusing to write through it"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 
