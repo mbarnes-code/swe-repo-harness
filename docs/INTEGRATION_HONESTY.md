@@ -11627,7 +11627,8 @@ the except branch and add a discriminating test showing `.ok`/`.failures` now ag
 
 Found by round VIII's `worker-mutation-batch49`
 (`.superpowers/sdd/round-VIII-qa-qc/worker-mutation-batch49-report.md`) while mutation-auditing
-`quarantine()`/`_quarantine_impl` in `src/fleet/cli.py`. `docs/SPEC.md:6890` documents `fleet
+`quarantine()`/`_quarantine_impl` in `src/fleet/cli.py`. The discard is at `src/fleet/cli.py:16397`
+(`quarantine()`'s `_ = stub_blocked`); `docs/SPEC.md:6890` documents `fleet
 quarantine` as accepting `<repo> --reason TEXT (required) --stub-blocked --dry-run`, and the CLI
 command function accepts and parses `--stub-blocked`, but the flag is never threaded through:
 `quarantine()` does `_ = stub_blocked` (an explicit discard) and `_quarantine_impl` has no such
@@ -11638,3 +11639,28 @@ controller at dispatch time, not by either lane. Not yet fixed — queue for a f
 or if quarantine never legitimately needs stub-blocked semantics, remove the flag from both the
 CLI signature and SPEC's documented flag list — Rule 14 applies if the SPEC row itself needs to
 change).
+
+**Class swept 2026-09-15 (final-review fix pass, I5).** Four `_ = stub_blocked`-shaped discards
+exist in `src/fleet/cli.py`: `_validate_transform_flags` (`:5328`), `_validate_build_flags`
+(`:7713`), `quarantine()` (`:16397`, this entry), and `_validate_resume_flags` (`:17777`, already
+certified elsewhere as a true no-op, structurally untestable — resume's `stub_blocked` is threaded
+directly from `resume()`'s own body to `_unblock_dependents`/`_continue_impl`). The other two were
+read directly (not inferred) and are both confirmed **benign**, not a second instance of this
+bug:
+- `_validate_transform_flags`'s discarded return value is irrelevant because `transform()`
+  (`cli.py:5261`) passes the CLI-parsed `stub_blocked` straight to
+  `_transform_impl(stub_blocked=stub_blocked)` itself — the validator's job here is only to
+  validate `--max-attempts`/`--context-policy` and return `(ladder, policy_overrides)`; the flag
+  never depended on this function's return.
+- `_validate_build_flags`'s discard is a **disclosed, intentional** no-op: its own docstring
+  (`cli.py:7703-7711`) and `_build_impl`'s (`cli.py:12134-12139`) both state `fleet build`'s BUILD-
+  phase render is unconditional and data-driven off the `stubs` table a prior `fleet transform
+  --stub-blocked` already wrote, so the flag is accepted (not refused) only so an operator's
+  identical `--stub-blocked` across every phase of one migration is never itself the reason a
+  later phase stops — the same "accepted, not a switch" shape `--regen-build-files` already uses,
+  and consistent with `docs/SPEC.md`'s own §10 prose (the paragraph beginning "all three
+  `--stub-blocked` refusals are REMOVED") that BUILD-phase render is reachable on every invocation,
+  not gated behind the flag. Confirmed: `build()` (`cli.py:3127`) never passes `stub_blocked` to
+  `_build_impl` at all.
+
+So the class is fully accounted for: one real bug (this entry), three benign/disclosed no-ops.
