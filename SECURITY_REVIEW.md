@@ -88,6 +88,15 @@ check (which does not follow the link) immediately before the read in `rewrite.p
 named, loud failure class rather than silently dereferencing — capability-preserving, since no
 legitimate rewrite target should ever need to be a symlink to begin with.
 
+> **Status update (2026-09-15, round VII task 1).** FIXED (`e5be438`). `RewriteWorker.run()` now
+> checks `.is_symlink()` immediately before the read (which does not itself follow the link) and
+> refuses with a named, non-retryable `FailureClass.PREFLIGHT` failure via the worker's existing
+> `_failed()` convention — no silent skip, no fallback content source. `_targets_are_present()` was
+> also fixed so a symlinked unit no longer counts as present under `.is_file()`. Two new tests in
+> `tests/test_workers_transform.py` drive the real `RewriteWorker` against a real OS-level symlink
+> committed into a real git repo, pointing outside the fixture's own tree; RED/GREEN verified by
+> reverting the fix. **Status: FIXED.**
+
 ---
 
 ### 6. CRITICAL — an LLM-controlled rule name is rendered unescaped into generated Starlark that
@@ -211,6 +220,17 @@ bug or a future schema change could feed either), but neither is a currently-exp
 earlier and cheaper place to reject it) to a conservative identifier pattern
 (`^[a-zA-Z_][a-zA-Z0-9_]*$`) — this closes the injection primitive without restricting which real
 Bazel rules the harness can emit, since every legitimate rule name already satisfies that pattern.
+
+> **Status update (2026-09-15, round VII tasks 2/3).** FIXED (`72e4959`). A shared
+> `BAZEL_IDENTIFIER_PATTERN` (`^[a-zA-Z_][a-zA-Z0-9_]*$`) is now applied to both `BuildTarget.rule`
+> (`models/build.py`) and the LLM-facing `BuildTargetProposal.rule` (`llm/schemas.py` — this
+> document's own earlier prose calls the same class `ProposedBuildTarget`, a naming slip in this
+> file, not a second field), rejecting at the cheaper LLM-schema boundary as well as the internal
+> model. RED/GREEN verified by temporarily reverting both source files. The two latent siblings
+> named above (`render_target()`'s attribute names, `_split_extension()`'s var/tag) were also
+> hardened defensively (`9790a90`, lint-fixed in `2e32967`) — neither was LLM-reachable, so this is
+> hardening, not closure of a second live sink. **Status: FIXED** (live sink); latent siblings
+> defensively hardened.
 
 ---
 
@@ -568,6 +588,24 @@ create and every promotion — while the project's own tracking documents assert
   project's own maintenance process, out of scope for this security-review log to decide, but worth
   raising given how squarely it matches that document's stated purpose.
 
+> **Status update (2026-09-15, round VII tasks 6/7/8).** FIXED. The core gap (evidence reaching the
+> outbound LLM prompt unredacted) is fixed in `llm/calls.py::render_prompt()` (`ccc0016`):
+> `redact_mapping()` is applied to the evidence mapping before `json.dumps`, preserving the
+> byte-identical-for-identical-inputs contract `prompt_sha256` depends on. The PR-egress gap named
+> above (title and body, on every create and every promotion) is fixed at both call sites —
+> `workers/prwriter.py::_compose()`'s title (redacted before the `[:120]` truncation, so a secret
+> spanning that boundary can't be sliced in half unredacted) and `cli.py::_regenerate_pr_body()`'s
+> return (`199f2dd`) — `render_body()` itself is deliberately left unredacted, since its direct-call
+> contract (`tests/test_pr_body_redaction.py`) proves the separate DB-mirror redaction and would be
+> silently narrowed by redacting inside it. The documentation drift this item flagged (§11.4's
+> wrong-module attribution, the PR-title omission, and `CRITERIA_PLAN.md`'s §12.20 DONE verdict
+> citing only the DB-mirror test) is corrected in `docs/SPEC.md`/`docs/CRITERIA_PLAN.md`, and
+> `docs/INTEGRATION_HONESTY.md` D138 (`08d2aa9`) records the divergence itself, status FIXED,
+> LANDED against `ccc0016`/`199f2dd`. Question 5 (SecretRegistry bypass) remains a disclosed
+> defense-in-depth gap, not fixed as code — see the round VII task 9 note on Question 5 above.
+> **Status: FIXED** (core gap and both PR-egress sites); Question 5's defense-in-depth gap remains
+> open, disclosed.
+
 ---
 
 ### 3. Re-measurement — "no lockfile ⇒ floor with no transitive closure" is real but scoped to
@@ -760,6 +798,15 @@ sub-finding is a live, untested, confirmed-real defect, independently reproduced
 verified by the subagent to preserve every currently-supported spec while converting a misparse
 into the existing, already-tested "unparseable → dropped/reported" path — no expressiveness lost.
 
+> **Status update (2026-09-15, round VII task 11).** FIXED (`74dfbd3`). Both `_ATOM`
+> (`bazel/generators.py`) and `_VERSION_ATOM` (`graph/collisions.py`) now use `.fullmatch()` instead
+> of `.match()`, so a spec carrying a trailing pre-release tag (e.g. `1.2.3-beta.1`) fails to match
+> entirely and is routed through the existing, deliberately-tested "unparseable → dropped" path
+> instead of being silently misparsed to `1.2.3`. The original "deliberate, tested, dropped"
+> behavior this item was originally CLOSED for is unchanged — only what counts as "unparseable"
+> changed. Every spec literal used across `tests/test_bazel.py` and `tests/test_graph_sequence.py`
+> was verified to still parse identically under `fullmatch`. **Status: FIXED.**
+
 ---
 
 ### 2. A repo's own pre-existing `BUILD.bazel`/`WORKSPACE`/`MODULE.bazel` is relocated into
@@ -915,5 +962,24 @@ open-location-code files are actually vendored rather than authored in-repo (inf
 naming only). It also does not indicate whether any of these 6 repos are actually slated for
 migration by this harness's own `config/repos.yaml` — that's a separate, harness-specific question
 this scan doesn't answer.
+
+> **Status update (2026-09-15, round VII tasks 12/13).** Detection added, then wired to disclosure
+> (not a fix to the underlying overwrite behavior, which `_write()` still performs unchanged — this
+> closes the "no diff, no disclosure" gap, not the overwrite itself). Task 12 (`f0773ae`) added
+> detection at both `buildgen.py::_write()` call sites: before each write, the destination's
+> pre-existing content (if any, and if different from what's about to be rendered) is collected into
+> a new `BuildgenOutput.overwritten_bazel_files` list; byte-identical pre-existing content is not
+> reported, per this item's own "silent loss" framing. Task 13 (`a2425e4`) wired that list through
+> to `PrwriterInput.relocation_summary` — the same previously-dead field this item's investigation
+> found above — so an overwrite is now disclosed in the PR body. The real propagation path differed
+> from the originally-traced one: `fleet pr` is a later, separate process that reads only the
+> `findings` table, never the Phase 3 checkpoint record, so the durable hop is a new
+> `BAZEL_OVERWRITE_FINDING_KIND` finding written by `_BuildSink` and read back into `_PrCandidate`,
+> following the same pattern `VERIFICATION_KIND`/`PR_RECORD_KIND` already use. For an ATOMIC_WAVE
+> SCC's shared PR, the summary is the union of every member's notes. The symlink-dereference
+> question this item raised and left unresolved is answered under item #7 (fixed, round VII task 1).
+> **Status: overwrite now disclosed (detection + PR-body wiring); the underlying silent-overwrite
+> behavior itself is unchanged by design** — a repo's own hand-written Bazel file is still replaced,
+> now with a visible record rather than none.
 
 ---

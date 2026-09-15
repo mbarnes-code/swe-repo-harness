@@ -11027,3 +11027,86 @@ backs it up.
 the criteria count reached 48 (it did, three waves ago), but because the gap between that count and
 the test suite's own real health has now been closed and independently re-verified, which is the
 distinction the final review's own central finding turned on.
+
+## Round VII — 14-task security-remediation plan closed (2026-09-15); §12 count unchanged at
+48 of 48 — this round is a disclosed hardening round against `SECURITY_REVIEW.md`, not a
+criteria-closing one (Rule 13)
+
+Commit range `b58f43f..a2425e4` (16 commits: the 14-task plan doc `b798cc1` plus 15 task
+commits — Tasks 3 and 5 each landed as two commits, an implementation plus a lint or content
+fix). Source: `SECURITY_REVIEW.md`'s open items #1, #2, #4, #5, #6, #7 (item #3 was already
+CLOSED/rescoped within that document before this round started and was not re-touched here).
+Sequential dispatch order per the plan: 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 8, 14.
+
+**Fixed this round:**
+- **Item #7 (CRITICAL — symlink dereference in the rewrite worker → LLM egress), Task 1
+  (`e5be438`).** `RewriteWorker.run()` now checks `.is_symlink()` before reading a rewrite
+  target and refuses with `FailureClass.PREFLIGHT` rather than dereferencing;
+  `_targets_are_present()` no longer counts a symlinked unit as present. RED/GREEN verified
+  against a real OS-level symlink in a real git repo.
+- **Item #6 (CRITICAL — Starlark injection via `BuildTarget.rule`), Tasks 2/3 (`72e4959`,
+  `9790a90`, `2e32967`).** A shared `BAZEL_IDENTIFIER_PATTERN` now constrains both
+  `BuildTarget.rule` (internal model) and `BuildTargetProposal.rule` (the LLM-facing schema
+  class this document itself once mis-named `ProposedBuildTarget`). The two latent,
+  not-currently-LLM-reachable siblings (`render_target()`'s attribute names,
+  `_split_extension()`'s var/tag) were also hardened defensively — not live exploits, so this
+  is hardening rather than a second closed sink.
+- **Item #5 Finding A (`--network=none` guarantee resting on an unconstrained string), Task 4
+  (`6a4a473`).** `VerifySection.network` (formerly plain `str`) is now `Literal["none"]`,
+  rejecting any `FLEET_VERIFY__NETWORK` override at the type level.
+- **Item #4 core gap + PR-egress escalation, Tasks 6/7/8 (`ccc0016`, `199f2dd`, `08d2aa9`).**
+  `llm/calls.py::render_prompt()` now redacts evidence before JSON-serializing it into the
+  outbound prompt (preserving `prompt_sha256`'s byte-identical-for-identical-inputs cache-key
+  contract). `workers/prwriter.py::_compose()`'s PR title and `cli.py::_regenerate_pr_body()`'s
+  PR body are both now redacted before reaching the forge — closing the escalation this item
+  found, where a real secret could reach a **publicly posted** PR on every create and every
+  promotion round. Task 8 corrected `docs/SPEC.md` §11.4's wrong-module attribution and
+  `docs/CRITERIA_PLAN.md`'s §12.20 evidence citation (which cited only the DB-mirror test, not
+  the forge-egress path) to match what Tasks 6/7 actually shipped, and filed **D138** in
+  `docs/INTEGRATION_HONESTY.md` (status FIXED, LANDED against `ccc0016`/`199f2dd`) recording the
+  divergence itself.
+- **Item #4 Question 4b (symlink guard missing in two harness-config walks), Task 10
+  (`e7adfd2`).** `rewrite/rules.py::load_rules` and `settings.py::_check_rule_engines` now both
+  refuse a symlinked rule file with a loud `ConfigFileError`, matching Task 1's no-silent-skip
+  convention.
+- **Item #1 (unparseable version spec — the misparse sub-finding), Task 11 (`74dfbd3`).** Both
+  `_ATOM` (`bazel/generators.py`) and `_VERSION_ATOM` (`graph/collisions.py`) switched from
+  `.match()` to `.fullmatch()`, so a spec like `1.2.3-beta.1` is routed through the existing
+  tested "unparseable → dropped" path instead of being silently misparsed to `1.2.3`. The
+  original deliberate "dropped, tested" behavior this item was first CLOSED for is unchanged.
+- **Item #2 (silent `BUILD.bazel`/`MODULE.bazel` overwrite, no disclosure), Tasks 12/13
+  (`f0773ae`, `a2425e4`).** Task 12 added overwrite detection at both `buildgen.py::_write()`
+  call sites (`BuildgenOutput.overwritten_bazel_files`). Task 13 wired that list through to PR
+  disclosure — via a new `BAZEL_OVERWRITE_FINDING_KIND` finding (the real propagation path
+  differs from the originally-traced one: `fleet pr` reads only the `findings` table, not the
+  Phase 3 checkpoint record), reusing the previously-dead `PrwriterInput.relocation_summary`
+  field this item's own investigation had found unwired. The underlying overwrite behavior
+  itself is unchanged by design — this closes the disclosure gap, not the overwrite.
+
+**Deliberately disclosed, not fixed, this round:**
+- **Item #5 Finding B (Cargo needs network under `--network=none`), Task 5 (`c06a298`,
+  `3f7d9b2`).** A real, accepted architectural limitation, not a gap in this round's scope —
+  documented via **ADR-0137** in `docs/DECISIONS.md`. (Task 5's first commit fabricated
+  placeholder `SECURITY_REVIEW.md` content because the file was untracked in this worktree at
+  the time; Task 5's second commit replaced it with the real 899-line file from the primary
+  checkout, verified byte-identical, before appending the status note — corrected within the
+  same task, not carried forward.)
+- **Item #4 Question 5 (SecretRegistry bypass), Task 9 (`d856626`).** Redescoped mid-round: the
+  controller's original framing named `anthropic.py` alone, but Task 9 found **all** backends
+  with an `_api_key()` method (`anthropic.py`, `openai_compatible.py`) bypass `SecretRegistry`
+  identically via plain `os.environ.get()`. Wrapping only one would make it the sole
+  inconsistent backend — the opposite of the goal. Disclosed as a defense-in-depth gap (not a
+  demonstrated leak; `redact_text()` already re-scans `os.environ` for secret-shaped names at
+  call time), properly routed to a future cross-cutting ADR rather than fixed as a code change
+  here.
+
+**What was verified:** every commit's actual diff and message were read directly (`git show
+<sha> --stat`) against this round's own plan brief before this checkpoint was written; the
+`SECURITY_REVIEW.md` status notes added alongside this entry (items #1, #2, #4, #6, #7 — item
+#5 already carried Task 5's own dated note, item #3 untouched as above) quote the landed
+commits, not the plan's summary of them.
+
+**Next:** none dispatched — this is the round's closing task. The plan's own "Final Review
+Scope" calls for a whole-suite `pytest` run (green = `xfail: 0`, every xfail disclosed by
+D-number) and a re-check of Task 8's corrected claims against the code Tasks 6/7 shipped, to be
+done as a separate whole-branch review before this branch integrates.
