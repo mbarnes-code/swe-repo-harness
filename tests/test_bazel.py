@@ -511,7 +511,7 @@ def test_render_target_rejects_a_malformed_attribute_name() -> None:
         rule="java_library",
         attrs={'evil"attr': "value"},  # Contains a quote, not a valid identifier
     )
-    with pytest.raises(ValueError, match="attribute name.*not a valid Bazel identifier"):
+    with pytest.raises(ValueError, match=r"attribute name.*not a valid Bazel identifier"):
         render_target(target)
 
     # Another injection shape
@@ -521,7 +521,7 @@ def test_render_target_rejects_a_malformed_attribute_name() -> None:
         rule="java_library",
         attrs={'x; load("@evil//:x.bzl", "y")': "value"},  # Injection attempt
     )
-    with pytest.raises(ValueError, match="attribute name.*not a valid Bazel identifier"):
+    with pytest.raises(ValueError, match=r"attribute name.*not a valid Bazel identifier"):
         render_target(target2)
 
 
@@ -657,13 +657,13 @@ def test_split_extension_rejects_a_malformed_proxy_variable() -> None:
     extension IDs like "maven.install" into a proxy variable and tag class, which are rendered
     verbatim, unescaped, as identifiers in generated MODULE.bazel Starlark.
     A malformed proxy variable like 'evil"var' should be rejected at parse time."""
-    with pytest.raises(ValueError, match="extension proxy variable.*not a valid Bazel identifier"):
+    with pytest.raises(ValueError, match=r"extension proxy variable.*not a valid Bazel identifier"):
         _split_extension('evil"var.install')
 
 
 def test_split_extension_rejects_a_malformed_tag_class() -> None:
     """Similar to the proxy variable test, the tag class name must be validated."""
-    with pytest.raises(ValueError, match="extension tag class.*not a valid Bazel identifier"):
+    with pytest.raises(ValueError, match=r"extension tag class.*not a valid Bazel identifier"):
         _split_extension('maven.install; load("@evil//:x.bzl", "y")')
 
 

@@ -30,7 +30,13 @@ from typing import Final, Literal, Protocol, runtime_checkable
 
 from fleet.graph.collisions import VersionRequirement
 from fleet.graph.cycles import CoarsePlan, GraphFinding
-from fleet.models.build import BAZEL_IDENTIFIER_PATTERN, BuildTarget, GazelleConfig, ToolchainRequirement, WorkspaceDep
+from fleet.models.build import (
+    BAZEL_IDENTIFIER_PATTERN,
+    BuildTarget,
+    GazelleConfig,
+    ToolchainRequirement,
+    WorkspaceDep,
+)
 from fleet.models.enums import Ecosystem
 
 __all__ = [
