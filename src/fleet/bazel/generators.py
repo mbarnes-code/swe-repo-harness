@@ -444,7 +444,7 @@ def parse_range(spec: str) -> VersionRange | None:
         return None
     out = VersionRange()
     for atom in atoms:
-        match = _ATOM.match(atom)
+        match = _ATOM.fullmatch(atom)
         if match is None:
             return None
         op = match.group(1) or "=="

@@ -509,7 +509,7 @@ def _bounds(spec: str) -> tuple[_Bound | None, _Bound | None] | None:
     if not atoms:
         return None
     for atom in atoms:
-        match = _VERSION_ATOM.match(atom)
+        match = _VERSION_ATOM.fullmatch(atom)
         if match is None:
             return None
         op = match.group(1) or "=="

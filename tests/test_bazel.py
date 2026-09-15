@@ -446,6 +446,20 @@ def test_an_unparseable_spec_never_produces_a_conflict_it_cannot_prove() -> None
     assert resolution.ok and resolution.selected == {"maven:com.acme:widget": "31"}
 
 
+def test_a_prerelease_suffix_is_unparseable_not_silently_truncated() -> None:
+    """SECURITY_REVIEW.md item #1's new finding: `_ATOM` was matched with `.match()`, which
+    anchors only at the string's start, so `1.2.3-beta.1` matched just the numeric prefix `1.2.3`
+    and silently dropped `-beta.1` — producing a WRONG constraint, not a dropped one, that MVS
+    then trusted. `.fullmatch()` makes the trailing `-beta.1` fail the match entirely, routing it
+    through the existing, deliberately-tested "unparseable → dropped" path instead of misparsing
+    it as a bare release version."""
+    assert parse_range("1.2.3-beta.1") is None
+    assert parse_range(">=1.2.3-beta.1") is None
+    with pytest.raises(VersionConflict) as excinfo:
+        mvs_select("maven:com.acme:widget", reqs({">=1.2.3-beta.1": 1}))
+    assert "no spec could be parsed" in excinfo.value.reason
+
+
 # =======================================================================================
 # §3.3 step 2 — BUILD generation
 # =======================================================================================
