@@ -1307,6 +1307,170 @@ def test_pr_refuses_the_flags_it_cannot_honour(
     assert not forge.calls, "a refused flag must reach no subprocess at all"
 
 
+def test_pr_names_every_failed_repo_with_its_reason_sorted_and_counted(
+    fleet: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """`pr()`'s own `if failed: raise PrEmissionError(f"forge {...!r} failed for {len(failed)} "
+    f"repo(s) — {listed}")` composes THREE things from `_pr_impl`'s `result["failed"]` mapping
+    that no existing test checks together: `settings.config.pr.forge`, `len(failed)`, and
+    `", ".join(f"{name}: {reason}" for name, reason in sorted(failed.items()))`.
+
+    `test_a_forge_failure_names_the_configured_forge_and_not_gh` (§8 below) checks only that the
+    configured forge's name appears and that the literal string "`gh` failed" does not — it never
+    asserts the count or the per-repo `name: reason` listing, and every other `failed`-producing
+    test in this file (`test_a_failed_mark_ready_does_not_lose_the_pr_or_recreate_it`, the
+    promotion-precondition tests around line 850) reads `payload(result)["failed"]` directly from
+    `--json` output, which bypasses `pr()`'s own message-formatting code entirely — `_pr_impl`
+    returning a non-empty `failed` dict under `--json` never reaches the `if failed: raise
+    PrEmissionError` branch's exact string at all (`_emit` prints the JSON THEN the raise fires,
+    but nothing reads `result.output` for the composed message in JSON mode in this suite).
+
+    Isolated from `_pr_impl` itself (monkeypatched to return a fixed, deliberately UNSORTED
+    `failed` mapping) so this test cannot pass by accident of what a real forge call happens to
+    return — it is a test of `pr()`'s own formatting, not of `_emit_prs`/`_promote_prs`.
+
+    Old-fails/new-passes: a mutation that dropped `sorted(...)` from `listed` would still print
+    both repos and both reasons, just in dict-insertion order (`repo-b` before `repo-a`) — this
+    test's exact-string assertion catches that; a mutation truncating `listed` to
+    `next(iter(failed.items()))` would still name `settings.config.pr.forge` and `len(failed)`
+    correctly while dropping `repo-b` entirely — this test's `in result.output` check for BOTH
+    lines catches that too.
+    """
+    scanned(fleet)
+
+    async def fake_pr_impl(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "run_id": "irrelevant",
+            "opened": {},
+            "draft": [],
+            "eligible": [],
+            "held": {},
+            "already_open": [],
+            "unverified": [],
+            "scc_incomplete": {},
+            "promoted": {},
+            # Deliberately inserted out of sorted order: "repo-b" before "repo-a".
+            "failed": {"repo-b": "second reason", "repo-a": "first reason"},
+            "dry_run": False,
+            "exit_code": int(ExitCode.UNEXPECTED_ERROR),
+        }
+
+    monkeypatch.setattr(cli, "_pr_impl", fake_pr_impl)
+    result = runner.invoke(app, [*base_args(fleet), "pr"], catch_exceptions=False)
+    assert result.exit_code == ExitCode.UNEXPECTED_ERROR, result.output
+    assert (
+        "forge 'github' failed for 2 repo(s) — repo-a: first reason, repo-b: second reason"
+        in result.output
+    ), result.output
+
+
+# ---------------------------------------------------------------------------------------
+# 7b. `_forge_token_config` / `_forge`: the two small functions §8's wiring below sits on top of
+# ---------------------------------------------------------------------------------------
+# Every §8 test configures a NON-empty `pr.forge_token_config` (the shipped default,
+# `.secrets/gitea-curl.conf`, is non-empty too), so `_forge_token_config`'s `if not configured:
+# return None` branch — reached only when an operator explicitly sets
+# `forge_token_config: ""` — is never exercised anywhere in this suite. `tests/test_gitea.py`'s
+# `test_build_forge_returns_the_named_driver_and_refuses_an_unknown_one` calls `build_forge`
+# directly with no `curl_config` argument at all, which proves `vcs/__init__.py`'s OWN `None`
+# handling but never runs `cli._forge_token_config` itself. Downstream, `vcs/__init__.py`'s
+# `build_forge` raises `ForgeError` on `curl_config is None` for the `gitea` driver — so a
+# misconfigured `forge_token_config: ""` alongside `pr.forge: gitea` is a real, reachable operator
+# error, not a theoretical one.
+
+
+def test_forge_token_config_returns_none_for_an_explicitly_empty_setting(
+    fleet: Path,  # noqa: F811
+) -> None:
+    """Old-fails/new-passes: a mutation dropping the `if not configured: return None` guard (e.g.
+    resolving the empty string against `settings.root` unconditionally) would return
+    `settings.root.resolve()` — a real, non-None `Path` — instead of `None`, which is exactly what
+    this test's `is None` assertion (rather than a truthiness check, which an empty-string-shaped
+    Path could also satisfy in confusing ways) catches.
+    """
+    from fleet.settings import FleetSettings
+
+    config_dir = fleet / "config"
+    fleet_yaml = config_dir / "fleet.yaml"
+    fleet_yaml.write_text(
+        fleet_yaml.read_text(encoding="utf-8") + 'pr:\n  forge_token_config: ""\n',
+        encoding="utf-8",
+    )
+    settings = FleetSettings.load(config_dir)
+    assert settings.config.pr.forge_token_config == ""
+    assert cli._forge_token_config(settings) is None
+
+
+def test_forge_token_config_resolves_a_configured_path_against_the_config_root(
+    fleet: Path,  # noqa: F811
+) -> None:
+    """The companion positive case: a non-empty setting resolves to an ABSOLUTE path under
+    `settings.root`, not the relative string `pr.forge_token_config` itself — `build_forge`'s
+    `gitea` branch passes this straight to `curl -K`, which needs an absolute or cwd-relative
+    path, not one relative to a config file `curl` never sees.
+    """
+    from fleet.settings import FleetSettings
+
+    config_dir = fleet / "config"
+    fleet_yaml = config_dir / "fleet.yaml"
+    fleet_yaml.write_text(
+        fleet_yaml.read_text(encoding="utf-8") + "pr:\n  forge_token_config: .secrets/x.conf\n",
+        encoding="utf-8",
+    )
+    settings = FleetSettings.load(config_dir)
+    resolved = cli._forge_token_config(settings)
+    assert resolved == (settings.root / ".secrets/x.conf").resolve()
+    assert resolved is not None and resolved.is_absolute()
+
+
+def test_forge_passes_an_empty_forge_repo_as_none_not_as_the_empty_string(
+    fleet: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_forge`'s own `repo=pr_config.forge_repo or None` coercion has no dedicated test: every
+    `pr.forge: gitea` fixture in §8 below sets `forge_repo: acme-monorepo` (non-empty), and the
+    default `github` forge never uses `repo` at all (`vcs/__init__.py`'s `GitHubCli` branch takes
+    no `repo` argument), so nothing has ever observed what `_forge` passes for an UNSET
+    `forge_repo` under the `gitea` driver specifically.
+
+    Isolated with a `build_forge` spy (monkeypatched onto `cli.build_forge`, the exact name `_forge`
+    calls) rather than driving a real `GiteaForge`, so this is a test of `_forge`'s own argument
+    construction — old-fails/new-passes: a mutation from `pr_config.forge_repo or None` to plain
+    `pr_config.forge_repo` would pass `""` instead of `None`, which this test's `is None`
+    assertion (not a falsiness check) catches.
+    """
+    from fleet.settings import FleetSettings
+
+    config_dir = fleet / "config"
+    fleet_yaml = config_dir / "fleet.yaml"
+    fleet_yaml.write_text(
+        fleet_yaml.read_text(encoding="utf-8")
+        + "pr:\n"
+        + "  forge: gitea\n"
+        + "  forge_url: http://gitea.invalid:3001\n"
+        + "  forge_owner: redmage\n"
+        # forge_repo deliberately UNSET -- settings.py's own default is "".
+        + "  forge_token_config: .secrets/x.conf\n",
+        encoding="utf-8",
+    )
+    settings = FleetSettings.load(config_dir)
+    assert settings.config.pr.forge_repo == ""
+
+    captured: dict[str, object] = {}
+
+    def spy_build_forge(name: str, **kwargs: object) -> object:
+        captured["name"] = name
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(cli, "build_forge", spy_build_forge)
+    cli._forge(settings)
+    assert captured["name"] == "gitea"
+    assert captured["repo"] is None, (
+        f"an unset pr.forge_repo must reach build_forge as None, not '' -- got {captured['repo']!r}"
+    )
+
+
 # ---------------------------------------------------------------------------------------
 # 8. the forge is chosen by CONFIG — the same verb, against a self-hosted Gitea
 # ---------------------------------------------------------------------------------------
