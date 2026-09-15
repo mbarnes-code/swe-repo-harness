@@ -15869,3 +15869,44 @@ This is a spot-check sample, not exhaustive coverage of bucket A's remaining ~40
 scope report's own explicit call, made because project history shows sustained Rule-12 discipline
 in this bucket. Any bucket-A file outside these 4 batches is deliberately left unsampled this
 round.
+
+## ADR-0138 — §15.2 prerequisite: add `profiles.pilot` to `config/models.yaml`
+
+**Decision (2026-09-15, round IX QC-close).** Added a `pilot:` profile to `config/models.yaml`,
+mirroring `profiles.local`'s existing local-only-profile shape (§12.41 precedent), per §15.2's
+(Real-Repo Pilot Phase) prerequisite checklist item: "Add the corresponding `ModelClient` backend
+registry entry and local-only pilot profile." Same `openai_compatible` transport `local` already
+uses — no new backend class, no new abstraction, satisfying that checklist item's own "adds one
+backend registry entry, not a new abstraction" framing.
+
+Unlike `local` (three differently-sized models, one per tier), `pilot` routes all three tiers
+(`HEAVY`/`WORKHORSE`/`CHEAP`) to ONE dedicated Spark host serving the customer-specified
+`nvidia/nemotron-3-super-120b-a12b` for every role.
+
+**The `base_url` is a placeholder, disclosed as such.** `http://pilot-spark.internal:8000/v1` is
+written pending Spark selection/provisioning — an infrastructure prerequisite outside this repo's
+workspace (no passwordless sudo on either Spark), tracked in §15.2's own checklist and not
+performed here; a human does that separately. `config/models.yaml`'s own `pilot:` block comment
+states this must be edited to the real host once chosen.
+
+**No `capabilities_override` is declared, deliberately.** Nobody has verified the real Spark
+server's actual capabilities yet (it isn't provisioned), so asserting an override now would be an
+unverified claim rather than the operator-knows-the-server case `local`'s own comment reserves
+overrides for. The profile therefore falls back to `openai_compatible`'s honest declared floor
+(PROMPTED only). An operator must add a `capabilities_override` only after confirming what the
+live endpoint actually supports.
+
+**No `api_key_env`**, same reasoning as `local`: unknown/unverified whether the eventual server
+checks one; a one-line comment tells an operator to add `api_key_env: PILOT_LLM_API_KEY` if it
+does.
+
+**Investigated and confirmed no source change needed.** `ModelsConfig.profiles` is
+`dict[str, dict[ModelTier, tuple[BackendTarget, ...]]]` (`src/fleet/settings.py`), read
+dynamically from `config/models.yaml`; `--profile`/`llm.profile` is a plain string checked only
+against `models.profiles` (`FleetSettings.load`, `src/fleet/settings.py:1269-1276`: `if profile
+not in models.profiles: raise UnresolvedReferenceError(...)`), and `src/fleet/cli.py`'s
+`models_profiles` command lists `sorted(settings.models.profiles)`. No hardcoded enum of profile
+names exists anywhere in `src/`, so adding a new profile name is config-only — zero `src/` edits.
+
+**Open** until the Spark is selected and provisioned and the `base_url` (and any needed
+`capabilities_override`) is filled in with real, verified values.

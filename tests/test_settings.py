@@ -117,6 +117,26 @@ LOCAL_PROFILE_YAML = """\
 """
 
 
+# The §15.2 pilot profile (config/models.yaml `profiles.pilot`): one dedicated Spark host serving
+# one model across all three tiers, no `capabilities_override` (unverified real server), no
+# `api_key_env` (unknown whether the eventual server checks one) — see that file's own comment.
+PILOT_PROFILE_YAML = """\
+  pilot:
+    HEAVY:
+      - { backend: openai_compatible, model_id: nvidia/nemotron-3-super-120b-a12b, effort: high,
+          price: free,
+          base_url: 'http://pilot-spark.internal:8000/v1' }
+    WORKHORSE:
+      - { backend: openai_compatible, model_id: nvidia/nemotron-3-super-120b-a12b, effort: medium,
+          price: free,
+          base_url: 'http://pilot-spark.internal:8000/v1' }
+    CHEAP:
+      - { backend: openai_compatible, model_id: nvidia/nemotron-3-super-120b-a12b, effort: low,
+          price: free,
+          base_url: 'http://pilot-spark.internal:8000/v1' }
+"""
+
+
 def write_config(
     tmp_path: Path,
     *,
@@ -289,6 +309,28 @@ def test_a_zero_rate_price_must_be_written_as_free(tmp_path: Path) -> None:
     with pytest.raises(ConfigValidationError) as excinfo:
         load(write_config(tmp_path, models=models))
     assert "free" in str(excinfo.value)
+
+
+def test_pilot_profile_loads_and_lands_one_model_free_with_no_override(tmp_path: Path) -> None:
+    """§15.2's prerequisite checklist item: `profiles.pilot` must load/validate cleanly through
+    the same §9 startup path `profiles.local` does, ahead of the real Spark being provisioned.
+
+    Unlike `local` (a different model per tier), `pilot` routes all three tiers to the SAME
+    customer-specified model on one dedicated (still-placeholder) host, so all three targets must
+    resolve to that one `model_id`. No `capabilities_override` is declared (nobody has verified
+    the real server's capabilities yet), so `negotiate()` would land on the backend's honest
+    PROMPTED floor rather than an unverified claim — checked here as an empty override dict,
+    `BackendTarget.capabilities_override`'s documented default for "the operator did not say"."""
+    models = MODELS_YAML + PILOT_PROFILE_YAML
+    settings = load(write_config(tmp_path, models=models), cli_overrides={"llm.profile": "pilot"})
+
+    for tier in (ModelTier.HEAVY, ModelTier.WORKHORSE, ModelTier.CHEAP):
+        target = settings.targets_for_tier(tier)[0]
+        assert target.backend == "openai_compatible"
+        assert target.model_id == "nvidia/nemotron-3-super-120b-a12b"
+        assert target.price == "free"
+        assert target_price_usd(target, in_tokens=1_000_000, out_tokens=1_000_000) == 0.0
+        assert target.capabilities_override == {}
 
 
 # --------------------------------------------------------------------------------------
