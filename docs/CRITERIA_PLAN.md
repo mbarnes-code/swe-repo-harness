@@ -3785,7 +3785,7 @@ brief):**
   per the same discipline 43-A just applied), and task 94 measured that the one real production
   HEAVY-tier caller in `src/` — `workers/rewrite.py`'s `LLM_ESCALATION` rung
   (`escalate_repair`/`propose_repair`) — wraps ANY `LlmError` it catches, `TierUnavailable`
-  included, into a `WorkerRepairError` (`rewrite.py:104-106`), raised at `rewrite.py:730-731`
+  included, into a `WorkerRepairError` (`rewrite.py:105-107`), raised at `rewrite.py:730-731`
   around the escalation/repair calls, and `workers/base.py`'s generic
   fallback classifier (`classify_exception`/`error_from_exception`, the `except Exception` arm
   `_run_one` falls back to for any worker that does not classify its own LLM errors) has no special
