@@ -73,9 +73,7 @@ from tests.test_transform_e2e import fleet  # noqa: F401  (fixture is used by in
 
 
 def test_build_impl_pass_2_plans_every_wave_zero_unit_from_one_shared_snapshot(
-    fleet: Path,
-    monorepo: Path,
-    bazel: FakeBazel,  # noqa: F811
+    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
 ) -> None:
     """PASS 2 cuts ONE snapshot for the whole ingested fleet, not one per repo.
 
@@ -103,9 +101,7 @@ def test_build_impl_pass_2_plans_every_wave_zero_unit_from_one_shared_snapshot(
 
 
 def test_build_impl_pass_2_cuts_no_new_snapshot_when_nothing_is_ingested(
-    fleet: Path,
-    monorepo: Path,
-    bazel: FakeBazel,  # noqa: F811
+    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
 ) -> None:
     """PASS 2 is gated on `if ingests:` — a second, fully-settled `fleet build` invocation must
     ingest nothing and therefore cut no new `refs/fleet/<run>/integration/<seq>` ref at all.

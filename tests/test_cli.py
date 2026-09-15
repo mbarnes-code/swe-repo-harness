@@ -118,16 +118,14 @@ ROLES_BLOCK = "".join(
     f"  {role.value}: {tier.value}\n" for role, tier in sorted(SPEC_ROLE_TIERS.items())
 )
 
-MODELS_YAML = (
-    f"""\
+MODELS_YAML = f"""\
 version: 2
 roles:
 {ROLES_BLOCK}\
 default_profile: default
 profiles:
   default:
-"""
-    + """\
+""" + """\
     HEAVY:
       - { backend: anthropic, model_id: claude-opus-5, effort: high,
           api_key_env: ANTHROPIC_API_KEY,
@@ -141,7 +139,6 @@ profiles:
           api_key_env: ANTHROPIC_API_KEY,
           price: { in_per_mtok: 1.0, out_per_mtok: 5.0 } }
 """
-)
 
 #: ADR-0023's "swap the fleet to local models" profile — the one `--profile local` selects.
 LOCAL_PROFILE_YAML = """\
@@ -449,7 +446,9 @@ def test_schema_checked_commands_cover_the_db_touching_surface() -> None:
     )
 
 
-@pytest.mark.parametrize("path,extra_args", _SCHEMA_CHECKED_COMMANDS, ids=lambda v: " ".join(v))
+@pytest.mark.parametrize(
+    "path,extra_args", _SCHEMA_CHECKED_COMMANDS, ids=lambda v: " ".join(v)
+)
 def test_schema_version_mismatch_is_exit_2_not_a_silent_upgrade(
     path: tuple[str, ...],
     extra_args: tuple[str, ...],
@@ -731,7 +730,8 @@ async def test_refuse_exhausted_wave_does_not_raise_on_a_wave_with_no_repo_membe
     conn = sqlite3.connect(db, isolation_level=None)
     try:
         conn.execute(
-            "INSERT INTO waves (run_id, wave_index, computed_at, max_usd) VALUES (?, 0, ?, 0.0)",
+            "INSERT INTO waves (run_id, wave_index, computed_at, max_usd) "
+            "VALUES (?, 0, ?, 0.0)",
             (RUN_ID, "2026-08-08T12:00:00+00:00"),
         )
         # deliberately no wave_members row for wave 0 -> members == 0
@@ -765,7 +765,8 @@ def test_check_wave_budget_checks_the_wave_the_caller_named_not_the_earliest_ope
     conn = sqlite3.connect(db, isolation_level=None)
     try:
         conn.execute(
-            "INSERT INTO waves (run_id, wave_index, computed_at, max_usd) VALUES (?, 0, ?, 100.0)",
+            "INSERT INTO waves (run_id, wave_index, computed_at, max_usd) "
+            "VALUES (?, 0, ?, 100.0)",
             (RUN_ID, "2026-08-08T12:00:00+00:00"),
         )
         conn.execute(
@@ -952,7 +953,9 @@ def test_force_resequence_overrides_the_refusal(workspace: Path) -> None:
         )
     finally:
         conn.close()
-    result = runner.invoke(app, [*base_args(workspace), "--json", "sequence", "--force-resequence"])
+    result = runner.invoke(
+        app, [*base_args(workspace), "--json", "sequence", "--force-resequence"]
+    )
     assert result.exit_code == ExitCode.SUCCESS, result.output
     payload = json.loads(result.stdout)
     assert payload["forced"] is True
@@ -1096,12 +1099,9 @@ def test_migrate_db_initializes_a_fresh_database(tmp_path: Path) -> None:
     conn = sqlite3.connect(db)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-        assert (
-            conn.execute(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='phases'"
-            ).fetchone()[0]
-            == 1
-        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='phases'"
+        ).fetchone()[0] == 1
     finally:
         conn.close()
 
@@ -1139,14 +1139,8 @@ def test_migrate_db_dry_run_writes_nothing(tmp_path: Path) -> None:
     db = tmp_path / "state" / "fleet.db"
     result = runner.invoke(
         app,
-        [
-            "--config",
-            str(tmp_path / "config/fleet.yaml"),
-            "--db",
-            str(db),
-            "migrate-db",
-            "--dry-run",
-        ],
+        ["--config", str(tmp_path / "config/fleet.yaml"), "--db", str(db), "migrate-db",
+         "--dry-run"],
     )
     assert result.exit_code == ExitCode.SUCCESS, result.output
     assert "initialize" in result.output
@@ -1251,14 +1245,8 @@ def test_quarantine_dry_run_changes_nothing(workspace: Path) -> None:
     """`--dry-run` reports the same plan and writes no finding."""
     result = runner.invoke(
         app,
-        [
-            *base_args(workspace),
-            "quarantine",
-            "acme-commons",
-            "--reason",
-            "look first",
-            "--dry-run",
-        ],
+        [*base_args(workspace), "quarantine", "acme-commons", "--reason", "look first",
+         "--dry-run"],
     )
     assert result.exit_code == ExitCode.SUCCESS, result.output
     conn = sqlite3.connect(workspace / "state" / "fleet.db")
@@ -1349,14 +1337,8 @@ def test_quarantine_human_readable_line_reflects_dry_run_and_the_real_counts(
 
     dry = runner.invoke(
         app,
-        [
-            *base_args(workspace),
-            "quarantine",
-            "acme-commons",
-            "--reason",
-            "look first",
-            "--dry-run",
-        ],
+        [*base_args(workspace), "quarantine", "acme-commons", "--reason", "look first",
+         "--dry-run"],
     )
     assert dry.exit_code == ExitCode.SUCCESS, dry.output
     assert (
@@ -1420,7 +1402,9 @@ def test_retry_requires_a_reason(workspace: Path) -> None:
 
 def test_retry_refuses_an_unknown_repo(workspace: Path) -> None:
     """No `repos` row at all -- refused with the same message style as `quarantine`'s."""
-    result = runner.invoke(app, [*base_args(workspace), "retry", "does-not-exist", "--reason", "x"])
+    result = runner.invoke(
+        app, [*base_args(workspace), "retry", "does-not-exist", "--reason", "x"]
+    )
     assert result.exit_code == ExitCode.USAGE
     assert "no repo" in result.output
 
@@ -1439,7 +1423,9 @@ def test_retry_refuses_a_repo_not_at_requires_human_intervention(workspace: Path
     finally:
         conn.close()
 
-    result = runner.invoke(app, [*base_args(workspace), "retry", "acme-commons", "--reason", "x"])
+    result = runner.invoke(
+        app, [*base_args(workspace), "retry", "acme-commons", "--reason", "x"]
+    )
     assert result.exit_code == ExitCode.USAGE
     assert "REQUIRES_HUMAN_INTERVENTION" in result.output
 
@@ -1477,7 +1463,9 @@ def test_retry_refuses_two_rhi_phase_rows_for_the_same_repo_as_a_structural_surp
     finally:
         conn.close()
 
-    result = runner.invoke(app, [*base_args(workspace), "retry", "acme-commons", "--reason", "x"])
+    result = runner.invoke(
+        app, [*base_args(workspace), "retry", "acme-commons", "--reason", "x"]
+    )
     assert result.exit_code == ExitCode.USAGE, result.output
     assert "has 2 REQUIRES_HUMAN_INTERVENTION phase rows" in result.output
     assert "expected exactly one" in result.output
@@ -1494,15 +1482,8 @@ def test_retry_dry_run_changes_nothing(workspace: Path) -> None:
 
     result = runner.invoke(
         app,
-        [
-            *base_args(workspace),
-            "--json",
-            "retry",
-            "acme-commons",
-            "--reason",
-            "look first",
-            "--dry-run",
-        ],
+        [*base_args(workspace), "--json", "retry", "acme-commons", "--reason", "look first",
+         "--dry-run"],
     )
     assert result.exit_code == ExitCode.SUCCESS, result.output
     payload = json.loads(result.stdout)
@@ -1666,9 +1647,7 @@ def test_fleet_retry_reopens_p_then_a_later_resume_clears_c_once_p_relands_succe
         # P: phases 1-3 SUCCEEDED, phase 4 (VERIFY) REQUIRES_HUMAN_INTERVENTION -- mirrors
         # `_put_consumer_at_rhi`'s shape exactly.
         for phase, status in (
-            (1, "SUCCEEDED"),
-            (2, "SUCCEEDED"),
-            (3, "SUCCEEDED"),
+            (1, "SUCCEEDED"), (2, "SUCCEEDED"), (3, "SUCCEEDED"),
             (4, "REQUIRES_HUMAN_INTERVENTION"),
         ):
             conn.execute(
@@ -1807,7 +1786,8 @@ def test_fleet_retry_reopens_a_genuinely_pending_rhi_phase_and_resume_recomputes
     worktree, anchor = _arbitration_worktree(workspace)
     _step5_seed(
         workspace / "state" / "fleet.db",
-        statuses={1: "SUCCEEDED", 2: "SUCCEEDED", 3: "SUCCEEDED", 4: "REQUIRES_HUMAN_INTERVENTION"},
+        statuses={1: "SUCCEEDED", 2: "SUCCEEDED", 3: "SUCCEEDED",
+                  4: "REQUIRES_HUMAN_INTERVENTION"},
         post_commit_sha={2: anchor, 3: anchor},
     )
     assert not (worktree / "java" / STEP5_REPO / "BUILD.bazel").exists()
@@ -1903,16 +1883,8 @@ def test_accept_drift_accepts_exactly_the_named_section(workspace: Path) -> None
 
     both = runner.invoke(
         app,
-        [
-            *base_args(workspace),
-            "--json",
-            "resume",
-            "--dry-run",
-            "--accept-drift",
-            "budgets",
-            "--accept-drift",
-            "run",
-        ],
+        [*base_args(workspace), "--json", "resume", "--dry-run",
+         "--accept-drift", "budgets", "--accept-drift", "run"],
     )
     assert both.exit_code == ExitCode.SUCCESS, both.output
     assert set(json.loads(both.stdout)["accepted_sections"]) == {"budgets", "run"}
@@ -1932,7 +1904,7 @@ def test_accept_drift_rejects_a_name_that_is_not_a_section(workspace: Path) -> N
 
 
 def test_accepted_drift_writes_one_config_drift_finding_per_section(workspace: Path) -> None:
-    """ "Each accepted section writes its own audited `ConfigDrift` finding" (§10)."""
+    """"Each accepted section writes its own audited `ConfigDrift` finding" (§10)."""
     from fleet.settings import FleetSettings
 
     settings = FleetSettings.load(workspace / "config")
@@ -1943,13 +1915,8 @@ def test_accepted_drift_writes_one_config_drift_finding_per_section(workspace: P
     result = runner.invoke(
         app,
         [
-            *base_args(workspace),
-            "resume",
-            "--no-continue",
-            "--accept-drift",
-            "budgets",
-            "--accept-drift",
-            "gc",
+            *base_args(workspace), "resume", "--no-continue",
+            "--accept-drift", "budgets", "--accept-drift", "gc",
         ],
     )
     # The resume itself cannot complete (§11.5 step 8 is unbuilt) but the audit is
@@ -2045,13 +2012,8 @@ def test_missing_database_is_a_message_not_a_traceback(tmp_path: Path) -> None:
     write_config(tmp_path)
     result = runner.invoke(
         app,
-        [
-            "--config",
-            str(tmp_path / "config/fleet.yaml"),
-            "--db",
-            str(tmp_path / "nope.db"),
-            "status",
-        ],
+        ["--config", str(tmp_path / "config/fleet.yaml"), "--db", str(tmp_path / "nope.db"),
+         "status"],
         catch_exceptions=False,
     )
     assert result.exit_code == ExitCode.USAGE
@@ -2097,40 +2059,10 @@ still says nothing about the named module — see the assertion's own failure me
 
 
 UNAVAILABLE_MESSAGE_VOCABULARY: frozenset[str] = frozenset(
-    {
-        "and",
-        "any",
-        "cannot",
-        "cli",
-        "config",
-        "dispatching",
-        "error",
-        "fleet",
-        "has",
-        "identity",
-        "implementation",
-        "in",
-        "it",
-        "its",
-        "mirror",
-        "mutex",
-        "no",
-        "nothing",
-        "preconditions",
-        "run",
-        "schema",
-        "stopped",
-        "the",
-        "then",
-        "this",
-        "validated",
-        "verb",
-        "version",
-        "was",
-        "without",
-        "work",
-        "written",
-    }
+    {"and", "any", "cannot", "cli", "config", "dispatching", "error", "fleet", "has", "identity",
+     "implementation", "in", "it", "its", "mirror", "mutex", "no", "nothing", "preconditions",
+     "run", "schema", "stopped", "the", "then", "this", "validated", "verb", "version", "was",
+     "without", "work", "written"}
 )
 """Every word the unavailable-verb message's fixed prose may contain, before `Related module: `.
 
@@ -2659,28 +2591,18 @@ def test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_l
         }
         subprocess.run(
             ["git", "init", "--initial-branch=main"],  # noqa: S607
-            cwd=path,
-            check=True,
-            capture_output=True,
-            env=env,
+            cwd=path, check=True, capture_output=True, env=env,
         )
         for rel, text in sorted(files.items()):
             target = path / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
         subprocess.run(
-            ["git", "add", "-A"],
-            cwd=path,
-            check=True,
-            capture_output=True,
-            env=env,  # noqa: S607
+            ["git", "add", "-A"], cwd=path, check=True, capture_output=True, env=env  # noqa: S607
         )
         subprocess.run(
             ["git", "commit", "-m", "fixture"],  # noqa: S607
-            cwd=path,
-            check=True,
-            capture_output=True,
-            env=env,
+            cwd=path, check=True, capture_output=True, env=env,
         )
         return path
 
@@ -2698,7 +2620,9 @@ def test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_l
         finally:
             conn.close()
 
-    def seed_llm_cache(root: Path, snapshot: tuple[tuple[str, ...], list[tuple[Any, ...]]]) -> None:
+    def seed_llm_cache(
+        root: Path, snapshot: tuple[tuple[str, ...], list[tuple[Any, ...]]]
+    ) -> None:
         cols, rows = snapshot
         conn = sqlite3.connect(root / "state" / "fleet.db")
         try:
@@ -2734,7 +2658,8 @@ def test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_l
         },
     }
     sources = {
-        name: make_repo(tmp_path / "sources", name, files) for name, files in repo_files.items()
+        name: make_repo(tmp_path / "sources", name, files)
+        for name, files in repo_files.items()
     }
 
     fleet_yaml = (
@@ -2924,28 +2849,18 @@ def test_status_digest_differs_when_a_fixture_source_file_mutates_between_two_cl
         }
         subprocess.run(
             ["git", "init", "--initial-branch=main"],  # noqa: S607
-            cwd=path,
-            check=True,
-            capture_output=True,
-            env=env,
+            cwd=path, check=True, capture_output=True, env=env,
         )
         for rel, text in sorted(files.items()):
             target = path / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
         subprocess.run(
-            ["git", "add", "-A"],
-            cwd=path,
-            check=True,
-            capture_output=True,
-            env=env,  # noqa: S607
+            ["git", "add", "-A"], cwd=path, check=True, capture_output=True, env=env  # noqa: S607
         )
         subprocess.run(
             ["git", "commit", "-m", "fixture"],  # noqa: S607
-            cwd=path,
-            check=True,
-            capture_output=True,
-            env=env,
+            cwd=path, check=True, capture_output=True, env=env,
         )
         return path
 
@@ -2965,11 +2880,7 @@ def test_status_digest_differs_when_a_fixture_source_file_mutates_between_two_cl
         }
         before_sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],  # noqa: S607
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-            env=env,
-            text=True,
+            cwd=repo_path, check=True, capture_output=True, env=env, text=True,
         ).stdout.strip()
 
         manifest_path = repo_path / "package.json"
@@ -2982,26 +2893,16 @@ def test_status_digest_differs_when_a_fixture_source_file_mutates_between_two_cl
 
         subprocess.run(
             ["git", "add", "-A"],  # noqa: S607
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-            env=env,
+            cwd=repo_path, check=True, capture_output=True, env=env,
         )
         subprocess.run(
             ["git", "commit", "-m", "pin @acme/lib to an exact release"],  # noqa: S607
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-            env=env,
+            cwd=repo_path, check=True, capture_output=True, env=env,
         )
 
         numstat = subprocess.run(  # noqa: S603 - fixed argv, before_sha is our own rev-parse
             ["git", "diff", "--numstat", before_sha, "HEAD"],  # noqa: S607
-            cwd=repo_path,
-            check=True,
-            capture_output=True,
-            env=env,
-            text=True,
+            cwd=repo_path, check=True, capture_output=True, env=env, text=True,
         ).stdout
         assert numstat.strip(), (
             "the mutation commit produced a zero-line diff (Rule 12's zero-change gate) — the "
@@ -3025,7 +2926,9 @@ def test_status_digest_differs_when_a_fixture_source_file_mutates_between_two_cl
         finally:
             conn.close()
 
-    def seed_llm_cache(root: Path, snapshot: tuple[tuple[str, ...], list[tuple[Any, ...]]]) -> None:
+    def seed_llm_cache(
+        root: Path, snapshot: tuple[tuple[str, ...], list[tuple[Any, ...]]]
+    ) -> None:
         cols, rows = snapshot
         conn = sqlite3.connect(root / "state" / "fleet.db")
         try:
@@ -3068,7 +2971,8 @@ def test_status_digest_differs_when_a_fixture_source_file_mutates_between_two_cl
         },
     }
     sources = {
-        name: make_repo(tmp_path / "sources", name, files) for name, files in repo_files.items()
+        name: make_repo(tmp_path / "sources", name, files)
+        for name, files in repo_files.items()
     }
 
     fleet_yaml = (
@@ -3349,7 +3253,9 @@ def _client_mode(workspace: Path, settings: Any) -> str:
                 ledger = CostLedger(
                     repo,
                     run_id=RUN_ID,
-                    ceilings=Ceilings.from_settings(settings.config.budgets, settings.config.stubs),
+                    ceilings=Ceilings.from_settings(
+                        settings.config.budgets, settings.config.stubs
+                    ),
                 )
                 ctx = RunContext(
                     run_id=uuid.UUID(RUN_ID),
@@ -3366,7 +3272,9 @@ def _client_mode(workspace: Path, settings: Any) -> str:
                         cpu_pool=cast(Any, None),
                         ledger=ledger,
                     ),
-                    llm=LlmRouter.from_models_config(settings.models, profile=settings.profile),
+                    llm=LlmRouter.from_models_config(
+                        settings.models, profile=settings.profile
+                    ),
                     log=default_logger("test.cache-mode"),
                     work_dir=workspace / "work",
                     harness_version="0.1.0",
@@ -3443,7 +3351,10 @@ def test_gc_real_run_deletes_events_for_non_kept_runs_using_a_custom_keep_flag(
 
     conn = sqlite3.connect(db)
     try:
-        remaining = {row[0] for row in conn.execute("SELECT event FROM events").fetchall()}
+        remaining = {
+            row[0]
+            for row in conn.execute("SELECT event FROM events").fetchall()
+        }
     finally:
         conn.close()
     assert remaining == {"kept_run_event"}, (
@@ -3521,7 +3432,9 @@ def test_abort_checkpoints_and_regenerates_the_projection(
     assert fence == 1
 
 
-def test_abort_now_skips_the_drain_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_abort_now_skips_the_drain_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`fleet abort --now` cancels immediately, with NO drain wait at all.
 
     The fixture deliberately keeps the shipped `wave_drain_timeout_s` default (900s, `FLEET_YAML`
@@ -3716,15 +3629,8 @@ def _put_leased(
             "                    lease_expires_at, updated_at) "
             "VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, 'host:cid:1:boot', ?, ?, ?)",
             (
-                RUN_ID,
-                repo,
-                phase,
-                attempts,
-                heartbeat_at,
-                ttl_s,
-                fence,
-                heartbeat_at,
-                "2026-08-08T12:00:00+00:00",
+                RUN_ID, repo, phase, attempts, heartbeat_at, ttl_s, fence,
+                heartbeat_at, "2026-08-08T12:00:00+00:00",
             ),
         )
     finally:
@@ -3886,18 +3792,11 @@ def _seed_pr_record(db: Path, repo: str, *, state: str, url: str) -> None:
 
     payload = json.dumps(
         {
-            "run_id": RUN_ID,
-            "repo_id": repo,
-            "wave_index": 0,
-            "branch": f"migrate/{repo}",
-            "base": "integration",
-            "title": f"migrate {repo}",
-            "body": "body",
-            "source_url": f"https://example.invalid/{repo}",
-            "source_sha": "a" * 40,
-            "state": state,
-            "url": url,
-            "created_at": "2026-08-08T12:00:00+00:00",
+            "run_id": RUN_ID, "repo_id": repo, "wave_index": 0,
+            "branch": f"migrate/{repo}", "base": "integration",
+            "title": f"migrate {repo}", "body": "body",
+            "source_url": f"https://example.invalid/{repo}", "source_sha": "a" * 40,
+            "state": state, "url": url, "created_at": "2026-08-08T12:00:00+00:00",
         }
     )
     conn = sqlite3.connect(db, isolation_level=None)
@@ -3906,15 +3805,12 @@ def _seed_pr_record(db: Path, repo: str, *, state: str, url: str) -> None:
             "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
             "                      created_at) VALUES (?, ?, ?, 'info', ?, ?, ?)",
             (
-                RUN_ID,
-                repo,
-                PR_RECORD_KIND,
+                RUN_ID, repo, PR_RECORD_KIND,
                 # ADR-0126/D122 (task-75): `_upsert_pr_record`'s fingerprint now includes a 4th
                 # component, `contract_id or ""` -- matched here (`""`, repo-owned) so a later
                 # real write for this same repo (e.g. `_pr_sync_impl`) hits the SAME `findings`
                 # row via `ux_findings_ident` instead of silently inserting a second one.
-                _fingerprint(RUN_ID, repo, PR_RECORD_KIND, ""),
-                payload,
+                _fingerprint(RUN_ID, repo, PR_RECORD_KIND, ""), payload,
                 "2026-08-08T12:00:00+00:00",
             ),
         )
@@ -3954,12 +3850,8 @@ class _MergedForge:
         else:  # pragma: no cover - an unrecognised argv is a test bug, loudly
             raise AssertionError(f"unexpected gh invocation: {call}")
         return ProcResult(
-            argv=call,
-            exit_code=0,
-            stdout_tail=stdout,
-            stderr_tail="",
-            duration_ms=1,
-            timed_out=False,
+            argv=call, exit_code=0, stdout_tail=stdout, stderr_tail="",
+            duration_ms=1, timed_out=False,
         )
 
 
@@ -3991,7 +3883,9 @@ def test_resume_repoll_prs_ingests_the_merge_the_harness_never_saw(
     conn = sqlite3.connect(db)
     try:
         stored = json.loads(
-            conn.execute("SELECT payload FROM findings WHERE kind = 'PullRequest'").fetchone()[0]
+            conn.execute(
+                "SELECT payload FROM findings WHERE kind = 'PullRequest'"
+            ).fetchone()[0]
         )
         events = [
             row[0] for row in conn.execute("SELECT event FROM events WHERE run_id = ?", (RUN_ID,))
@@ -4025,12 +3919,8 @@ class _FailingViewForge:
         self.calls.append(call)
         if call[1:3] == ("pr", "view"):
             return ProcResult(
-                argv=call,
-                exit_code=1,
-                stdout_tail="",
-                stderr_tail="HTTP 502 Bad Gateway",
-                duration_ms=1,
-                timed_out=False,
+                argv=call, exit_code=1, stdout_tail="", stderr_tail="HTTP 502 Bad Gateway",
+                duration_ms=1, timed_out=False,
             )
         raise AssertionError(f"unexpected gh invocation: {call}")  # pragma: no cover
 
@@ -4059,10 +3949,7 @@ def test_resume_repoll_prs_forge_failure_still_commits_steps_3_and_7_but_withhol
 
     db = workspace / "state" / "fleet.db"
     _seed_pr_record(
-        db,
-        "acme-commons",
-        state="DRAFTED",
-        url="https://github.invalid/acme/monorepo/pull/1",
+        db, "acme-commons", state="DRAFTED", url="https://github.invalid/acme/monorepo/pull/1",
     )
     _put_leased(db, "acme-billing", heartbeat_at=STALE_HEARTBEAT, attempts=2, fence=4, phase=2)
 
@@ -4136,9 +4023,7 @@ def test_resume_dry_run_never_reaches_the_forge_even_with_repoll_prs(
     from fleet import cli
 
     _seed_pr_record(
-        workspace / "state" / "fleet.db",
-        "acme-commons",
-        state="DRAFTED",
+        workspace / "state" / "fleet.db", "acme-commons", state="DRAFTED",
         url="https://github.invalid/acme/monorepo/pull/1",
     )
 
@@ -4164,10 +4049,7 @@ def _put_consumer_at_verify_degraded(db: Path, repo: str = "acme-commons") -> No
     conn = sqlite3.connect(db, isolation_level=None)
     try:
         for phase, status in (
-            (1, "SUCCEEDED"),
-            (2, "SUCCEEDED"),
-            (3, "SUCCEEDED"),
-            (4, "DEGRADED"),
+            (1, "SUCCEEDED"), (2, "SUCCEEDED"), (3, "SUCCEEDED"), (4, "DEGRADED"),
         ):
             conn.execute(
                 "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
@@ -4202,16 +4084,8 @@ def _put_stub(
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED_ARTIFACT', 0, 2, ?, ?)",
             (
                 "22222222-2222-4222-8222-222222222222",
-                RUN_ID,
-                consumer,
-                coord_key,
-                consumer,
-                provider,
-                "1.0.0",
-                f"//third_party/stubs/{provider}",
-                state,
-                stamp,
-                stamp,
+                RUN_ID, consumer, coord_key, consumer, provider, "1.0.0",
+                f"//third_party/stubs/{provider}", state, stamp, stamp,
             ),
         )
     finally:
@@ -4240,9 +4114,7 @@ def test_resume_reconciles_an_open_stub_unconditionally_even_without_repoll(
     _put_consumer_at_verify_degraded(db)
     _put_stub(db)
     _seed_fresh_pr_record(
-        db,
-        "acme-commons",
-        state="DRAFTED",
+        db, "acme-commons", state="DRAFTED",
         url="https://example.invalid/acme-commons",
     )
 
@@ -4302,7 +4174,9 @@ def test_resume_reconciles_an_open_stub_unconditionally_even_without_repoll(
 
     published = json.loads((workspace / "migration_state.json").read_text())
     assert published["unresolved_stubs"] == {"acme-commons": ["acme-billing@1.0.0"]}
-    assert published["repos"]["acme-commons"]["stub_states"] == {"acme-billing@1.0.0": "ABANDONED"}
+    assert published["repos"]["acme-commons"]["stub_states"] == {
+        "acme-billing@1.0.0": "ABANDONED"
+    }
     assert published["repos"]["acme-commons"]["status"] == "DEGRADED", (
         "the projection must not quietly re-label the consumer either"
     )
@@ -4344,18 +4218,11 @@ def _seed_fresh_pr_record(db: Path, repo: str, *, state: str, url: str) -> None:
     now = datetime.now(UTC).isoformat(timespec="microseconds")
     payload = json.dumps(
         {
-            "run_id": RUN_ID,
-            "repo_id": repo,
-            "wave_index": 0,
-            "branch": f"migrate/{repo}",
-            "base": "integration",
-            "title": f"migrate {repo}",
-            "body": "body",
-            "source_url": f"https://example.invalid/{repo}",
-            "source_sha": "a" * 40,
-            "state": state,
-            "url": url,
-            "created_at": now,
+            "run_id": RUN_ID, "repo_id": repo, "wave_index": 0,
+            "branch": f"migrate/{repo}", "base": "integration",
+            "title": f"migrate {repo}", "body": "body",
+            "source_url": f"https://example.invalid/{repo}", "source_sha": "a" * 40,
+            "state": state, "url": url, "created_at": now,
         }
     )
     conn = sqlite3.connect(db, isolation_level=None)
@@ -4364,14 +4231,10 @@ def _seed_fresh_pr_record(db: Path, repo: str, *, state: str, url: str) -> None:
             "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
             "                      created_at) VALUES (?, ?, ?, 'info', ?, ?, ?)",
             (
-                RUN_ID,
-                repo,
-                PR_RECORD_KIND,
+                RUN_ID, repo, PR_RECORD_KIND,
                 # ADR-0126/D122 (task-75): matches `_upsert_pr_record`'s 4-part fingerprint
                 # (`contract_id or ""`) so a later real write for this repo updates this SAME row.
-                _fingerprint(RUN_ID, repo, PR_RECORD_KIND, ""),
-                payload,
-                now,
+                _fingerprint(RUN_ID, repo, PR_RECORD_KIND, ""), payload, now,
             ),
         )
     finally:
@@ -4405,9 +4268,7 @@ def test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr(
     _put_consumer_at_verify_degraded(db)
     _put_stub(db)
     _seed_fresh_pr_record(
-        db,
-        "acme-billing",
-        state="DRAFTED",
+        db, "acme-billing", state="DRAFTED",
         url="https://github.invalid/acme/monorepo/pull/2",
     )
 
@@ -4740,10 +4601,7 @@ def test_pr_sync_does_not_fire_t1_under_manual_revalidation_policy(
     conn = sqlite3.connect(db, isolation_level=None)
     try:
         for phase, status in (
-            (1, "SUCCEEDED"),
-            (2, "SUCCEEDED"),
-            (3, "SUCCEEDED"),
-            (4, "SUCCEEDED"),
+            (1, "SUCCEEDED"), (2, "SUCCEEDED"), (3, "SUCCEEDED"), (4, "SUCCEEDED"),
         ):
             conn.execute(
                 "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
@@ -5249,9 +5107,7 @@ def _put_consumer_at_rhi(db: Path, repo: str = "acme-commons") -> None:
     conn = sqlite3.connect(db, isolation_level=None)
     try:
         for phase, status in (
-            (1, "SUCCEEDED"),
-            (2, "SUCCEEDED"),
-            (3, "SUCCEEDED"),
+            (1, "SUCCEEDED"), (2, "SUCCEEDED"), (3, "SUCCEEDED"),
             (4, "REQUIRES_HUMAN_INTERVENTION"),
         ):
             conn.execute(
@@ -5477,11 +5333,15 @@ def test_raise_budget_clears_the_sticky_halt_and_is_audited(workspace: Path) -> 
     try:
         payloads = [
             json.loads(row[0])
-            for row in conn.execute("SELECT payload FROM findings WHERE kind = 'RunBudgetRaised'")
+            for row in conn.execute(
+                "SELECT payload FROM findings WHERE kind = 'RunBudgetRaised'"
+            )
         ]
     finally:
         conn.close()
-    assert payloads == [{"halt_cleared": True, "new_max_usd": 50.0, "raised_by": "--raise-budget"}]
+    assert payloads == [
+        {"halt_cleared": True, "new_max_usd": 50.0, "raised_by": "--raise-budget"}
+    ]
 
 
 def test_raise_budget_below_committed_spend_is_refused_with_the_real_numbers(
@@ -5579,23 +5439,11 @@ sibling lane) could be writing at the same time. A reap test that cut real workt
 be reaping in a tree it does not own."""
 
 
-def _proc(
-    argv: Sequence[str],
-    exit_code: int,
-    stdout: str = "",
-    stderr: str = "",
-    *,
-    started: bool = True,
-    timed_out: bool = False,
-) -> ProcResult:
+def _proc(argv: Sequence[str], exit_code: int, stdout: str = "", stderr: str = "",
+          *, started: bool = True, timed_out: bool = False) -> ProcResult:
     return ProcResult(
-        argv=tuple(argv),
-        exit_code=exit_code,
-        stdout_tail=stdout,
-        stderr_tail=stderr,
-        duration_ms=1,
-        timed_out=timed_out,
-        started=started,
+        argv=tuple(argv), exit_code=exit_code, stdout_tail=stdout, stderr_tail=stderr,
+        duration_ms=1, timed_out=timed_out, started=started,
     )
 
 
@@ -5674,9 +5522,9 @@ def _no_test_may_reach_the_host_docker_daemon(monkeypatch: pytest.MonkeyPatch) -
     against whatever daemon the developer has running — and `docker rm --force` anything it
     matched. Autouse, because the hazard belongs to the code under test and not to the tests that
     remember to opt out of it: the default here is a daemon that reports nothing."""
-    monkeypatch.setattr(
-        "fleet.cli._reap_container_sandbox", lambda: ContainerSandbox(runner=_ScriptedDocker())
-    )
+    monkeypatch.setattr("fleet.cli._reap_container_sandbox", lambda: ContainerSandbox(
+        runner=_ScriptedDocker()
+    ))
 
 
 def _git_in(repo: Path, *args: str) -> None:
@@ -5687,9 +5535,7 @@ def _git_in(repo: Path, *args: str) -> None:
     `WorktreeManager` will invoke, and that is whatever `git_bin="git"` resolves to."""
     subprocess.run(  # noqa: S603 - fixed argv built here, never a shell, no test input
         ["git", *args],  # noqa: S607 - `git` from PATH, as every suite in this repo does
-        cwd=repo,
-        check=True,
-        capture_output=True,
+        cwd=repo, check=True, capture_output=True,
     )
 
 
@@ -6096,8 +5942,7 @@ def test_resume_dry_run_preview_spares_the_container_a_live_row_claims(
     # set is computed before the preview and is what the deleted filter would have CONSULTED.
     assert docker.removed == [], "a --dry-run removed a container"
     assert payload["live_sandbox_names"] == [
-        _sandbox("acme-commons", 2),
-        _sandbox("acme-commons", 3),
+        _sandbox("acme-commons", 2), _sandbox("acme-commons", 3),
     ], "the filter under test was handed an empty live set, so it had no input to reject"
     # The DISCRIMINATING assertion.
     assert payload["reaped_containers"]["reaped"] == [orphan_container], (
@@ -6284,7 +6129,9 @@ def test_a_no_continue_resume_says_step_8_was_withheld_rather_than_absent(
     assert "absent" not in output, (
         f"the report calls a §11.5 step absent beside the output of the steps that ran: {output!r}"
     )
-    assert "continued" not in output, "a withheld continuation is reported as one that ran"
+    assert "continued" not in output, (
+        "a withheld continuation is reported as one that ran"
+    )
 
 
 def test_a_scan_floor_is_named_in_the_payload_and_never_served(workspace: Path) -> None:
@@ -6506,9 +6353,8 @@ def test_a_forge_failure_under_repoll_prs_still_reconciles_and_then_reports(
 
     db = workspace / "state" / "fleet.db"
     _put_leased(db, "acme-commons", heartbeat_at=STALE_HEARTBEAT, attempts=2, fence=4)
-    _seed_pr_record(
-        db, "acme-billing", state="DRAFTED", url="https://github.invalid/acme/monorepo/pull/2"
-    )
+    _seed_pr_record(db, "acme-billing", state="DRAFTED",
+                    url="https://github.invalid/acme/monorepo/pull/2")
 
     async def unauthenticated(argv: Sequence[str], **_kwargs: Any) -> ProcResult:
         """The post-crash host: `gh` is there, the credentials are not."""
@@ -6595,9 +6441,9 @@ def test_raise_budget_refuses_to_lower_a_ceiling(workspace: Path) -> None:
     conn = sqlite3.connect(db)
     try:
         assert (
-            conn.execute("SELECT COUNT(*) FROM findings WHERE kind = 'RunBudgetRaised'").fetchone()[
-                0
-            ]
+            conn.execute(
+                "SELECT COUNT(*) FROM findings WHERE kind = 'RunBudgetRaised'"
+            ).fetchone()[0]
             == 0
         )
     finally:
@@ -6672,9 +6518,7 @@ def _git_out(repo: Path, *args: str) -> str:
     """The read half of `_git_in`, kept beside it for the same reason: one fixed-argv site."""
     return subprocess.run(  # noqa: S603 - fixed argv built here, never a shell, no test input
         ["git", "-C", str(repo), *args],  # noqa: S607 - `git` from PATH, as every suite does
-        check=True,
-        capture_output=True,
-        text=True,
+        check=True, capture_output=True, text=True,
     ).stdout.strip()
 
 
@@ -6742,16 +6586,8 @@ def _seed_running_task(
             "                    pre_commit_sha, heartbeat_at, lease_owner, lease_fence, "
             "                    updated_at) "
             "VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?, 'host:cid:1:boot', 4, ?)",
-            (
-                RUN_ID,
-                repo_id,
-                ARB_PHASE,
-                attempts,
-                base_ref,
-                phase_anchor,
-                heartbeat_at,
-                "2026-08-08T12:00:00+00:00",
-            ),
+            (RUN_ID, repo_id, ARB_PHASE, attempts, base_ref, phase_anchor, heartbeat_at,
+             "2026-08-08T12:00:00+00:00"),
         )
         conn.execute(
             "INSERT INTO tasks (task_id, run_id, repo_id, phase, kind, dest_path, status, "
@@ -6764,15 +6600,8 @@ def _seed_running_task(
                 "INSERT INTO attempts (attempt_id, run_id, repo_id, task_id, phase, attempt, "
                 "                      command, exit_code, started_at, finished_at) "
                 'VALUES (?, ?, ?, ?, ?, 1, \'["git","apply"]\', 0, ?, ?)',
-                (
-                    attempt_id,
-                    RUN_ID,
-                    repo_id,
-                    task_id,
-                    ARB_PHASE,
-                    "2026-08-08T12:00:00+00:00",
-                    "2026-08-08T12:00:01+00:00",
-                ),
+                (attempt_id, RUN_ID, repo_id, task_id, ARB_PHASE,
+                 "2026-08-08T12:00:00+00:00", "2026-08-08T12:00:01+00:00"),
             )
     finally:
         conn.close()
@@ -6912,7 +6741,7 @@ def test_resume_step4_discards_the_worktree_of_a_task_whose_commit_never_landed(
 def test_resume_step4_recreates_the_missing_anchor_at_the_sha_it_named_not_at_the_tip(
     workspace: Path,
 ) -> None:
-    """ "The anchor ref itself is re-created from `phases.base_ref` if it is missing" (§11.5 step 4).
+    """"The anchor ref itself is re-created from `phases.base_ref` if it is missing" (§11.5 step 4).
 
     The ref lives in Git and its NAME lives in SQLite (§11.5's authority table), so a lost ref is
     recoverable from `phases.pre_commit_sha` — and only from there. **Re-cutting it at the branch
@@ -7216,7 +7045,6 @@ def test_resume_step4_corrects_a_fabricated_attempts_commit_sha_pointing_off_bra
     assert not (worktree / "rogue.java").exists(), (
         "the worktree was checked out onto the fabricated, off-branch commit"
     )
-
 
 # --------------------------------------------------------------------------------------
 # exit 9 — the disk ceiling the spec declared and nothing enforced
@@ -7571,7 +7399,8 @@ def test_a_disk_ceiling_refusal_leaves_a_prior_projection_file_untouched(
     from tests.test_scan_e2e import _fresh_db as e2e_fresh_db
 
     sources = {
-        name: _make_repo(tmp_path / "sources", name, files) for name, files in FIXTURE_REPOS.items()
+        name: _make_repo(tmp_path / "sources", name, files)
+        for name, files in FIXTURE_REPOS.items()
     }
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -7667,7 +7496,6 @@ def _init_repo_with_two_commits(repo: Path) -> str:
     """A real two-commit git repo: `dest/good.ts` and `dest/bad.ts` at HEAD~1, both edited at
     HEAD. Returns the HEAD~1 sha — `_transform_criterion` diffs against it via `git`, not a
     fake, so the fixture has to be real git history."""
-
     def git(*args: str) -> None:
         subprocess.run(  # noqa: S603
             ["git", "-C", str(repo), *args],  # noqa: S607 - "git" from PATH, as every suite does
@@ -7780,7 +7608,8 @@ def test_probe_indeterminate_blocks_and_does_not_stop_the_rest_of_the_repos_file
 
     config = write_config(
         tmp_path,
-        fleet=FLEET_YAML + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
+        fleet=FLEET_YAML
+        + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
         "fake_indeterminate_engine\n",
     )
     settings = FleetSettings.load(config.parent)
@@ -7805,7 +7634,9 @@ def test_probe_indeterminate_blocks_and_does_not_stop_the_rest_of_the_repos_file
     )
     evidence = _TransformEvidence()
     evidence.record(
-        TransformOutput(repo_id="repo1", rewritten=["dest/bad.ts", "dest/good.ts"], unresolved=[])
+        TransformOutput(
+            repo_id="repo1", rewritten=["dest/bad.ts", "dest/good.ts"], unresolved=[]
+        )
     )
 
     violations, unprobed = asyncio.run(
@@ -7856,7 +7687,8 @@ def test_engine_unavailable_is_deduped_per_repo_and_engine_not_per_file(
 
     config = write_config(
         tmp_path,
-        fleet=FLEET_YAML + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
+        fleet=FLEET_YAML
+        + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
         "fake_unavailable_engine\n",
     )
     settings = FleetSettings.load(config.parent)
@@ -7881,7 +7713,9 @@ def test_engine_unavailable_is_deduped_per_repo_and_engine_not_per_file(
     )
     evidence = _TransformEvidence()
     evidence.record(
-        TransformOutput(repo_id="repo1", rewritten=["dest/bad.ts", "dest/good.ts"], unresolved=[])
+        TransformOutput(
+            repo_id="repo1", rewritten=["dest/bad.ts", "dest/good.ts"], unresolved=[]
+        )
     )
 
     violations, unprobed = asyncio.run(
@@ -7937,7 +7771,8 @@ def test_rewritten_path_no_rule_claims_reaches_unprobed_not_silently_skipped(
 
     config = write_config(
         tmp_path,
-        fleet=FLEET_YAML + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
+        fleet=FLEET_YAML
+        + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
         "fake_indeterminate_engine\n",
     )
     settings = FleetSettings.load(config.parent)
@@ -8029,7 +7864,8 @@ def test_no_rule_match_and_missing_engine_are_separate_unprobed_entries(
 
     config = write_config(
         tmp_path,
-        fleet=FLEET_YAML + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
+        fleet=FLEET_YAML
+        + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
         "fake_unavailable_engine\n",
     )
     settings = FleetSettings.load(config.parent)
@@ -8211,7 +8047,8 @@ def test_parse_probe_returning_false_is_a_genuine_violation_not_unprobed(
 
     config = write_config(
         tmp_path,
-        fleet=FLEET_YAML + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
+        fleet=FLEET_YAML
+        + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
         "fake_probe_false_engine\n",
     )
     settings = FleetSettings.load(config.parent)
@@ -8236,7 +8073,9 @@ def test_parse_probe_returning_false_is_a_genuine_violation_not_unprobed(
     )
     evidence = _TransformEvidence()
     evidence.record(
-        TransformOutput(repo_id="repo1", rewritten=["dest/bad.ts", "dest/good.ts"], unresolved=[])
+        TransformOutput(
+            repo_id="repo1", rewritten=["dest/bad.ts", "dest/good.ts"], unresolved=[]
+        )
     )
 
     violations, unprobed = asyncio.run(
@@ -8414,12 +8253,8 @@ def test_transform_max_patch_bytes_is_threaded_from_settings_to_rewrite_input(
             try:
                 repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
                 build = _transform_payloads(
-                    settings,
-                    {"repo1": plan},
-                    rules=[],
-                    repository=repository,
-                    read_conn=read_conn,
-                    run_id=RUN_ID,
+                    settings, {"repo1": plan}, rules=[],
+                    repository=repository, read_conn=read_conn, run_id=RUN_ID,
                 )
                 return await build(
                     repo_id="repo1", phase=Phase.TRANSFORM, attempt=1, remaining_units=None
@@ -8498,12 +8333,8 @@ def test_transform_payloads_threads_a_non_none_remaining_units_through_as_a_tupl
             try:
                 repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
                 build = _transform_payloads(
-                    settings,
-                    {"repo1": plan},
-                    rules=[],
-                    repository=repository,
-                    read_conn=read_conn,
-                    run_id=RUN_ID,
+                    settings, {"repo1": plan}, rules=[],
+                    repository=repository, read_conn=read_conn, run_id=RUN_ID,
                 )
                 return await build(
                     repo_id="repo1",
@@ -9281,45 +9112,29 @@ async def test_attempt_writer_increments_retry_ordinal_for_a_repeated_identical_
         try:
             repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
             await repo.upsert_run(
-                "run-retry-ordinal",
-                started_at=now,
-                config_sha256="a" * 64,
+                "run-retry-ordinal", started_at=now, config_sha256="a" * 64,
                 harness_version="0.1.0",
             )
             await repo.upsert_repo(
-                "acme-commons",
-                name="acme-commons",
-                url="https://example.invalid/acme-commons.git",
-                now=now,
+                "acme-commons", name="acme-commons",
+                url="https://example.invalid/acme-commons.git", now=now,
             )
             attempts = _AttemptWriter(
-                writer=writer,
-                repository=repo,
-                read_conn=read_conn,
-                run_id="run-retry-ordinal",
-                clock=lambda: now,
+                writer=writer, repository=repo, read_conn=read_conn,
+                run_id="run-retry-ordinal", clock=lambda: now,
             )
             first_written = await attempts.record(
-                repo_id="acme-commons",
-                phase=Phase.BUILD,
-                attempt=1,
-                tier="DETERMINISTIC",
-                context_policy=None,
-                integration_ref="",
-                steps=[same_step],
-                error=None,
+                repo_id="acme-commons", phase=Phase.BUILD, attempt=1, tier="DETERMINISTIC",
+                context_policy=None, integration_ref="", steps=[same_step], error=None,
             )
             second_written = await attempts.record(
-                repo_id="acme-commons",
-                phase=Phase.BUILD,
-                attempt=1,
-                tier="DETERMINISTIC",
-                context_policy=None,
-                integration_ref="",
-                steps=[same_step],
-                error=None,
+                repo_id="acme-commons", phase=Phase.BUILD, attempt=1, tier="DETERMINISTIC",
+                context_policy=None, integration_ref="", steps=[same_step], error=None,
             )
-            rows = {row.attempt_id: row async for row in repo.iter_attempts("run-retry-ordinal")}
+            rows = {
+                row.attempt_id: row
+                async for row in repo.iter_attempts("run-retry-ordinal")
+            }
         finally:
             await read_conn.close()
 
@@ -9356,53 +9171,34 @@ async def test_build_sink_leaves_post_commit_sha_untouched_when_nothing_publishe
         try:
             repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
             await repo.upsert_run(
-                "run-no-publish",
-                started_at=now,
-                config_sha256="a" * 64,
+                "run-no-publish", started_at=now, config_sha256="a" * 64,
                 harness_version="0.1.0",
             )
             await repo.upsert_repo(
-                "acme-commons",
-                name="acme-commons",
-                url="https://example.invalid/acme-commons.git",
-                now=now,
+                "acme-commons", name="acme-commons",
+                url="https://example.invalid/acme-commons.git", now=now,
             )
 
             async def seed_phase(conn: aiosqlite.Connection) -> None:
                 await conn.execute(
                     "INSERT INTO phases (run_id, repo_id, phase, status, post_commit_sha, "
                     "                    lease_fence, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        "run-no-publish",
-                        "acme-commons",
-                        int(Phase.BUILD),
-                        "RUNNING",
-                        preexisting_sha,
-                        0,
-                        now.isoformat(),
-                    ),
+                    ("run-no-publish", "acme-commons", int(Phase.BUILD), "RUNNING",
+                     preexisting_sha, 0, now.isoformat()),
                 )
 
             await writer.submit(seed_phase)
 
             attempts = _AttemptWriter(
-                writer=writer,
-                repository=repo,
-                read_conn=read_conn,
-                run_id="run-no-publish",
-                clock=lambda: now,
+                writer=writer, repository=repo, read_conn=read_conn,
+                run_id="run-no-publish", clock=lambda: now,
             )
             sink = _BuildSink(
-                attempts=attempts,
-                writer=writer,
-                run_id="run-no-publish",
-                evidence=_BuildEvidence(),
-                clock=lambda: now,
+                attempts=attempts, writer=writer, run_id="run-no-publish",
+                evidence=_BuildEvidence(), clock=lambda: now,
             )
             await sink(
-                repo_id="acme-commons",
-                phase=Phase.BUILD,
-                fence=0,
+                repo_id="acme-commons", phase=Phase.BUILD, fence=0,
                 result=WorkerResult[BuildOutput](
                     status="ok",
                     output=BuildOutput(repo_id="acme-commons", build_ok=False),
@@ -9451,42 +9247,26 @@ async def test_verify_sink_persists_the_report_when_the_dispatch_produced_one(
         try:
             repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
             await repo.upsert_run(
-                run_id,
-                started_at=now,
-                config_sha256="a" * 64,
-                harness_version="0.1.0",
+                run_id, started_at=now, config_sha256="a" * 64, harness_version="0.1.0",
             )
             await repo.upsert_repo(
-                "acme-commons",
-                name="acme-commons",
-                url="https://example.invalid/acme-commons.git",
-                now=now,
+                "acme-commons", name="acme-commons",
+                url="https://example.invalid/acme-commons.git", now=now,
             )
             attempts = _AttemptWriter(
-                writer=writer,
-                repository=repo,
-                read_conn=read_conn,
-                run_id=run_id,
-                clock=lambda: now,
+                writer=writer, repository=repo, read_conn=read_conn,
+                run_id=run_id, clock=lambda: now,
             )
             sink = _VerifySink(
-                attempts=attempts,
-                evidence=_VerifyEvidence(),
-                writer=writer,
-                run_id=run_id,
-                clock=lambda: now,
+                attempts=attempts, evidence=_VerifyEvidence(), writer=writer,
+                run_id=run_id, clock=lambda: now,
             )
             report = VerificationReport(
-                run_id=uuid_mod.UUID(int=0),
-                repo_id="acme-commons",
-                build_ok=True,
-                test_ok=True,
-                verdict="PASS",
+                run_id=uuid_mod.UUID(int=0), repo_id="acme-commons",
+                build_ok=True, test_ok=True, verdict="PASS",
             )
             await sink(
-                repo_id="acme-commons",
-                phase=Phase.VERIFY,
-                fence=0,
+                repo_id="acme-commons", phase=Phase.VERIFY, fence=0,
                 result=WorkerResult[VerifyOutput](
                     status="ok",
                     output=VerifyOutput(repo_id="acme-commons", report=report),
@@ -9896,15 +9676,8 @@ def _step5_seed(
             conn.execute(
                 "INSERT INTO phases (run_id, repo_id, phase, status, attempts, post_commit_sha, "
                 "                    updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    RUN_ID,
-                    repo_id,
-                    phase,
-                    status,
-                    attempts,
-                    post_commit_sha.get(phase),
-                    "2026-08-08T12:00:00+00:00",
-                ),
+                (RUN_ID, repo_id, phase, status, attempts,
+                 post_commit_sha.get(phase), "2026-08-08T12:00:00+00:00"),
             )
     finally:
         conn.close()
@@ -10345,10 +10118,9 @@ def test_resume_step_5_refuses_a_floor_whose_phase_rows_moved_under_it(
     )
     conn = sqlite3.connect(db)
     try:
-        assert (
-            conn.execute("SELECT COUNT(*) FROM findings WHERE kind = 'PhaseDemoted'").fetchone()[0]
-            == 0
-        ), "a PhaseDemoted finding was minted for a demotion that was refused"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM findings WHERE kind = 'PhaseDemoted'"
+        ).fetchone()[0] == 0, "a PhaseDemoted finding was minted for a demotion that was refused"
     finally:
         conn.close()
 
@@ -10450,18 +10222,16 @@ def test_resume_step_5_leaves_a_repo_at_its_floor_alone_and_says_which(
     result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
     assert result.exit_code == ExitCode.SUCCESS, result.output
     assert "step 5: acme-commons unchanged — every phase has already settled" in result.output
-    assert "step 5: acme-billing unchanged — a phase requires human intervention" in result.output
+    assert (
+        "step 5: acme-billing unchanged — a phase requires human intervention" in result.output
+    )
     assert "step 5: demoted" not in result.output
     assert "would demote" not in result.output
     conn = sqlite3.connect(db)
     try:
         rows = conn.execute("SELECT phase, status FROM phases WHERE repo_id = 'acme-billing'")
-        assert dict(rows) == {
-            1: "SUCCEEDED",
-            2: "REQUIRES_HUMAN_INTERVENTION",
-            3: "PENDING",
-            4: "PENDING",
-        }, "§12 item 46 (ii): a sweep moved an RHI repo"
+        assert dict(rows) == {1: "SUCCEEDED", 2: "REQUIRES_HUMAN_INTERVENTION", 3: "PENDING",
+                              4: "PENDING"}, "§12 item 46 (ii): a sweep moved an RHI repo"
     finally:
         conn.close()
     assert _db_dump(db) == before, "a run with nothing to demote still wrote to the database"
@@ -10825,9 +10595,9 @@ def test_promote_one_pr_leaves_a_conflicting_rebase_untouched(tmp_path: Path) ->
     )
 
     assert reason is not None and "conflicted" in reason, reason
-    assert _sh(clone, "rev-parse", "migrate/acme-lib-py") == pre_tip, (
-        "the local branch must be untouched"
-    )
+    assert (
+        _sh(clone, "rev-parse", "migrate/acme-lib-py") == pre_tip
+    ), "the local branch must be untouched"
     assert asyncio.run(git.resolve("REBASE_HEAD")) is None, "the rebase must have been aborted"
     assert _sh(remote, "rev-parse", "refs/heads/migrate/acme-lib-py") == pre_remote_tip
     assert not body_path.exists()
@@ -10910,6 +10680,7 @@ def test_promote_one_pr_reports_a_failed_body_edit_and_never_pushes_or_marks_rea
     assert _sh(remote, "rev-parse", "refs/heads/migrate/acme-lib-py") == pre_remote_tip, (
         "a failed body edit must not leave the branch force-pushed anyway"
     )
+
 
 
 # --------------------------------------------------------------------------------------
@@ -11022,7 +10793,8 @@ async def _seed_stub_trigger_fixture(
                     (coord_keys[0], "acme-provider"),
                 )
                 await conn.execute(
-                    "UPDATE phases SET status = ?  WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                    "UPDATE phases SET status = ? "
+                    " WHERE run_id = ? AND repo_id = ? AND phase = ?",
                     (provider_status, RUN_ID, "acme-provider", int(Phase.TRANSFORM)),
                 )
 
@@ -11293,7 +11065,9 @@ async def test_detect_transform_stub_triggers_inherits_for_a_real_second_layer_d
             too_early = await _detect_transform_stub_triggers(
                 read_conn, settings, RUN_ID, ["acme-second-consumer"]
             )
-            assert too_early == (), "D must find nothing before C's own stub exists, fix or no fix"
+            assert too_early == (), (
+                "D must find nothing before C's own stub exists, fix or no fix"
+            )
 
             # `C`'s own wave detection + creation — unmodified code, proven by the tests above.
             c_triggers = await _detect_transform_stub_triggers(
@@ -11445,7 +11219,9 @@ async def test_pr_impl_admits_a_second_layer_dependent_and_reports_stub_limited_
                     verified_against_stubs=sorted(stubs_for_repo),
                     stub_fidelity=stubs_for_repo,
                 )
-                await _record_verification(writer, RUN_ID, repo_id, report, seed="", now=now)
+                await _record_verification(
+                    writer, RUN_ID, repo_id, report, seed="", now=now
+                )
         finally:
             await read_conn.close()
 
@@ -12047,7 +11823,9 @@ def test_models_check_reports_unregistered_backends_and_strict_fails_closed(
     monkeypatch.setattr(
         cli_module,
         "registry",
-        lambda: {name: backend for name, backend in live_registry().items() if name != "anthropic"},
+        lambda: {
+            name: backend for name, backend in live_registry().items() if name != "anthropic"
+        },
     )
 
     lenient = runner.invoke(app, [*base_args(workspace), "--json", "models", "check"])

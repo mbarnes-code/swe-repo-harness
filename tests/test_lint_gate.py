@@ -360,10 +360,27 @@ def test_ruff_check_is_clean_across_the_whole_repository():
 # session touched (33 files, `git diff --stat <session-base>..main -- tests/`) rather than the
 # whole repo (pre-existing dirty files outside this session's own footprint stay out of scope,
 # per `docs/CRITERIA_PLAN.md` §2's done bar) — 20 of the 33 needed reformatting. Re-measured
-# directly post-format: `ruff format --check --no-cache .` -> **113** dirty, net lower than the
+# directly post-format: `ruff format --check --no-cache .` -> 113 dirty, net lower than the
 # prior 122 baseline (this session's new files, once formatted, count as clean; no file outside
-# this session's touched set changed status). No test behavior changed (formatting only).
-_RUFF_FORMAT_DIRTY_BASELINE = 113
+# this session's touched set changed status).
+#
+# Self-caught regression, fixed same session. That blanket reformat broke a real invariant:
+# `ruff format` reflows a multi-parameter function signature onto one line per parameter, and
+# this codebase's convention of one trailing suppression comment (a "noqa" directive naming
+# F811) covering every fixture-shadowing parameter on that one shared line does not survive the
+# split -- only the parameter left on the suppression comment's own line stays covered; the
+# others become newly-real `ruff check` failures (104 F811 + 33 stale unused-suppression + 4
+# unrelated S607/E501 picked up by the same 4 files, 111 fresh errors -- `ruff check .` went
+# from clean to failing). Caught immediately by re-running `ruff check` after the format pass,
+# per this project's own "verify the resolved value" -- not discovered by trusting the format
+# command's silence. Fix: reverted formatting on exactly the 4 affected files (test_build_e2e.py,
+# test_build_pass2_snapshot.py, test_cli.py, test_pr_e2e.py -- all pre-existing
+# multi-fixture-parameter suppression sites, none newly written this session) rather than
+# hand-patching ~40 suppression sites across them, since reformatting was never required in the
+# first place (Section 2's done bar). Re-measured after the revert: `ruff check --no-cache .` ->
+# clean; `ruff format --check --no-cache .` -> 117 dirty (113 + the 4 reverted files). No test
+# behavior changed anywhere in this whole correction (formatting/revert only).
+_RUFF_FORMAT_DIRTY_BASELINE = 117
 
 _FORMAT_PER_FILE = re.compile(
     r"^(?P<path>\S+):\d+:\d+: unformatted: File would be reformatted$", re.MULTILINE
