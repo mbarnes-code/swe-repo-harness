@@ -619,6 +619,94 @@ async def test_buildgen_renders_both_files_from_code_and_resolves_versions_by_mv
     assert '"1.5"' in module_text
 
 
+async def test_a_pre_existing_hand_written_bazel_file_with_different_content_is_collected(
+    tmp_path,
+) -> None:
+    """SECURITY_REVIEW.md item #2: `_write()` still overwrites unconditionally (that part is
+    accepted, disclosed behavior) — but a pre-existing `BUILD.bazel`/`MODULE.bazel` whose content
+    DIFFERS from what's about to be rendered must be named in `output.overwritten_bazel_files`
+    before the overwrite happens, so Task 13 has something to disclose.
+    """
+    dest_dir = tmp_path / "java/com/acme/widget"
+    dest_dir.mkdir(parents=True)
+    (dest_dir / "BUILD.bazel").write_text("# hand-written, not what buildgen renders\n")
+    (tmp_path / "MODULE.bazel").write_text("# hand-written module file\n")
+
+    ctx = make_ctx(tmp_path)
+    result = await BuildgenWorker().run(
+        ctx,
+        BuildgenInput(
+            unit=_unit(),
+            targets=[
+                BuildTarget(
+                    package="java/com/acme/widget",
+                    name="widget",
+                    rule="java_library",
+                    srcs=["Widget.java"],
+                )
+            ],
+            workspace_deps=[_dep()],
+            requirements=[
+                ExternalRequirement(
+                    coord_key="maven:com.acme:commons", repo_id="acme-a", version_spec=">=1.2"
+                ),
+            ],
+            ruleset_versions={"rules_jvm_external": "6.0"},
+        ),
+    )
+    assert result.status == "ok"
+    out = result.output
+    assert out is not None
+    assert len(out.overwritten_bazel_files) == 2, out.overwritten_bazel_files
+    assert any(out.build_bazel_path in note for note in out.overwritten_bazel_files)
+    assert any(out.module_bazel_path in note for note in out.overwritten_bazel_files)
+    # the overwrite itself still happened — detection does not change `_write()`'s behavior
+    assert "java_library(" in read(out.build_bazel_path)
+    assert 'bazel_dep(name = "rules_jvm_external"' in read(out.module_bazel_path)
+
+
+async def test_no_pre_existing_file_or_an_identical_one_collects_nothing(tmp_path) -> None:
+    """The second half of item #2's detection: no entry when there is nothing to silently lose.
+
+    Two sub-cases in one test, per the brief: no pre-existing file at all (the ordinary first-run
+    case), and a pre-existing file whose content is already byte-identical to what would be
+    rendered (not a loss, so not reported, per the finding's own framing).
+    """
+    ctx = make_ctx(tmp_path)
+    payload = BuildgenInput(
+        unit=_unit(),
+        targets=[
+            BuildTarget(
+                package="java/com/acme/widget",
+                name="widget",
+                rule="java_library",
+                srcs=["Widget.java"],
+            )
+        ],
+        workspace_deps=[_dep()],
+        requirements=[
+            ExternalRequirement(
+                coord_key="maven:com.acme:commons", repo_id="acme-a", version_spec=">=1.2"
+            ),
+        ],
+        ruleset_versions={"rules_jvm_external": "6.0"},
+    )
+
+    result = await BuildgenWorker().run(ctx, payload)
+    assert result.status == "ok"
+    out = result.output
+    assert out is not None
+    assert out.overwritten_bazel_files == [], "nothing pre-existing on a first run"
+
+    # Re-running against the now-generated (identical) files must not report them either.
+    ctx2 = make_ctx(tmp_path)
+    result2 = await BuildgenWorker().run(ctx2, payload)
+    assert result2.status == "ok"
+    out2 = result2.output
+    assert out2 is not None
+    assert out2.overwritten_bazel_files == [], "identical content is not a silent loss"
+
+
 async def test_a_model_pin_that_hides_a_violated_spec_is_rejected_before_it_is_written(
     tmp_path,
 ) -> None:

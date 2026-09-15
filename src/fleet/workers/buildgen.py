@@ -238,6 +238,15 @@ class BuildgenOutput(WorkerOutput):
     authored_by_model: bool = Field(
         default=False, description="§3.3's `build_authoring` escape hatch produced the targets"
     )
+    overwritten_bazel_files: list[str] = Field(
+        default_factory=list,
+        description="SECURITY_REVIEW.md item #2: one line per `BUILD.bazel`/`MODULE.bazel` path "
+        "that already existed in the worktree with content DIFFERENT from what `_write()` was "
+        "about to render, collected before the overwrite happens. `_write()` itself is unchanged "
+        "— the overwrite is accepted, disclosed behavior — this is only the record of when it "
+        "silently discarded something. Empty when there was nothing pre-existing, or when the "
+        "pre-existing content was already byte-identical to the generated text.",
+    )
 
 
 @register_worker
@@ -387,6 +396,9 @@ class BuildgenWorker(BaseWorker[BuildgenInput, BuildgenOutput]):
                     exception_type=f"{type(breach).__module__}.{type(breach).__qualname__}",
                 ),
             )
+        overwrite_note = _preexisting_overwrite_note(build_path, text)
+        if overwrite_note is not None:
+            output.overwritten_bazel_files.append(overwrite_note)
         _write(build_path, text)
         output.build_bazel_path = str(build_path)
         # D10: the files the generated text NAMES, written in the same unit that writes the text.
@@ -578,6 +590,9 @@ class BuildgenWorker(BaseWorker[BuildgenInput, BuildgenOutput]):
             single_version_overrides=overrides or None,
         )
         module_path = Path(ctx.workdir) / payload.module_bazel_path
+        overwrite_note = _preexisting_overwrite_note(module_path, text)
+        if overwrite_note is not None:
+            output.overwritten_bazel_files.append(overwrite_note)
         _write(module_path, text)
         output.module_bazel_path = str(module_path)
         output.selected_versions = selected
@@ -673,6 +688,25 @@ def _write(path: Path, text: str) -> None:
     """Write a generated file, creating its package directory. Generated, never hand-edited."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _preexisting_overwrite_note(path: Path, text: str) -> str | None:
+    """SECURITY_REVIEW.md item #2: detection only, called before `_write()` replaces `path`.
+
+    `None` unless `path` already exists with content that DIFFERS from `text` — a byte-identical
+    rewrite is not a silent loss (per the finding's own framing) and gets no entry. An unreadable
+    existing file (not valid UTF-8) still counts as "different": whatever is there is certainly
+    not the generated text, and refusing to compare must not be read as "nothing to report."
+    """
+    if not path.exists():
+        return None
+    try:
+        existing = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return f"{path}: replaced a pre-existing hand-written Bazel file"
+    if existing == text:
+        return None
+    return f"{path}: replaced a pre-existing hand-written Bazel file"
 
 
 def materialize(root: Path, files: Sequence[SupportFile]) -> list[str]:
