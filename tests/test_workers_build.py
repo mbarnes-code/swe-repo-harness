@@ -3888,6 +3888,37 @@ async def test_prwriter_prose_is_optional_and_the_verdict_never_comes_from_the_m
     assert bare.output.pr.title.startswith("[fleet wave 2]")
 
 
+async def test_prwriter_redacts_a_secret_shaped_title_and_body_from_the_model(tmp_path) -> None:
+    """SECURITY_REVIEW.md finding #4's ESCALATION: `write_pr_title`/`write_pr_body` prose is the
+    ONE thing a model may contribute to a PR (the test above: "the verdict never comes from the
+    model"), and it is posted PUBLICLY to GitHub/Gitea on every `fleet pr` create. A model that
+    echoes a secret-shaped string — evidence it was handed, or a value it hallucinates verbatim
+    from training data — must never reach the opened PR's title or body, mirroring
+    `tests/test_pr_body_redaction.py`'s coverage of the `relocation_summary` channel but for the
+    LLM prose channel `_compose` itself renders.
+    """
+    pat = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+    gh = gh_runner()
+    model = FakeModelClient(
+        {
+            "pr_body": PrBody(
+                body=f"Copied config from https://oauth2:{pat}@gitea.local/x.git", highlights=()
+            ),
+            "pr_title": PrTitle(title=f"migrate acme-widget {pat}"),
+        }
+    )
+    result = await PrwriterWorker(runner=gh).run(
+        make_ctx(tmp_path, model=model), a_pr_payload(log_dir=str(tmp_path / "logs"))
+    )
+    out = result.output
+    assert out is not None and out.pr is not None
+    assert pat not in out.pr.title, f"a live PAT reached the PR title: {out.pr.title!r}"
+    assert pat not in out.pr.body, f"a live PAT reached the PR body: {out.pr.body!r}"
+    assert "github_pat_" not in out.pr.title and "github_pat_" not in out.pr.body
+    assert "«redacted:" in out.pr.title
+    assert "«redacted:" in out.pr.body
+
+
 async def test_prwriter_refuses_a_failed_verification_and_a_foreign_report(tmp_path) -> None:
     """A PR opened on a `FAIL` report presents a red verification as reviewable work; a PR
     rendered from another repo's report is the one error a reviewer cannot catch by reading it."""

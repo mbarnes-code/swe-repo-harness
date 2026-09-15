@@ -355,3 +355,31 @@ def test_render_prompt_returns_an_immutable_turn_sequence() -> None:
     change what was sent without changing what was keyed."""
     messages: Sequence[object] = render_prompt(Role.PR_TITLE, {"repo": "x"})
     assert isinstance(messages, tuple)
+
+
+def test_render_prompt_redacts_a_secret_shaped_string_in_evidence() -> None:
+    """SECURITY_REVIEW.md finding #4: `render_prompt` builds every outbound LLM request by
+    `json.dumps`-serializing the caller's evidence directly, with no call anywhere to
+    `redact()`/`redact_mapping()` — the one gap in `obs/redact.py`'s own stated design goal of a
+    single redaction call wired into EVERY egress boundary. Concretely,
+    `workers/rewrite.py::_evidence()` puts the raw, unredacted current file content into evidence
+    as `current_content`; if that file holds a checked-in secret, it reached the LLM backend
+    verbatim. Same PAT-shaped fixture `tests/test_pr_body_redaction.py` uses for the sibling
+    PR-body/title egress boundary.
+    """
+    pat = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+    evidence = {
+        "repo_id": "acme-widget",
+        "current_content": f'API_TOKEN = "{pat}"\nprint("hello world")\n',
+    }
+    messages = render_prompt(Role.TRANSFORM_REPAIR, evidence)
+    rendered = "\n".join(message.content for message in messages)
+    assert pat not in rendered, f"a live PAT reached the outbound LLM message: {rendered!r}"
+    assert "github_pat_" not in rendered
+    # `render_prompt` serializes with `ensure_ascii=True` (its own docstring: "a locale cannot
+    # change the bytes"), so the `«»` placeholder delimiters are the `\uXXXX`-escaped form here.
+    assert "\\u00abredacted:" in rendered, "the placeholder must survive, or debugging is blind"
+    # The control: ordinary source code around the secret must pass through unredacted (JSON-
+    # escaped, like the rest of the rendered evidence).
+    assert 'print(\\"hello world\\")' in rendered
+    assert "acme-widget" in rendered

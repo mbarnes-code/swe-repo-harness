@@ -56,6 +56,7 @@ from fleet.models.enums import (
     StubState,
 )
 from fleet.models.tasks import PullRequestDraft, TokenUsage, VerificationReport
+from fleet.obs.redact import redact_text
 from fleet.orchestrator.registry import register_worker
 from fleet.util.errors import exception_type_name
 from fleet.util.proc import CommandRunner
@@ -442,7 +443,7 @@ class PrwriterWorker(BaseWorker[PrwriterInput, PrwriterOutput]):
                 title = proposed.value.title
                 usage = accumulate(usage, proposed.usage)
         body = render_body(payload, repo_id=ctx.repo_id, draft=draft, notes=notes)
-        return title[:120], body, usage
+        return redact_text(title)[:120], body, usage
 
     def _body_path(self, ctx: WorkerContext, payload: PrwriterInput) -> Path:
         return (
@@ -588,7 +589,7 @@ def render_body(
         ]
     if notes:
         lines += ["", "### Migration notes", "", notes]
-    return "\n".join(lines) + "\n"
+    return redact_text("\n".join(lines) + "\n")
 
 
 def _seed_of(payload: PrwriterInput) -> str:

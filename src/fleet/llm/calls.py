@@ -46,6 +46,7 @@ from fleet.llm.schemas import (
 )
 from fleet.models.base import FleetModel
 from fleet.models.enums import ModelTier
+from fleet.obs.redact import redact_mapping
 from fleet.util.hashing import sha256_text
 
 __all__ = [
@@ -265,7 +266,7 @@ def render_prompt(role: Role, evidence: Evidence) -> tuple[Message, ...]:
     """
     template = PROMPTS[role]
     body = json.dumps(
-        dict(evidence),
+        redact_mapping(evidence),
         sort_keys=True,
         ensure_ascii=True,
         allow_nan=False,

@@ -11,14 +11,15 @@ value back — never a string match against source.
 
 **Where the secret actually flows.** `workers/prwriter.py::render_body` renders
 `payload.relocation_summary` verbatim, one bullet per entry (`"### Relocation map"`), from data a
-worker plan can legitimately populate with a URL or log excerpt. `render_body` itself does not
-redact — by design, since its output also becomes `body_file` for the real `gh`/Gitea PR (a
-credential-free field per `PrwriterInput.source_url`'s own docstring, so nothing upstream should
-be planting one there in production). The redaction boundary is `cli.py::_write_pr_record`, the
-sole writer of the `PullRequest` `findings` row (`PR_RECORD_KIND`), which calls
-`redact_text(draft.model_dump_json())` before the INSERT — the same `redact_text` call D88/D90
-added to the sibling DB columns. This test drives both: the real `render_body` construction and
-the real `_write_pr_record` persistence.
+worker plan can legitimately populate with a URL or log excerpt. **`render_body` now redacts its
+own output before returning** (SECURITY_REVIEW.md finding #4 ESCALATION: `render_body`'s result is
+posted as the PUBLIC PR body/title on GitHub/Gitea on every create and every promotion — a
+DB-only redaction boundary downstream of that egress is too late). `render_body`'s redaction is
+therefore the primary boundary for this scenario; `cli.py::_write_pr_record`, the sole writer of
+the `PullRequest` `findings` row (`PR_RECORD_KIND`), still calls
+`redact_text(draft.model_dump_json())` before the INSERT as a second, redundant layer over the
+persisted copy — the same `redact_text` call D88/D90 added to the sibling DB columns. This test
+drives both: the real `render_body` construction and the real `_write_pr_record` persistence.
 """
 
 from __future__ import annotations
@@ -129,21 +130,24 @@ async def test_write_pr_record_redacts_a_credential_that_reached_the_pr_body(
     writer: StateWriter, db_path: Path
 ) -> None:
     """Criterion-closure test (§12.20, SECURITY-RELEVANT): the PR-body `«redacted:…»` placeholder
-    clause, confirmed untested by two prior rounds' investigations (`docs/CRITERIA_PLAN.md` §20)
-    but not a live defect — `_write_pr_record` already redacted correctly; this test closes the
-    coverage gap, it does not disclose a new one. A credential-shaped secret planted in
-    `relocation_summary` — real content a transform worker can legitimately hand `PrwriterInput`,
-    e.g. a relocation note quoting the mirror URL it moved a path from — reaches `render_body`'s
-    rendered PR body verbatim (`render_body` never redacts: its output is also the `gh`/Gitea
-    `body_file`). The persistence boundary is `cli.py::_write_pr_record`, which strips it before
-    the `findings` INSERT.
+    clause, confirmed untested by two prior rounds' investigations (`docs/CRITERIA_PLAN.md` §20).
+    SECURITY_REVIEW.md finding #4's ESCALATION found this WAS a live defect: `render_body`'s
+    output is posted verbatim as the public PR body on GitHub/Gitea, so a DB-only redaction
+    boundary (`cli.py::_write_pr_record`) protects the persisted `findings` copy but never the
+    thing actually published. `render_body` itself now redacts before returning, so a
+    credential-shaped secret planted in `relocation_summary` — real content a transform worker can
+    legitimately hand `PrwriterInput`, e.g. a relocation note quoting the mirror URL it moved a
+    path from — is already gone from the string `render_body` hands back (and therefore from the
+    real `gh`/Gitea `body_file` too). `_write_pr_record`'s own `redact_text` call is a second,
+    redundant layer over the persisted `findings` row.
 
     The control is the test below: an innocuous body must survive unredacted.
     """
     tainted_note = f"relocated from https://oauth2:{PAT}@gitea.local:3001/acme/widgets.git"
     payload = _payload(relocation_summary=[tainted_note])
     body = render_body(payload, repo_id=REPO, draft=True)
-    assert PAT in body, "the fixture is broken: the secret never reached the rendered body"
+    assert PAT not in body, f"render_body leaked the PAT into the public PR body: {body!r}"
+    assert "«redacted:" in body, "the placeholder must survive in the body, or debugging is blind"
 
     await _write_pr_record(writer, RUN, _draft(body=body), now=NOW)
 
