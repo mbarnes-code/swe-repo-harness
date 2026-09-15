@@ -7172,11 +7172,22 @@ and it is applied **at every egress boundary, unconditionally**:
   exists as a Python object beyond the read buffer.
 - `state/repository.py` redacts `last_error`, `findings.payload`, and `attempts.*_tail` on write.
 - `util/fs.atomic_write` redacts anything written under `artifacts/`.
-- `workers/prwriter.py` redacts the assembled PR body **and** re-scans it after the LLM prose
-  slot, because the model saw repo content and may quote it.
-- `llm/client.py` redacts both the outbound prompt and the stored `llm_cache.response_json`, for
-  **every** backend — the redaction sits in the client, above the registry, so a new backend cannot
-  forget it and a locally-served target is redacted exactly like a hosted one (ADR-0023).
+- `workers/prwriter.py::_compose()` redacts the PR **title** (before the `[:120]` truncation, so a
+  matched secret spanning the cut can't be sliced in half unredacted) and **body**, one
+  `redact_text()` call over each already-assembled value, at the return — the last point before
+  `gh.create_pr`/`body_path.write_text`. `cli.py::_regenerate_pr_body()` applies the same
+  `redact_text()` wrap to the whole-body re-render `fleet pr --ready` uses on a revalidation round,
+  the only other call site reaching the forge (**corrected 2026-09-15, D138** — this read
+  "redacts the assembled PR body and re-scans it after the LLM prose slot" and omitted the title
+  entirely; before Task 7 neither the title nor the body was redacted at all).
+- `llm/calls.py::render_prompt()` redacts the evidence mapping (`redact_mapping()`) before it is
+  JSON-serialised into the outbound prompt, so the redacted mapping is what both the backend and
+  `prompt_sha256`'s hash ever see. `llm/cache.py`'s write path redacts the stored
+  `llm_cache.response_json` (`redact_text`, constructor-injected) before the INSERT. Both sit above
+  `llm/client.py`'s registry (ADR-0023) — `llm/client.py` itself calls neither, so a new backend
+  cannot bypass either and a locally-served target is redacted exactly like a hosted one
+  (**corrected 2026-09-15, D138** — this read `llm/client.py` for both; `client.py` calls no
+  redaction function anywhere).
 
 Detection is layered and configured in `config/fleet.yaml#redaction`: high-precision provider
 patterns (`github_pat_[A-Za-z0-9_]{20,}`, `ghp_…`, `gho_…`, `xox[baprs]-…`, `AKIA[0-9A-Z]{16}`,

@@ -11466,3 +11466,59 @@ cached answer, defeating the exact anti-anchoring guarantee ADR-0021 exists to g
 the ladder rung about to run, rather than handing out one unscoped instance for the run's whole
 lifetime. This needs its own design pass (where in the call chain the current rung's policy is
 known vs. where `model_client` is currently constructed) and is deliberately not attempted here.
+
+## D138 — FIXED, LANDED (`ccc0016`, `199f2dd`; docs corrected in the same commit as this entry).
+`docs/SPEC.md` §11.4 and `docs/CRITERIA_PLAN.md` §12.20 asserted redaction boundaries that did not
+exist in code — wrong module attribution for the outbound-LLM-prompt and `llm_cache.response_json`
+paths, an omitted PR title, and DONE evidence that proved only a DB-mirror write, not the
+forge-posted PR body
+
+**Found by SECURITY_REVIEW.md item #4's ESCALATION (lines 500-538), whose direct `grep` against
+`workers/prwriter.py` returned one hit (a comment, not a call) before Task 7 landed. Allocated by
+the dispatching controller — form-agnostic sweep against this worktree found `D137` as the highest
+allocated number.**
+
+**The gap, as measured — two independent divergences.**
+
+1. `docs/SPEC.md:7175`'s §11.4 redaction-boundary list attributed the outbound-LLM-prompt
+   redaction and the `llm_cache.response_json` redaction to `llm/client.py`. `git grep -n redact
+   src/fleet/llm/client.py` returns zero hits — `llm/client.py` is the `ModelClient`
+   protocol/registry (ADR-0023) and calls neither `redact_text` nor `redact_mapping` anywhere. The
+   outbound-prompt redaction is actually `llm/calls.py::render_prompt()` (`redact_mapping(evidence)`
+   before `json.dumps`, landed `ccc0016`); the `response_json` redaction is actually
+   `llm/cache.py`'s write path (`self._redact(...)`, constructor-injected `redact_text` default,
+   pre-existing and unaffected by this task). The same list also described `workers/prwriter.py` as
+   redacting "the assembled PR body **and** re-scans it after the LLM prose slot" and never
+   mentioned the PR title at all — before Task 7 (`199f2dd`), neither claim was true:
+   `workers/prwriter.py` had zero redaction calls anywhere in the file (per SECURITY_REVIEW.md item
+   #4's own `grep`).
+
+2. `docs/CRITERIA_PLAN.md`'s §12.20 entry declared "Criterion DONE" (round V, 2026-09-01) citing
+   `tests/test_pr_body_redaction.py` as proof of SPEC.md §12 item 20's clause "the generated PR
+   body contains the `«redacted:…»` placeholder rather than the value" — but that test drives only
+   `render_body()` → `PullRequestDraft.body` → `cli.py::_write_pr_record`'s DB-mirror INSERT, which
+   `workers/prwriter.py::_compose()`'s own docstring (post-fix) confirms is "a separate, correct
+   layer" from the body actually posted to the forge. The literal "generated PR body" the
+   criterion's own text names is `_compose()`'s return value (written to `body_path` and
+   `gh.create_pr`), which round V's cited evidence never touched. At round V's own commit,
+   `workers/prwriter.py::_compose()` and `cli.py::_regenerate_pr_body()` had zero redaction calls —
+   the DONE verdict's outcome (criterion satisfied) was not yet proven true for the clause it
+   claimed to close, only for a same-shaped DB-mirror proxy.
+
+**Fix.** Task 6 (`ccc0016`) wires `redact_mapping()` into `llm/calls.py::render_prompt()`. Task 7
+(`199f2dd`) wires `redact_text()` into `workers/prwriter.py::_compose()`'s title+body return
+(title redacted before the `[:120]` truncation, so a secret spanning the cut can't be sliced in
+half unredacted) and `cli.py::_regenerate_pr_body()`'s return — the two real egress points into
+`gh.create_pr`/`body_path.write_text`, proven by
+`tests/test_workers_build.py::test_prwriter_redacts_a_secret_shaped_model_title_and_body` (plus its
+over-redaction control, `test_prwriter_leaves_innocuous_model_prose_unredacted`) and
+`tests/test_cli.py::test_regenerate_pr_body_redacts_a_secret_shaped_value_in_weak_edges`. This
+entry's own commit corrects `docs/SPEC.md:7175`'s §11.4 list to name the real modules and
+mechanism, and adds a dated annotation to `docs/CRITERIA_PLAN.md`'s §12.20 entry citing the actual
+forge-egress tests alongside the pre-existing DB-mirror test.
+
+**Not a Rule 14 event.** Neither `docs/SPEC.md`'s §12 item 20 criterion text nor
+`docs/CRITERIA_PLAN.md`'s DONE verdict changed substance — the verdict's outcome is correct now
+that Tasks 6/7 landed (both the DB mirror and the real posted body/title are genuinely redacted,
+satisfying item 20's literal text). Only the cited evidence (§12.20's DONE paragraph) and the
+§11.4 boundary-list prose (a mechanism description, not §12 criterion text) were corrected.

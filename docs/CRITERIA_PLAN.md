@@ -1456,6 +1456,29 @@ restore). `human_intervention_notes`/`weak_edges` share the identical redaction 
 columns plus the PR-body placeholder are now covered — this criterion's full stated text passes.
 Criterion DONE.**
 
+**Dated annotation, 2026-09-15 (D138, citation correction — not a Rule 14 event: the DONE verdict
+and SPEC.md item 20's criterion text are both unchanged; only this entry's evidence citation was
+incomplete).** The round-V paragraph above cites `tests/test_pr_body_redaction.py` as closing the
+"PR-body placeholder" clause, but that test drives only `render_body()` → `PullRequestDraft.body`
+→ `cli.py::_write_pr_record`'s DB-mirror INSERT — `workers/prwriter.py::_compose()`'s own
+docstring (post-fix) confirms the DB mirror is "a separate, correct layer" from the body actually
+posted to the forge. SPEC.md item 20's literal clause — "the generated PR body contains the
+`«redacted:…»` placeholder rather than the value" — names the body `gh.create_pr`/
+`body_path.write_text` actually receive, i.e. `_compose()`'s return, which round V's cited
+evidence never touched. At round V's own commit, `workers/prwriter.py::_compose()` and
+`cli.py::_regenerate_pr_body()` had zero redaction calls (SECURITY_REVIEW.md item #4's
+ESCALATION, D138) — the DONE verdict's outcome was not yet proven true for the clause it claimed
+to close, only for a same-shaped DB-mirror proxy. Since fixed for real: Task 6 (`ccc0016`) redacts
+the outbound LLM-prompt evidence in `llm/calls.py::render_prompt()`; Task 7 (`199f2dd`) redacts
+`_compose()`'s title+body return and `_regenerate_pr_body()`'s return, proven by
+`tests/test_workers_build.py::test_prwriter_redacts_a_secret_shaped_model_title_and_body` (plus
+its over-redaction control, `test_prwriter_leaves_innocuous_model_prose_unredacted`) and
+`tests/test_cli.py::test_regenerate_pr_body_redacts_a_secret_shaped_value_in_weak_edges`. The
+DONE verdict's outcome stands — both the DB mirror and the real posted body are now genuinely
+redacted, so SPEC.md item 20's literal text is satisfied — but until this correction, its cited
+evidence for the PR-body clause was the DB-mirror proxy, not the forge-egress path it actually
+names.
+
 ## 21. Determinism — clean re-run, byte-identical digest
 **DONE (all three clauses landed, round O `daf2a24` + round Q task 2).** SPEC.md item 21 has
 three clauses: (1) clean re-run under `--llm-cache read-only` produces a byte-identical digest —
