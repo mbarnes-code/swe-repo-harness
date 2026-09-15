@@ -11027,3 +11027,60 @@ backs it up.
 the criteria count reached 48 (it did, three waves ago), but because the gap between that count and
 the test suite's own real health has now been closed and independently re-verified, which is the
 distinction the final review's own central finding turned on.
+
+## Round VIII, §15.1 item 3 mutation-audit sweep — final review + consolidated fix wave
+(2026-09-15). First committed checkpoint for round VIII; the round's own 59-batch ledger lives
+only at `.superpowers/sdd/round-VIII-qa-qc/progress.md` (gitignored) — this entry summarizes it
+and is not a substitute for reading it.
+
+**Rule 13 declaration: this round moves no §12 criterion.** §12 already stood at 48/48 before this
+round started, and this round is a pure §15.1 verification/process-hardening round per Rule 13's
+own carve-out for such rounds. Its entire purpose is §15.1 item 3: a mutation-proof audit of
+`src/fleet/` (Waves 0-6, 28 batches) and `src/fleet/cli.py` (Wave 7, 31 batches, 26-54) — 59
+batches total this round. The final whole-round review (opus-tier, scope: base `4f57005` to
+`main`, the last 35 of those 59 batches — Wave 5 remainder 20-21, Wave 6 22-25, all of Wave 7
+26-54) confirmed **zero lines of `src/` changed**: 14,794 insertions / 38 deletions across 51
+files, entirely test code plus load-bearing docstrings/reports. Full review:
+`.superpowers/sdd/round-VIII-qa-qc/final-review-report.md`.
+
+**D-numbers filed this round:** D140 (`obs/events.py`'s exception-wrapper `EmitResult` omits
+`failures=`, found by worker-mutation-batch21) and D141 (`fleet quarantine --stub-blocked` is
+accepted and silently discarded, found by worker-mutation-batch49). Both `OPEN`, queued for a
+future dispatch. Neither falls within any §12 criterion's literal text (grepped
+`docs/CRITERIA_PLAN.md` for both — zero hits), so neither reopens a DONE criterion.
+
+**ADR filed this round:** ADR-0137 (Wave 6 spot-check batch grouping, §15.1 item 3).
+
+**Final review findings and disposition:** B1 (D141 uncommitted) and B2 (ADR-0137 malformed
+heading/missing attribution) were blocking bookkeeping defects, fixed immediately by the
+controller (`1bc7de7`). I2 (the citation-drift instrument is RED on `main`) was ruled pre-existing
+(delta 0 from this session's base) and out of scope for this dispatch — it blocks §15.1 item 2
+(suite green), not item 3, and is left for a future round. The remaining Important findings (I1,
+I3-I7) were fixed in one consolidated pass: I3 force-added the three gitignored reports
+`docs/DECISIONS.md`/`docs/INTEGRATION_HONESTY.md` cite (`072531c`); I4 added a dated in-place
+marker at `docs/SPEC.md:6890` disclosing the D141 gap without changing the row's documented
+target-state flag list; I5 swept all 4 `_ = stub_blocked`-shaped discard sites in `src/fleet/cli.py`
+by direct reading, confirmed 2 of the remaining 3 benign (flag threaded elsewhere) and one
+(`_validate_resume_flags`) already certified elsewhere, added D141's missing `file:line` citation
+(I4+I5 together: `ae5d964`); I1 landed the one reviewer-recommended correction that was actually
+present in a tracked test docstring (batch28's mis-attributed CONTRACT-kind citation,
+`tests/test_sequence_e2e.py`, `c18bb50`) — the other 4 named candidates (batches 29, 31, 33, 44)
+were checked directly and found to have no corresponding inaccuracy in any tracked file: three
+live only in gitignored, un-force-added worker/review report prose, and the fourth (batch29)
+recommends a new comment in production code (`_coordinate`, `src/fleet/cli.py`), outside this
+dispatch's docs/test-docstring scope; I6/I7 are this entry. Full account of what was fixed and
+what was skipped (with reasons):
+`.superpowers/sdd/round-VIII-qa-qc/final-review-fix-report.md`.
+
+**§12 count: 48 of 48, freshly re-derived** (not carried forward) — for every one of
+`docs/CRITERIA_PLAN.md`'s 48 `## N.` sections, the topmost status line reads `**DONE`, checked
+programmatically against the file as it stands after this round's docs-only commits (which
+touched no `## N.` section). Matches the prior committed rollup
+(`docs/CRITERIA_PLAN.md`'s 2026-09-12 `worker-criteria-rollup` re-derivation at `b58f43f`), and
+this round's own two new D-numbers (D140, D141) do not affect it (see above).
+
+**Status:** docs-only round; no test run required or affected (verified: `git diff --stat` for
+this round's fix commits touches only `docs/` and one `.superpowers/` force-add, zero `src/` or
+`tests/` changes). Full batch-by-batch detail, including the 5 fix-round batches (24, 41, 47, 49,
+51/52) and the ~52 deferred Minor findings, remains in
+`.superpowers/sdd/round-VIII-qa-qc/progress.md`.
