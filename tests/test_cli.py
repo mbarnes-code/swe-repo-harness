@@ -623,6 +623,172 @@ def test_raise_wave_budget_clears_the_halt_and_is_audited(workspace: Path) -> No
 
 
 # --------------------------------------------------------------------------------------
+# the wave-ledger helpers themselves (`_wave_spend`/`_earliest_open_wave`/
+# `_refuse_exhausted_wave`/`_check_wave_budget`) -- branches the two e2e tests above never
+# reach because they always exercise an already-planned, already-populated wave.
+# --------------------------------------------------------------------------------------
+
+
+async def test_wave_spend_raises_usage_error_for_an_unplanned_wave_index(
+    workspace: Path,
+) -> None:
+    """`fleet sequence` is what creates a `waves` row; a wave index nothing ever planned (a typo
+    in `--wave`, or a resume against a run re-sequenced with fewer waves) must be refused with a
+    named remedy, not silently read as an empty wave with zero spend.
+
+    Unique discriminator of: dropping the `if not rows: raise UsageError(...)` guard, which would
+    instead crash on `rows[0]` with an unhelpful `IndexError`, or -- if also defaulted -- report
+    `(0.0, 0.0, 0)` for a wave that was never sequenced, which `_refuse_exhausted_wave` would then
+    treat as a harmless empty wave rather than an operator mistake worth naming.
+    """
+    _exhaust_wave(workspace / "state" / "fleet.db", wave=0, max_usd=10.0, spent=3.0)
+    from fleet.cli import _wave_spend
+    from fleet.state.db import connect_ro
+
+    conn = await connect_ro(workspace / "state" / "fleet.db")
+    try:
+        # the happy path first: one wave, one member, SUM over repo_ledger -- not duplicated.
+        assert await _wave_spend(conn, RUN_ID, 0) == (10.0, 3.0, 1)
+
+        with pytest.raises(UsageError, match=r"no wave 7"):
+            await _wave_spend(conn, RUN_ID, 7)
+    finally:
+        await conn.close()
+
+
+async def test_earliest_open_wave_skips_a_closed_wave_whose_only_phase_row_is_scan(
+    workspace: Path,
+) -> None:
+    """Deliberately UNSCOPED to any one phase -- `cli.py`'s own `_open_transform_waves` docstring
+    names the contrast (`AND p.phase = ?`) and the reason: after Phase 1 every member has a
+    SUCCEEDED scan row. A wave whose only member has that one SUCCEEDED phase=1 row -- sequenced
+    but never transformed -- must read as CLOSED here, so the earliest genuinely open wave is the
+    next one, not this one.
+
+    Unique discriminator of: scoping this join to one phase (which would instead see NO row for
+    wave 0's repo -- `p.status IS NULL` -- and wrongly report wave 0, not wave 1, as earliest
+    open), and of narrowing the terminal-status set (dropping 'SUCCEEDED' would leave wave 0's row
+    non-terminal and again report wave 0 first).
+    """
+    db = workspace / "state" / "fleet.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for wave in (0, 1):
+            conn.execute(
+                "INSERT INTO waves (run_id, wave_index, computed_at, max_usd) "
+                "VALUES (?, ?, ?, 1.0)",
+                (RUN_ID, wave, "2026-08-08T12:00:00+00:00"),
+            )
+        conn.execute(
+            "INSERT INTO wave_members (run_id, wave_index, node_kind, node_id) "
+            "VALUES (?, 0, 'REPO', 'acme-commons')",
+            (RUN_ID,),
+        )
+        conn.execute(
+            "INSERT INTO wave_members (run_id, wave_index, node_kind, node_id) "
+            "VALUES (?, 1, 'REPO', 'acme-billing')",
+            (RUN_ID,),
+        )
+        # wave 0's only member has finished SCAN and nothing else -- sequenced, not transformed.
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+            "VALUES (?, 'acme-commons', 1, 'SUCCEEDED', ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        # wave 1's member is mid-transform -- genuinely open.
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+            "VALUES (?, 'acme-billing', 2, 'RUNNING', ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+    from fleet.cli import _earliest_open_wave
+    from fleet.state.db import connect_ro
+
+    ro = await connect_ro(db)
+    try:
+        assert await _earliest_open_wave(ro, RUN_ID) == 1
+    finally:
+        await ro.close()
+
+
+async def test_refuse_exhausted_wave_does_not_raise_on_a_wave_with_no_repo_members(
+    workspace: Path,
+) -> None:
+    """A wave whose `waves.max_usd` ceiling happens to be `0.0` (nothing was ever admitted into
+    it -- e.g. a wave holding only CONTRACT nodes, never a REPO) must not raise merely because
+    `spent (0.0) < ceiling (0.0)` is false. `members == 0` is the guard that keeps an empty wave
+    from reading as breached.
+
+    Unique discriminator of: dropping the `members == 0 or` half of the return guard, which would
+    raise `WaveBudgetExhausted` for a wave that has admitted no work at all.
+    """
+    db = workspace / "state" / "fleet.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO waves (run_id, wave_index, computed_at, max_usd) "
+            "VALUES (?, 0, ?, 0.0)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        # deliberately no wave_members row for wave 0 -> members == 0
+    finally:
+        conn.close()
+
+    from fleet.cli import _refuse_exhausted_wave
+    from fleet.state.db import connect_ro
+
+    settings = FleetSettings.load(workspace / "config")
+    ro = await connect_ro(db)
+    try:
+        await _refuse_exhausted_wave(ro, settings, RUN_ID, 0)  # must not raise
+    finally:
+        await ro.close()
+
+
+def test_check_wave_budget_checks_the_wave_the_caller_named_not_the_earliest_open_one(
+    workspace: Path,
+) -> None:
+    """The sync bridge (`_run(_with_ro(...))`) must forward the CALLER's `wave`, not silently
+    fall back to `_earliest_open_wave` -- `fleet transform --wave N` targets wave N even while an
+    earlier wave is still open and under budget.
+
+    Unique discriminator of: `_check_wave_budget` dropping its own `wave` argument and always
+    passing `None` through to `_refuse_exhausted_wave`, which would check wave 0 (open, under
+    budget) and never see wave 1's breach.
+    """
+    db = workspace / "state" / "fleet.db"
+    _exhaust_wave(db, wave=1, max_usd=1.0, spent=5.0)  # uses 'acme-commons'
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO waves (run_id, wave_index, computed_at, max_usd) "
+            "VALUES (?, 0, ?, 100.0)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO wave_members (run_id, wave_index, node_kind, node_id) "
+            "VALUES (?, 0, 'REPO', 'acme-billing')",
+            (RUN_ID,),
+        )
+    finally:
+        conn.close()
+
+    from fleet.cli import GlobalOptions, _check_wave_budget
+    from fleet.orchestrator.budgets import WaveBudgetExhausted
+
+    settings = FleetSettings.load(workspace / "config")
+    opts = GlobalOptions(db_path=db)
+
+    _check_wave_budget(opts, settings, RUN_ID, None)  # wave 0: open, under its $100 ceiling
+
+    with pytest.raises(WaveBudgetExhausted):
+        _check_wave_budget(opts, settings, RUN_ID, 1)
+
+
+# --------------------------------------------------------------------------------------
 # exit 3 — the run ledger, breached organically through a real dispatch
 # --------------------------------------------------------------------------------------
 
