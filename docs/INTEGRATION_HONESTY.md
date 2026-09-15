@@ -11622,3 +11622,19 @@ batch, out of its scope). Allocated centrally by the controller at dispatch time
 lane. Not yet fixed — queue for a future dispatch (small, TEST-ONLY-to-S fix: set `failures=` in
 the except branch and add a discriminating test showing `.ok`/`.failures` now agree with
 `failed_emits`).
+
+## D141 — OPEN. `fleet quarantine`'s `--stub-blocked` flag is accepted and silently discarded
+
+Found by round VIII's `worker-mutation-batch49`
+(`.superpowers/sdd/round-VIII-qa-qc/worker-mutation-batch49-report.md`) while mutation-auditing
+`quarantine()`/`_quarantine_impl` in `src/fleet/cli.py`. `docs/SPEC.md:6890` documents `fleet
+quarantine` as accepting `<repo> --reason TEXT (required) --stub-blocked --dry-run`, and the CLI
+command function accepts and parses `--stub-blocked`, but the flag is never threaded through:
+`quarantine()` does `_ = stub_blocked` (an explicit discard) and `_quarantine_impl` has no such
+parameter at all. An operator passing `--stub-blocked` to `fleet quarantine` gets no error and no
+effect — the flag is accepted syntactically and silently ignored. Allocated centrally by the
+controller at dispatch time, not by either lane. Not yet fixed — queue for a future dispatch
+(small: either wire the flag through to `_quarantine_impl` to match SPEC's documented behavior,
+or if quarantine never legitimately needs stub-blocked semantics, remove the flag from both the
+CLI signature and SPEC's documented flag list — Rule 14 applies if the SPEC row itself needs to
+change).
