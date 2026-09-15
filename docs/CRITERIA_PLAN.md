@@ -3169,10 +3169,15 @@ trigger reading; the literal "already_applied event" sub-phrase — investigated
 vacuous, disclosed rather than silently dropped.** The same test asserts `COUNT(*) = 1` on the
 minted `REVALIDATE` task, then re-invokes `fleet stubs resolve` on the now-`SUPERSEDED` stub and
 asserts zero new `tasks`/`stubs`/`attempts` rows and zero new `migrate/<consumer>` commits.
-`_run_one_revalidation_task` (`cli.py:14410`, repointed +38, 2026-09-11, by an uncommitted bug-fix
-pass's insertions above it in `cli.py` — pure insertion, confirmed by exact-line-content match
-against the current tree; round VI task 111's own repoint (`cli.py:14372`) is superseded, per this
+`_run_one_revalidation_task` (`cli.py:14442`, repointed +32, 2026-09-15 round VII task 14, by
+round VII task 13's `BAZEL_OVERWRITE_FINDING_KIND` writer/reader insertions above it in `cli.py`
+(`a2425e4`, +75/-0 lines in that file) — pure insertion, confirmed both by diff-hunk arithmetic
+(four hunks ahead of this line, cumulative offset +8/+9/+16/+32, landing exactly on the observed
+shift) and by exact-line-content match against the current tree; the prior repoint (`cli.py:14410`,
+repointed +38, 2026-09-11, by an uncommitted bug-fix pass's insertions above it in `cli.py` — pure
+insertion, confirmed by exact-line-content match against the current tree) is superseded, per this
 file's annotate-in-place convention, not deleted; that one had itself superseded round VI
+task 111's own repoint (`cli.py:14372`) which had itself superseded round VI
 task 109's own repoint (`cli.py:14285`, itself noting the same function's non-pure-insertion
 history through tasks 103/106/107/109)) was read directly: it re-runs
 `VerifyPipelineWorker`
