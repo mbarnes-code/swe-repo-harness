@@ -64,9 +64,12 @@ from fleet.cli import (
     _promote_one_pr,
     _read_text_or_none,
     _regenerate_pr_body,
+    _RepoFacts,
     _report_with_stubs,
     _sequence_graph_config,
     _TransformPlan,
+    _VerifyEvidence,
+    _VerifySink,
     app,
     command_paths,
 )
@@ -8158,6 +8161,260 @@ async def test_a_never_measured_migrated_test_count_writes_nothing_to_repos(
     finally:
         plain.close()
     assert row == (None,), "an unmeasured count must never be written as a real 0"
+
+
+# --------------------------------------------------------------------------------------
+# Round VIII batch 43 (§15.1 item 3, Wave 7.5 G6a) — build/verify plan & evidence dataclasses
+# --------------------------------------------------------------------------------------
+
+
+def test_repo_facts_fallback_construction_defaults_to_unknown_baseline() -> None:
+    """`_RepoFacts(None, Ecosystem.UNKNOWN)` is the exact fallback `cli.py` constructs at six call
+    sites (`facts.get(repo_id, _RepoFacts(None, Ecosystem.UNKNOWN))`) for a repo with no `repos`
+    row in the facts map — no test constructs `_RepoFacts` at all today. `baseline_ok`'s docstring
+    is explicit that its default (`None`) means "never measured", never "measured and failed"
+    (`False`) and never "0 native tests" (`baseline_test_count`'s default, `0`) — §12.11 treats
+    those three states differently. A mutation that changed either default (e.g. `baseline_ok:
+    bool | None = False`) would make every repo missing from the facts map read as a MEASURED
+    baseline failure instead of an unmeasured one, silently changing §12.11's gate for exactly the
+    repos it has no data for."""
+    facts = _RepoFacts(None, Ecosystem.UNKNOWN)
+    assert facts.dest_path is None
+    assert facts.ecosystem is Ecosystem.UNKNOWN
+    assert facts.published is None
+    assert facts.baseline_test_count == 0
+    assert facts.baseline_ok is None, (
+        "the fallback's baseline_ok must read as 'never measured', not False/measured-failed"
+    )
+
+
+def test_build_and_verify_evidence_record_overwrites_by_repo_id_not_accumulates() -> None:
+    """`_BuildEvidence.record`/`_VerifyEvidence.record` key `by_repo` on `output.repo_id` and
+    ASSIGN (`self.by_repo[output.repo_id] = output`) rather than keep-first or accumulate. This is
+    exactly what `_build_criterion` and the PR/report assembly paths rely on when they read
+    `evidence.by_repo.get(repo_id)` once a wave is done: a repo dispatched twice in one run (a
+    retried BUILD, or a re-verify on the fresh Phase 4 tip) must be judged on its LATEST outcome.
+    No existing test calls `record()` twice for the same `repo_id`, so a mutation to `setdefault`
+    (keep-first) or to append into a list would leave every current fixture green while silently
+    resurrecting a stale, already-superseded result for the success/failure check."""
+    from fleet.cli import VerifyOutput
+
+    build_evidence = _BuildEvidence()
+    first_build = BuildOutput(repo_id="acme-commons", build_ok=False)
+    second_build = BuildOutput(repo_id="acme-commons", build_ok=True)
+    build_evidence.record(first_build)
+    build_evidence.record(second_build)
+    assert build_evidence.by_repo["acme-commons"] is second_build, (
+        "a second record() for the same repo_id must replace the first, not be ignored"
+    )
+
+    verify_evidence = _VerifyEvidence()
+    first_verify = VerifyOutput(repo_id="acme-commons", build_ok=False)
+    second_verify = VerifyOutput(repo_id="acme-commons", build_ok=True)
+    verify_evidence.record(first_verify)
+    verify_evidence.record(second_verify)
+    assert verify_evidence.by_repo["acme-commons"] is second_verify, (
+        "a second record() for the same repo_id must replace the first, not be ignored"
+    )
+
+
+async def test_attempt_writer_increments_retry_ordinal_for_a_repeated_identical_command(
+    tmp_path: Path,
+) -> None:
+    """`_next_ordinal`'s `COALESCE(MAX(retry_ordinal) + 1, 0)` is what lets a genuinely re-run
+    identical command land a NEW `attempts` row instead of colliding with `schema.sql`'s `UNIQUE
+    (run_id, repo_id, phase, attempt, revalidation_round, tier, command_sha256,
+    approach_signature, retry_ordinal)` — the comment there calls this "a genuine RE-EXECUTION
+    append[ing] a row rather than silently collid[ing]". No existing test calls `record()` twice
+    with the SAME `(repo_id, phase, attempt, command)` to observe the VALUE this computes; every
+    fixture in `test_llm_cache_hit_attribution.py`/`test_llm_backend_failover_attribution.py`
+    varies the attempt number or the command across calls, so a mutation that always returned 0
+    (or read MIN instead of MAX) would either pass every existing fixture or surface only as an
+    opaque `sqlite3.IntegrityError` rather than a named, understood defect."""
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+    from fleet.workers.buildverify import StepRecord
+
+    db_path = tmp_path / "state" / "fleet.db"
+    await initialize_database(db_path)
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    same_step = StepRecord(unit="build", command=["bazel", "build", "//..."], exit_code=0, ok=True)
+
+    async with StateWriter(db_path, owner="test-retry-ordinal") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                "run-retry-ordinal", started_at=now, config_sha256="a" * 64,
+                harness_version="0.1.0",
+            )
+            await repo.upsert_repo(
+                "acme-commons", name="acme-commons",
+                url="https://example.invalid/acme-commons.git", now=now,
+            )
+            attempts = _AttemptWriter(
+                writer=writer, repository=repo, read_conn=read_conn,
+                run_id="run-retry-ordinal", clock=lambda: now,
+            )
+            first_written = await attempts.record(
+                repo_id="acme-commons", phase=Phase.BUILD, attempt=1, tier="DETERMINISTIC",
+                context_policy=None, integration_ref="", steps=[same_step], error=None,
+            )
+            second_written = await attempts.record(
+                repo_id="acme-commons", phase=Phase.BUILD, attempt=1, tier="DETERMINISTIC",
+                context_policy=None, integration_ref="", steps=[same_step], error=None,
+            )
+            rows = {
+                row.attempt_id: row
+                async for row in repo.iter_attempts("run-retry-ordinal")
+            }
+        finally:
+            await read_conn.close()
+
+    ordinals = (rows[first_written[0]].retry_ordinal, rows[second_written[0]].retry_ordinal)
+    assert ordinals == (0, 1), (
+        f"a repeated identical command within the same attempt must land strictly increasing "
+        f"retry_ordinal values (0, then 1); got {ordinals}"
+    )
+
+
+async def test_build_sink_leaves_post_commit_sha_untouched_when_nothing_published(
+    tmp_path: Path,
+) -> None:
+    """`_BuildSink.__call__`'s `if not output.published_sha: return` guards the final `UPDATE
+    phases SET post_commit_sha = ...` write. `test_a_never_measured_migrated_test_count_writes_
+    nothing_to_repos` above already drives this same empty-`published_sha` case but never seeds
+    or re-reads `phases.post_commit_sha`, so it cannot see this specific guard fire — dropping the
+    guard (or inverting it) would still leave that test green, since an UPDATE with `params =
+    ("", ...)` on a freshly-created `phases` row (default `post_commit_sha` NULL) reads back
+    indistinguishably from "never written". This test seeds a REAL prior value first, so an
+    unguarded write is visible as a silent overwrite rather than a no-op."""
+    import aiosqlite
+
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    db_path = tmp_path / "state" / "fleet.db"
+    await initialize_database(db_path)
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    preexisting_sha = "d" * 40
+
+    async with StateWriter(db_path, owner="test-build-sink-no-publish") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                "run-no-publish", started_at=now, config_sha256="a" * 64,
+                harness_version="0.1.0",
+            )
+            await repo.upsert_repo(
+                "acme-commons", name="acme-commons",
+                url="https://example.invalid/acme-commons.git", now=now,
+            )
+
+            async def seed_phase(conn: aiosqlite.Connection) -> None:
+                await conn.execute(
+                    "INSERT INTO phases (run_id, repo_id, phase, status, post_commit_sha, "
+                    "                    lease_fence, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ("run-no-publish", "acme-commons", int(Phase.BUILD), "RUNNING",
+                     preexisting_sha, 0, now.isoformat()),
+                )
+
+            await writer.submit(seed_phase)
+
+            attempts = _AttemptWriter(
+                writer=writer, repository=repo, read_conn=read_conn,
+                run_id="run-no-publish", clock=lambda: now,
+            )
+            sink = _BuildSink(
+                attempts=attempts, writer=writer, run_id="run-no-publish",
+                evidence=_BuildEvidence(), clock=lambda: now,
+            )
+            await sink(
+                repo_id="acme-commons", phase=Phase.BUILD, fence=0,
+                result=WorkerResult[BuildOutput](
+                    status="ok",
+                    output=BuildOutput(repo_id="acme-commons", build_ok=False),
+                ),
+            )
+        finally:
+            await read_conn.close()
+
+    plain = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        row = plain.execute(
+            "SELECT post_commit_sha FROM phases WHERE run_id = ? AND repo_id = ?",
+            ("run-no-publish", "acme-commons"),
+        ).fetchone()
+    finally:
+        plain.close()
+    assert row == (preexisting_sha,), (
+        "an empty published_sha must never overwrite an existing phases.post_commit_sha"
+    )
+
+
+async def test_verify_sink_persists_the_report_when_the_dispatch_produced_one(
+    tmp_path: Path,
+) -> None:
+    """`_VerifySink.__call__`'s `if output.report is not None: await _record_verification(...)`
+    branch — no existing test drives `_VerifySink` with a real `VerificationReport` attached and
+    checks the `findings` row lands; `test_the_build_and_verify_sinks_forward_the_flag_they_were_
+    billed_on` (`test_llm_cache_hit_attribution.py`) drives `_VerifySink` but its `VerifyOutput`
+    carries `report=None` by construction (it exists only to prove the llm_cache_hit attribution,
+    an already-proven clause this batch excludes), and `test_cli.py`'s own D131 gate test calls
+    `_record_verification` DIRECTLY, bypassing `_VerifySink` entirely. A mutation that dropped
+    this branch (or inverted the `is not None` check) would leave every current fixture green."""
+    import uuid as uuid_mod
+
+    from fleet.cli import VerifyOutput, _verifications
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    db_path = tmp_path / "state" / "fleet.db"
+    await initialize_database(db_path)
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    run_id = "run-verify-sink-report"
+
+    async with StateWriter(db_path, owner="test-verify-sink-report") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                run_id, started_at=now, config_sha256="a" * 64, harness_version="0.1.0",
+            )
+            await repo.upsert_repo(
+                "acme-commons", name="acme-commons",
+                url="https://example.invalid/acme-commons.git", now=now,
+            )
+            attempts = _AttemptWriter(
+                writer=writer, repository=repo, read_conn=read_conn,
+                run_id=run_id, clock=lambda: now,
+            )
+            sink = _VerifySink(
+                attempts=attempts, evidence=_VerifyEvidence(), writer=writer,
+                run_id=run_id, clock=lambda: now,
+            )
+            report = VerificationReport(
+                run_id=uuid_mod.UUID(int=0), repo_id="acme-commons",
+                build_ok=True, test_ok=True, verdict="PASS",
+            )
+            await sink(
+                repo_id="acme-commons", phase=Phase.VERIFY, fence=0,
+                result=WorkerResult[VerifyOutput](
+                    status="ok",
+                    output=VerifyOutput(repo_id="acme-commons", report=report),
+                ),
+            )
+            persisted = await _verifications(read_conn, run_id)
+        finally:
+            await read_conn.close()
+
+    assert "acme-commons" in persisted, (
+        "_VerifySink must persist output.report via _record_verification when it is not None"
+    )
+    persisted_report, _seed = persisted["acme-commons"]
+    assert persisted_report.verdict == "PASS"
+    assert persisted_report.build_ok is True and persisted_report.test_ok is True
 
 
 # --------------------------------------------------------------------------------------
