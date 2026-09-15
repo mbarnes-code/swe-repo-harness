@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -1322,6 +1323,37 @@ def test_quarantine_never_overwrites_a_phase_that_started_running_after_the_read
     )
 
 
+def test_quarantine_human_readable_line_reflects_dry_run_and_the_real_counts(
+    workspace: Path,
+) -> None:
+    """`quarantine()`'s own wrapper logic (`_quarantine_impl` is out of scope here, already
+    proven): the human-readable summary line's `'would quarantine' if dry_run else 'quarantined'`
+    wording and its `result['phases_skipped']`/`result['dependents_blocked']` interpolation were
+    never asserted by any existing test -- every prior quarantine test reads the DB directly or
+    parses `--json`, never `result.output`'s plain-text line.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_in_flight(db, "acme-commons", "PENDING")
+
+    dry = runner.invoke(
+        app,
+        [*base_args(workspace), "quarantine", "acme-commons", "--reason", "look first",
+         "--dry-run"],
+    )
+    assert dry.exit_code == ExitCode.SUCCESS, dry.output
+    assert (
+        "would quarantine acme-commons: 1 phase row(s) SKIPPED, 0 dependent(s) blocked"
+        in dry.output
+    )
+
+    real = runner.invoke(
+        app, [*base_args(workspace), "quarantine", "acme-commons", "--reason", "for real"]
+    )
+    assert real.exit_code == ExitCode.SUCCESS, real.output
+    assert "quarantined acme-commons: 1 phase row(s) SKIPPED, 0 dependent(s) blocked" in real.output
+    assert "would quarantine" not in real.output
+
+
 # --------------------------------------------------------------------------------------
 # retry: reopen an abandoned repo through the audited OPERATOR_REOPEN door (§12.14, ADR-0125)
 # --------------------------------------------------------------------------------------
@@ -1396,6 +1428,51 @@ def test_retry_refuses_a_repo_not_at_requires_human_intervention(workspace: Path
     )
     assert result.exit_code == ExitCode.USAGE
     assert "REQUIRES_HUMAN_INTERVENTION" in result.output
+
+
+def test_retry_refuses_two_rhi_phase_rows_for_the_same_repo_as_a_structural_surprise(
+    workspace: Path,
+) -> None:
+    """`_retry_impl`'s OWN `len(rhi_rows) > 1` pre-check (a `connect_ro` read, before any
+    `StateWriter`/repository call), distinct from `SqliteStateRepository.reopen_to_pending`'s own
+    later, transactional guard for the same fact
+    (`tests/test_repository.py::test_reopen_to_pending_raises_when_multiple_rhi_rows_exist`) --
+    this CLI-level early check has never been exercised through `fleet retry`: no test in this
+    file ever seeds two REQUIRES_HUMAN_INTERVENTION phase rows for one repo.
+
+    The two guards' messages share both `"has N REQUIRES_HUMAN_INTERVENTION phase rows"` and
+    `"expected exactly one"` (the repository's own message reuses that exact phrasing), so those
+    substrings alone cannot tell which layer actually raised -- only `_retry_impl`'s `except
+    RepositoryError -> UsageError` TRANSLATION path prefixes the message with `"fleet retry
+    'acme-commons' refused:"` (see `test_retry_translates_a_repository_error_into_a_usage_error`
+    above). Asserting that prefix is ABSENT is what proves the CLI's own pre-check fired directly,
+    never reaching `StateWriter`/the repository at all -- proven by mutating `> 1` to `> 2` below:
+    with the CLI guard defeated, the repository's own guard still raises (defense in depth), the
+    exit code is still USAGE and both substrings still match, but ONLY with the "refused:" prefix
+    this assertion catches.
+    """
+    db = workspace / "state" / "fleet.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for phase in (2, 4):
+            conn.execute(
+                "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+                "VALUES (?, 'acme-commons', ?, 'REQUIRES_HUMAN_INTERVENTION', ?)",
+                (RUN_ID, phase, "2026-08-08T12:00:00+00:00"),
+            )
+    finally:
+        conn.close()
+
+    result = runner.invoke(
+        app, [*base_args(workspace), "retry", "acme-commons", "--reason", "x"]
+    )
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "has 2 REQUIRES_HUMAN_INTERVENTION phase rows" in result.output
+    assert "expected exactly one" in result.output
+    assert "refused:" not in result.output, (
+        "must be raised directly by _retry_impl's own pre-check, never via the "
+        "RepositoryError -> UsageError translation (which prefixes 'fleet retry ... refused:')"
+    )
 
 
 def test_retry_dry_run_changes_nothing(workspace: Path) -> None:
@@ -1484,6 +1561,34 @@ def test_retry_translates_a_repository_error_into_a_usage_error(
     assert result.exit_code == ExitCode.USAGE, result.output
     assert "fleet retry 'acme-commons' refused" in result.output
     assert "synthetic: row moved under the transaction" in result.output
+
+
+def test_retry_human_readable_line_reflects_dry_run_and_the_reopened_phase(
+    workspace: Path,
+) -> None:
+    """`retry()`'s own wrapper logic (`_retry_impl` is in scope too, but already exhaustively
+    proven above -- dry-run, reason validation, RHI-count checks, the RepositoryError
+    translation, and the projection refresh): the human-readable line's `'would reopen' if
+    dry_run else 'reopened'` wording and its `result['phase']` interpolation were never asserted
+    -- every existing retry test reads the DB or `--json`, never `result.output`'s plain-text
+    line.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_rhi(db, "acme-commons")
+
+    dry = runner.invoke(
+        app,
+        [*base_args(workspace), "retry", "acme-commons", "--reason", "look first", "--dry-run"],
+    )
+    assert dry.exit_code == ExitCode.SUCCESS, dry.output
+    assert "would reopen acme-commons (phase VERIFY) -> PENDING" in dry.output
+
+    real = runner.invoke(
+        app, [*base_args(workspace), "retry", "acme-commons", "--reason", "for real"]
+    )
+    assert real.exit_code == ExitCode.SUCCESS, real.output
+    assert "reopened acme-commons (phase VERIFY) -> PENDING" in real.output
+    assert "would reopen" not in real.output
 
 
 def _seed_wave(
@@ -2159,6 +2264,201 @@ def test_status_json_treats_an_unmeasured_migrated_test_count_as_not_regressed(
     assert row["repo"] == "acme-commons"
     assert row["migrated_test_count"] is None
     assert row["test_count_regressed"] is False
+
+
+def test_test_count_report_never_regresses_against_a_red_baseline(workspace: Path) -> None:
+    """`_test_count_report`'s `baseline_ok_value is True and ...` guard: a repo whose OWN
+    baseline build never went green (`baseline_ok = 0`) must never read as regressed even when
+    `migrated_test_count` is numerically smaller than `baseline_test_count` -- the comparison is
+    meaningless against a baseline that was never a real green number to begin with. Distinct
+    from `test_status_json_reports_the_repo_baseline_migrated_test_count_triple` (which only
+    exercises `baseline_ok = 1`) and from `test_status_json_treats_an_unmeasured_migrated_test_
+    count_as_not_regressed` (which exercises `migrated_test_count IS NULL`, not `baseline_ok`).
+    """
+    from fleet.cli import _test_count_report
+    from fleet.state.db import connect_ro
+
+    db = workspace / "state" / "fleet.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE repos SET baseline_test_count = 10, baseline_ok = 0, migrated_test_count = 3 "
+            "WHERE repo_id = 'acme-commons'"
+        )
+    finally:
+        conn.close()
+
+    async def _report() -> dict[str, dict[str, object]]:
+        ro = await connect_ro(db)
+        try:
+            return await _test_count_report(ro, ["acme-commons"])
+        finally:
+            await ro.close()
+
+    report = asyncio.run(_report())
+    assert report["acme-commons"]["baseline_test_count"] == 10
+    assert report["acme-commons"]["migrated_test_count"] == 3
+    assert report["acme-commons"]["test_count_regressed"] is False, (
+        "a red baseline (baseline_ok=0) must never be read as regressed, no matter how the "
+        "migrated count compares numerically"
+    )
+
+
+def test_parse_filters_rejects_an_unknown_key_and_accepts_the_documented_ones() -> None:
+    """`_parse_filters`'s own validation, unit-tested directly for the first time: `--filter`
+    only understands `status=X` and `wave=N` (§10's own docstring), and anything else -- a typo'd
+    key, or a bare value with no `=` at all -- must be refused loudly (Rule 11) rather than
+    silently accepted and then simply never matching any row.
+    """
+    from fleet.cli import UsageError, _parse_filters
+
+    assert _parse_filters(["status=RUNNING", "wave=2"]) == {"status": "RUNNING", "wave": "2"}
+    assert _parse_filters([]) == {}
+    with pytest.raises(UsageError, match="--filter"):
+        _parse_filters(["repo=acme-commons"])
+    with pytest.raises(UsageError, match="--filter"):
+        _parse_filters(["no-equals-sign"])
+
+
+def test_status_filter_and_sort_are_actually_wired_through_to_the_rendered_rows(
+    workspace: Path,
+) -> None:
+    """`status()`'s own job, distinct from `_parse_filters`'s validation: it must actually THREAD
+    the parsed `selectors` and `--sort` value into `_status_once` rather than silently dropping
+    them -- exactly the kind of accepted-but-discarded flag `quarantine()`'s `--stub-blocked`
+    turned out to be (`_ = stub_blocked`). `--sort blast-radius` is `_status_once`'s own
+    branch (`rows.sort(...)`), proven here with two repos whose ALPHABETICAL order (acme-billing,
+    acme-commons -- `sorted(state.repos.items())`'s own tiebreak) is the OPPOSITE of their
+    blast-radius-descending order, so a broken/removed sort is observable and not masked by the
+    coincidental alphabetical order every other status test happens to use.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_in_flight(db, "acme-commons", "RUNNING")
+    _put_in_flight(db, "acme-billing", "PENDING")
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute("UPDATE repos SET blast_radius = 1 WHERE repo_id = 'acme-billing'")
+        conn.execute("UPDATE repos SET blast_radius = 9 WHERE repo_id = 'acme-commons'")
+    finally:
+        conn.close()
+
+    filtered = runner.invoke(
+        app, [*base_args(workspace), "--json", "status", "--filter", "status=RUNNING"]
+    )
+    assert filtered.exit_code == ExitCode.SUCCESS, filtered.output
+    repos = json.loads(filtered.stdout)["repos"]
+    assert [r["repo"] for r in repos] == ["acme-commons"], (
+        "--filter status=RUNNING must narrow to only the RUNNING repo, not silently render "
+        "every repo as if no filter had been passed"
+    )
+
+    sorted_result = runner.invoke(
+        app, [*base_args(workspace), "--json", "status", "--sort", "blast-radius"]
+    )
+    assert sorted_result.exit_code == ExitCode.SUCCESS, sorted_result.output
+    ordered = [r["repo"] for r in json.loads(sorted_result.stdout)["repos"]]
+    assert ordered == ["acme-commons", "acme-billing"], (
+        "--sort blast-radius must order by DESCENDING blast_radius (9 before 1), which is the "
+        "reverse of these two repos' alphabetical/default order"
+    )
+
+
+def test_status_format_dot_renders_the_graph_including_edge_coloring(workspace: Path) -> None:
+    """`_status_once`'s `--format dot` dispatch (an early return through `_dot`, never reached by
+    any other status test in this file) and `_dot`'s own attribute logic together: a suppressed
+    cycle-break edge renders red, a hoisted/retargeted edge renders blue, and a low-confidence
+    edge renders dashed (§10).
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_in_flight(db, "acme-commons", "RUNNING")
+    _put_in_flight(db, "acme-billing", "PENDING")
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO edges (edge_key, run_id, src_kind, src_id, dst_kind, dst_id, "
+            "                   dst_coord_key, kind, base_confidence, confidence, "
+            "                   ordering_suppressed, evidence_path, detected_at) "
+            "VALUES (?, ?, 'REPO', 'acme-commons', 'REPO', 'acme-billing', "
+            "        'maven:x', 'DECLARED_DEP', 0.9, 0.9, 1, 'pom.xml', ?)",
+            ("1" * 64, RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO edges (edge_key, run_id, src_kind, src_id, dst_kind, dst_id, "
+            "                   dst_coord_key, kind, base_confidence, confidence, "
+            "                   retargeted_from_repo_id, evidence_path, detected_at) "
+            "VALUES (?, ?, 'REPO', 'acme-billing', 'REPO', 'acme-commons', "
+            "        'maven:y', 'DECLARED_DEP', 0.9, 0.9, "
+            "        'some-hoisted-away-repo', 'pom.xml', ?)",
+            ("2" * 64, RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO edges (edge_key, run_id, src_kind, src_id, dst_kind, dst_id, "
+            "                   dst_coord_key, kind, base_confidence, confidence, "
+            "                   evidence_path, detected_at) "
+            "VALUES (?, ?, 'REPO', 'acme-commons', 'REPO', 'acme-billing', "
+            "        'maven:z', 'DECLARED_DEP', 0.2, 0.2, 'pom.xml', ?)",
+            ("3" * 64, RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+    result = runner.invoke(app, [*base_args(workspace), "status", "--format", "dot"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert result.output.startswith("digraph fleet {"), result.output
+    assert '"acme-commons" [shape=ellipse];' in result.output
+    assert "color=red" in result.output, "the suppressed edge must render red"
+    assert "color=blue" in result.output, "the retargeted edge must render blue"
+    assert "style=dashed" in result.output, "the low-confidence edge must render dashed"
+
+
+def test_metrics_maps_the_budget_ledger_columns_to_the_right_metric_names(
+    workspace: Path,
+) -> None:
+    """`_metrics`'s budget-ledger leg (§10/§11.2's fail-closed cost accounting), unit-tested
+    directly for the first time: `spent_usd`/`reserved_usd`/`max_usd` must land on
+    `fleet_budget_spent_usd`/`fleet_budget_reserved_usd`/`fleet_budget_max_usd` respectively, in
+    THAT order -- three distinct sentinel values catch a swapped SELECT column order, which three
+    equal or coincidentally-matching values could not.
+    """
+    from fleet.cli import _metrics
+    from fleet.state.db import connect_ro
+
+    db = workspace / "state" / "fleet.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO budget_ledger (run_id, spent_usd, reserved_usd, max_usd, updated_at) "
+            "VALUES (?, 10.0, 2.0, 99.0, ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+    async def _measure() -> dict[str, float]:
+        ro = await connect_ro(db)
+        try:
+            return await _metrics(ro, RUN_ID)
+        finally:
+            await ro.close()
+
+    measurements = asyncio.run(_measure())
+    assert measurements["fleet_budget_spent_usd"] == 10.0
+    assert measurements["fleet_budget_reserved_usd"] == 2.0
+    assert measurements["fleet_budget_max_usd"] == 99.0
+
+
+def test_prometheus_output_is_sorted_by_metric_name() -> None:
+    """`_prometheus`'s own formatting, unit-tested directly: lines are rendered in SORTED key
+    order, not insertion order -- so a `--metrics-out` file diffs cleanly across two runs with the
+    same metric set (§14.5), rather than churning on dict-ordering noise."""
+    from fleet.cli import _prometheus
+
+    text = _prometheus({"z_metric": 2.0, "a_metric": 1.0})
+    lines = text.splitlines()
+    assert lines[0] == "# TYPE fleet_metrics gauge"
+    assert lines[1:] == ["a_metric 1.0", "z_metric 2.0"], (
+        "measurements must be emitted in sorted-by-name order, not insertion order"
+    )
 
 
 def test_status_metrics_out_writes_prometheus_text(workspace: Path) -> None:
@@ -3004,6 +3304,77 @@ def test_gc_refuses_to_evict_under_live_work(workspace: Path) -> None:
     assert forced.exit_code == ExitCode.SUCCESS, forced.output
 
 
+def test_gc_real_run_deletes_events_for_non_kept_runs_using_a_custom_keep_flag(
+    workspace: Path,
+) -> None:
+    """`gc()`'s own wrapper logic (threading a custom `--events-keep-runs` into `_gc_impl`'s
+    `keep` parameter rather than silently falling back to `settings.config.gc.events_keep_runs`)
+    and `_gc_impl`'s own REAL (non-`--dry-run`) deletion path together: every existing `gc` test
+    only ever exercises `--dry-run` (`test_gc_refuses_to_evict_under_live_work`'s "forced" call
+    included), so the actual `DELETE FROM events ...` statement has never executed in this suite,
+    and no test has ever passed a non-default `--events-keep-runs`.
+
+    Two runs: `RUN_ID` (the `workspace` fixture's, older `started_at`) and a newer one. With
+    `--events-keep-runs 1`, only the newer run is a "keeper" -- `RUN_ID`'s event must be deleted
+    and the newer run's event must survive.
+    """
+    db = workspace / "state" / "fleet.db"
+    newer_run_id = "44444444-4444-4444-8444-444444444444"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO runs (run_id, started_at, config_sha256, config_digests, "
+            "                  harness_version) VALUES (?, ?, ?, ?, ?)",
+            (newer_run_id, "2026-09-01T12:00:00+00:00", "c" * 64, "{}", "0.1.0"),
+        )
+        conn.execute(
+            "INSERT INTO events (run_id, seq, ts, level, event, event_uid, payload) "
+            "VALUES (?, 1, ?, 'info', 'old_run_event', ?, '{}')",
+            (RUN_ID, "2026-08-08T12:00:00+00:00", str(uuid.uuid4())),
+        )
+        conn.execute(
+            "INSERT INTO events (run_id, seq, ts, level, event, event_uid, payload) "
+            "VALUES (?, 1, ?, 'info', 'kept_run_event', ?, '{}')",
+            (newer_run_id, "2026-09-01T12:00:00+00:00", str(uuid.uuid4())),
+        )
+    finally:
+        conn.close()
+
+    result = runner.invoke(
+        app,
+        [*base_args(workspace), "--json", "gc", "--events-keep-runs", "1"],
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["keep_runs"] == [newer_run_id]
+    assert payload["event_rows"] == 1, "must report exactly one non-kept event row evicted"
+
+    conn = sqlite3.connect(db)
+    try:
+        remaining = {
+            row[0]
+            for row in conn.execute("SELECT event FROM events").fetchall()
+        }
+    finally:
+        conn.close()
+    assert remaining == {"kept_run_event"}, (
+        "the real (non-dry-run) DELETE must actually remove the older run's event row and leave "
+        "the newer, kept run's event row untouched"
+    )
+
+
+def test_duration_parses_and_translates_a_parse_failure_into_a_usage_error() -> None:
+    """`_duration`, unit-tested directly for the first time: no test in this suite ever passes a
+    non-default `--cache-max-age`, so neither the successful parse nor the
+    `ValueError -> UsageError` translation (naming `--cache-max-age` specifically, distinct from
+    `parse_duration_s`'s own bare message) has ever executed."""
+    from fleet.cli import UsageError, _duration
+
+    assert _duration("2h") == 7200
+    with pytest.raises(UsageError, match="--cache-max-age 'bogus'"):
+        _duration("bogus")
+
+
 ABORT_DRAIN_YAML = (
     "run:\n  monorepo_path: ../acme-monorepo\n"
     "preflight:\n  min_free_bytes: 1048576\n"
@@ -3093,6 +3464,88 @@ def test_abort_now_skips_the_drain_wait(
         conn.close()
     assert status == "PENDING"
     assert fence == 1
+
+
+def test_abort_human_readable_line_reflects_drain_vs_now_and_the_reset_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`abort()`'s own wrapper logic (thin wrapper only per brief -- `_abort_impl` is already
+    proven by the two tests above, which only ever check DB state and timing, never `result.
+    output`'s plain-text line): the `'drained' if drain else 'cancelled'` wording and the
+    `result['running_reset']`/`result['projection']` interpolation were never asserted.
+
+    Both ternary branches are exercised in separate workspaces (round VIII batch 49 review
+    finding: the first version of this test only ever invoked `--now`, so a mutation collapsing
+    the ternary to unconditional `'cancelled'` passed silently -- the default, non-`--now` drain
+    path's own text rendering was unverified by anything in the suite). The drain leg reuses
+    `ABORT_DRAIN_YAML` (`budgets.wave_drain_timeout_s: 1`) exactly as
+    `test_abort_checkpoints_and_regenerates_the_projection` above does, so the real (short) drain
+    actually completes rather than hanging on the shipped 900s default.
+    """
+    now_ws = _abort_workspace(tmp_path / "now", monkeypatch, fleet=FLEET_YAML)
+    _put_in_flight(now_ws / "state" / "fleet.db", "acme-commons", "RUNNING")
+
+    now_result = runner.invoke(app, [*base_args(now_ws), "abort", "--now", "--reason", "operator"])
+    assert now_result.exit_code == ExitCode.SUCCESS, now_result.output
+    assert "aborted (cancelled); 1 RUNNING row(s) reset, projection at" in now_result.output
+    assert "aborted (drained)" not in now_result.output
+
+    drain_ws = _abort_workspace(tmp_path / "drain", monkeypatch, fleet=ABORT_DRAIN_YAML)
+    _put_in_flight(drain_ws / "state" / "fleet.db", "acme-commons", "RUNNING")
+
+    drain_result = runner.invoke(app, [*base_args(drain_ws), "abort", "--reason", "operator"])
+    assert drain_result.exit_code == ExitCode.SUCCESS, drain_result.output
+    assert "aborted (drained); 1 RUNNING row(s) reset, projection at" in drain_result.output
+    assert "aborted (cancelled)" not in drain_result.output
+
+
+def test_count_running_phases_counts_only_running_rows_for_the_named_run(
+    workspace: Path,
+) -> None:
+    """`_count_running_phases`, unit-tested directly for the first time: it must count only
+    `status = 'RUNNING'` rows for the ONE `run_id` it was asked about -- not other statuses in
+    the same run, and not RUNNING rows belonging to a DIFFERENT run. Every existing coverage of
+    this function is indirect, through `_abort_impl`'s drain-wait loop (excluded from this
+    batch's scope, already proven), which only ever proves ">0 vs 0" for a single run, never the
+    per-run isolation.
+    """
+    from fleet.cli import _count_running_phases
+
+    db = workspace / "state" / "fleet.db"
+    other_run_id = "22222222-2222-4222-8222-222222222222"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO runs (run_id, started_at, config_sha256, config_digests, "
+            "                  harness_version) VALUES (?, ?, ?, ?, ?)",
+            (other_run_id, "2026-08-08T12:00:00+00:00", "b" * 64, "{}", "0.1.0"),
+        )
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+            "VALUES (?, 'acme-commons', 1, 'RUNNING', ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+            "VALUES (?, 'acme-billing', 1, 'PENDING', ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+            "VALUES (?, 'acme-commons', 1, 'RUNNING', ?)",
+            (other_run_id, "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+    async def _count(run_id: str) -> int:
+        return await _count_running_phases(db, run_id)
+
+    assert asyncio.run(_count(RUN_ID)) == 1, (
+        "must count the one RUNNING row for RUN_ID, ignoring the PENDING row in the same run "
+        "and the RUNNING row that belongs to a different run"
+    )
+    assert asyncio.run(_count(other_run_id)) == 1
 
 
 # --------------------------------------------------------------------------------------
@@ -6757,6 +7210,51 @@ def test_gc_disk_real_run_free_bytes_excludes_the_already_reclaimed_space(
     # 701_000_000 -- comfortably clearing `min_free_bytes` (5_000_000) and raising nothing at all.
     assert "701000000" not in str(raised.value), str(raised.value)
     assert "1000000 bytes are free" in str(raised.value), str(raised.value)
+
+
+def test_require_disk_headroom_actually_evicts_files_rather_than_only_simulating_it(
+    tmp_path: Path,
+) -> None:
+    """`_require_disk_headroom`'s own wrapper logic: it calls `_gc_disk(settings, dry_run=False)`
+    with a HARDCODED `dry_run=False` (`_gc_disk` itself is excluded from this batch, already
+    proven) -- and no existing `_require_disk_headroom` test discriminates that hardcoded literal,
+    because they all fix a workspace with an empty or absent cache dir, where `dry_run` changes
+    nothing observable (§ the test directly above this one, which exercises `_gc_disk` itself, not
+    through `_require_disk_headroom`). This test forces a REAL, non-empty eviction and checks the
+    file was actually unlinked from disk -- a `dry_run=True` would report the identical
+    `disk_bytes_freed` number while leaving every file in place.
+    """
+    from fleet.cli import _require_disk_headroom
+    from fleet.settings import FleetSettings
+
+    write_config(
+        tmp_path,
+        fleet=(
+            "run:\n  monorepo_path: ../acme-monorepo\n"
+            "budgets:\n  max_disk_gb: 1\n"
+            "preflight:\n  min_free_bytes: 1024\n"
+        ),
+    )
+    settings = FleetSettings.load(tmp_path / "config")
+    cache_dir = (settings.root / settings.config.run.cache_dir).resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    older = cache_dir / "older.bin"
+    newer = cache_dir / "newer.bin"
+    for path, size in ((older, 700_000_000), (newer, 700_000_000)):
+        with path.open("wb") as fh:
+            fh.truncate(size)
+    now = time.time()
+    os.utime(older, (now - 3600, now - 3600))
+    os.utime(newer, (now, now))
+
+    outcome = _require_disk_headroom(settings)
+
+    assert outcome["disk_bytes_freed"] == 700_000_000
+    assert not older.exists(), (
+        "a real (dry_run=False) eviction must actually unlink the oldest file from disk, not "
+        "merely report a simulated byte count"
+    )
+    assert newer.exists(), "only the oldest file needed eviction to clear the 1 GiB limit"
 
 
 # --------------------------------------------------------------------------------------
