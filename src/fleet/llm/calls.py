@@ -46,6 +46,7 @@ from fleet.llm.schemas import (
 )
 from fleet.models.base import FleetModel
 from fleet.models.enums import ModelTier
+from fleet.obs.redact import redact_mapping
 from fleet.util.hashing import sha256_text
 
 __all__ = [
@@ -258,14 +259,17 @@ def render_prompt(role: Role, evidence: Evidence) -> tuple[Message, ...]:
     """Template + evidence → the exact turns the backend will see.
 
     Byte-identical for identical inputs, in any process, under any `PYTHONHASHSEED`: the evidence
-    is serialised with `sort_keys=True` (so nested mapping order cannot leak), `ensure_ascii=True`
+    is redacted (SPEC §11.4 — a repo file's raw content can carry a hardcoded credential, and
+    nothing upstream of this call guarantees it has been scrubbed) BEFORE it is serialised, so the
+    redacted mapping is what both the backend and `prompt_sha256`'s hash ever see; then it is
+    serialised with `sort_keys=True` (so nested mapping order cannot leak), `ensure_ascii=True`
     (so a locale cannot change the bytes) and `allow_nan=False` (so a `NaN` fails loudly here
     instead of producing JSON no parser accepts). Returns a tuple, because the messages are an
     input to a hash and a caller that could append to them would change what was hashed.
     """
     template = PROMPTS[role]
     body = json.dumps(
-        dict(evidence),
+        redact_mapping(evidence),
         sort_keys=True,
         ensure_ascii=True,
         allow_nan=False,

@@ -355,3 +355,33 @@ def test_render_prompt_returns_an_immutable_turn_sequence() -> None:
     change what was sent without changing what was keyed."""
     messages: Sequence[object] = render_prompt(Role.PR_TITLE, {"repo": "x"})
     assert isinstance(messages, tuple)
+
+
+_PAT = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+
+
+def test_render_prompt_redacts_a_secret_shaped_value_in_evidence() -> None:
+    """SECURITY_REVIEW.md item #4 core gap: `render_prompt` used to `json.dumps` `evidence`
+    verbatim, so `rewrite.py`'s `"current_content": source` — a repo file's raw content, which may
+    contain a hardcoded credential — reached the configured LLM backend unredacted. Redaction must
+    run on the evidence BEFORE serialisation, not after, or the raw secret is what gets hashed by
+    `prompt_sha256` and what gets sent on the wire either way."""
+    messages = render_prompt(Role.TRANSFORM_REPAIR, {"current_content": f"line one\n{_PAT}\n"})
+    for message in messages:
+        assert _PAT not in message.content
+    # `ensure_ascii=True` escapes the guillemets, so the placeholder appears as «...».
+    assert "redacted:github_pat:" in messages[1].content
+
+
+def test_render_prompt_redaction_is_still_deterministic_and_feeds_the_hash() -> None:
+    """The redaction step must not break the byte-identical-for-identical-inputs contract that
+    `prompt_sha256` (the cache key, §11.6) depends on: two evidence dicts differing only in key
+    order, both containing the same secret, must still redact to the same placeholder (same
+    fingerprint) and hash identically — and the raw secret must never appear in what gets hashed."""
+    evidence_a = {"current_content": _PAT, "repo_id": "acme"}
+    evidence_b = {"repo_id": "acme", "current_content": _PAT}
+    first = render_prompt(Role.TRANSFORM_REPAIR, evidence_a)
+    second = render_prompt(Role.TRANSFORM_REPAIR, evidence_b)
+    assert prompt_sha256(first) == prompt_sha256(second)
+    for message in (*first, *second):
+        assert _PAT not in message.content
