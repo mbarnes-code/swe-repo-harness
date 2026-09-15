@@ -458,6 +458,17 @@ def test_a_malformed_value_reports_the_env_var_as_the_origin(tmp_path: Path) -> 
     assert "graph.break_cycles" in message
 
 
+def test_verify_network_rejects_invalid_values(tmp_path: Path) -> None:
+    """§9 security fix: `verify.network` must be Literal["none"], not env-overridable.
+    Setting FLEET_VERIFY__NETWORK=bridge must raise ConfigValidationError.
+    """
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(write_config(tmp_path), env={"FLEET_VERIFY__NETWORK": "bridge"})
+    message = str(excinfo.value)
+    assert "FLEET_VERIFY__NETWORK" in message
+    assert "verify.network" in message
+
+
 def test_models_yaml_version_1_is_refused_naming_the_two_level_shape(tmp_path: Path) -> None:
     """§9: "a `version: 1` file is refused with a message naming the two-level shape rather than
     silently reinterpreted"."""

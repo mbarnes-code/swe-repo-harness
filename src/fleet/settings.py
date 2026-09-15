@@ -736,7 +736,7 @@ class VerifySection(Section):
 
     container_memory: str = "8g"
     container_cpus: str = "4.0"
-    network: str = "none"
+    network: Literal["none"] = "none"
 
 
 class RateLimitEntry(Section):
