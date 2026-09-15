@@ -3473,14 +3473,30 @@ def test_abort_human_readable_line_reflects_drain_vs_now_and_the_reset_count(
     proven by the two tests above, which only ever check DB state and timing, never `result.
     output`'s plain-text line): the `'drained' if drain else 'cancelled'` wording and the
     `result['running_reset']`/`result['projection']` interpolation were never asserted.
-    """
-    ws = _abort_workspace(tmp_path, monkeypatch, fleet=FLEET_YAML)
-    _put_in_flight(ws / "state" / "fleet.db", "acme-commons", "RUNNING")
 
-    now_result = runner.invoke(app, [*base_args(ws), "abort", "--now", "--reason", "operator"])
+    Both ternary branches are exercised in separate workspaces (round VIII batch 49 review
+    finding: the first version of this test only ever invoked `--now`, so a mutation collapsing
+    the ternary to unconditional `'cancelled'` passed silently -- the default, non-`--now` drain
+    path's own text rendering was unverified by anything in the suite). The drain leg reuses
+    `ABORT_DRAIN_YAML` (`budgets.wave_drain_timeout_s: 1`) exactly as
+    `test_abort_checkpoints_and_regenerates_the_projection` above does, so the real (short) drain
+    actually completes rather than hanging on the shipped 900s default.
+    """
+    now_ws = _abort_workspace(tmp_path / "now", monkeypatch, fleet=FLEET_YAML)
+    _put_in_flight(now_ws / "state" / "fleet.db", "acme-commons", "RUNNING")
+
+    now_result = runner.invoke(app, [*base_args(now_ws), "abort", "--now", "--reason", "operator"])
     assert now_result.exit_code == ExitCode.SUCCESS, now_result.output
     assert "aborted (cancelled); 1 RUNNING row(s) reset, projection at" in now_result.output
     assert "aborted (drained)" not in now_result.output
+
+    drain_ws = _abort_workspace(tmp_path / "drain", monkeypatch, fleet=ABORT_DRAIN_YAML)
+    _put_in_flight(drain_ws / "state" / "fleet.db", "acme-commons", "RUNNING")
+
+    drain_result = runner.invoke(app, [*base_args(drain_ws), "abort", "--reason", "operator"])
+    assert drain_result.exit_code == ExitCode.SUCCESS, drain_result.output
+    assert "aborted (drained); 1 RUNNING row(s) reset, projection at" in drain_result.output
+    assert "aborted (cancelled)" not in drain_result.output
 
 
 def test_count_running_phases_counts_only_running_rows_for_the_named_run(
