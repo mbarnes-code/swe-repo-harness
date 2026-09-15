@@ -4117,7 +4117,7 @@ marking assumed closed were not actually driven by any test.** A whole-branch re
 `tests/` ever seeded an RHI-status row, so nothing had actually exercised the reaper's own SQL
 guard against it (the "reaper's RHI leg" language in Task 3 above describes `complete_phase`'s
 legality check, a different sweep); and (b) §12.46(i)'s population clause — `InternalDep`
-(`src/fleet/models/build.py:15`) was not re-exported through `fleet.models.__all__` at all, so the
+(`src/fleet/models/build.py:21`) was not re-exported through `fleet.models.__all__` at all, so the
 existing parametrized round-trip test never ran against it. Both closed for real in the same fix
 wave: `tests/test_repository.py::test_the_reaper_never_reclaims_a_requires_human_intervention_row`
 (Rule-12 mutation-proven — dropping the reaper SQL's `status = 'RUNNING'` guard reddens it) and
@@ -4128,7 +4128,7 @@ covers it automatically). The DONE marking stands, now for real.
 the *reported* site but not the *class* — an independent re-derivation (a runtime walk of
 `fleet.models`'s submodules plus a textual `grep '^class \w*(.*FleetModel'` sweep, both agreeing on
 36 `FleetModel` subclasses total) found one more model absent from `__all__`: `Resolution`
-(`src/fleet/models/build.py:196`). `Resolution` had a round-trip assertion
+(`src/fleet/models/build.py:202`). `Resolution` had a round-trip assertion
 (`tests/test_ecosystems.py:1187`) but only via object `==`, the exact form §12.46(i)'s literal text
 rules out ("compared via `model_fields`... NOT via object equality"). Closed identically to (b):
 `Resolution` added to `fleet.models.__all__` + a non-degenerate `SAMPLES["Resolution"]` (populated
