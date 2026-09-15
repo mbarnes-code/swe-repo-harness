@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 
 from fleet.llm.roles import Role
 from fleet.models.base import FleetModel
+from fleet.models.build import BAZEL_RULE_PATTERN
 from fleet.models.enums import BreakStrategy, Ecosystem, FailureClass
 from fleet.util.hashing import sha256_text
 
@@ -244,7 +245,7 @@ class BuildTargetProposal(FleetModel):
     rule: str = Field(
         min_length=1,
         max_length=100,
-        pattern=r"^[a-zA-Z_][a-zA-Z0-9_]*$",
+        pattern=BAZEL_RULE_PATTERN,
         description="Bazel rule name, e.g. java_library, ts_project, go_test, filegroup. A "
         "conservative identifier pattern, not a closed set: real Bazel rule names are "
         "open-ended, but this is rendered verbatim as the head of a Starlark call, so anything "

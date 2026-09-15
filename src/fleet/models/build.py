@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import Field, model_validator
 
@@ -10,6 +10,12 @@ from fleet.models.base import FleetModel
 from fleet.models.enums import ContractKind, Ecosystem  # noqa: F401  (ContractKind per §5.6)
 from fleet.models.graph import ContractId
 from fleet.models.repo import Coordinate, RepoId
+
+BAZEL_RULE_PATTERN: Final = r"^[a-zA-Z_][a-zA-Z0-9_]*$"
+"""A conservative identifier pattern for a Bazel rule keyword. Shared by `BuildTarget.rule`
+(this module) and `BuildTargetProposal.rule` (`llm/schemas.py`) so the two can never drift apart:
+both are rendered verbatim as the head of a Starlark call (`bazel/generators.py::render_target()`),
+so anything that isn't a bare identifier is a Starlark-injection primitive at either boundary."""
 
 
 class InternalDep(FleetModel):
@@ -72,7 +78,7 @@ class BuildTarget(FleetModel):
     name: str = Field(min_length=1)
     rule: str = Field(
         min_length=1,
-        pattern=r"^[a-zA-Z_][a-zA-Z0-9_]*$",
+        pattern=BAZEL_RULE_PATTERN,
         description="e.g. java_library, ts_project, go_test, filegroup. A conservative "
         "identifier pattern, not a closed set: real Bazel rule names are open-ended, but "
         "rendered verbatim as the head of a Starlark call (render_target()), so anything that "
