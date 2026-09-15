@@ -3444,6 +3444,119 @@ def test_resume_repoll_prs_ingests_the_merge_the_harness_never_saw(
     assert [c for c in forge.calls if c[1:3] == ("pr", "view")], "the forge was never asked"
 
 
+class _FailingViewForge:
+    """`gh pr view` failing every call (exit 1, as a rate limit or an expired credential would),
+    so `_pr_sync_impl`'s `except ForgeError` catch turns it into a `PrEmissionError` string.
+    Records every invocation the same way `_MergedForge` does."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        _ = (cwd, env, deadline, timeout_s)
+        call = tuple(argv)
+        self.calls.append(call)
+        if call[1:3] == ("pr", "view"):
+            return ProcResult(
+                argv=call, exit_code=1, stdout_tail="", stderr_tail="HTTP 502 Bad Gateway",
+                duration_ms=1, timed_out=False,
+            )
+        raise AssertionError(f"unexpected gh invocation: {call}")  # pragma: no cover
+
+
+def test_resume_repoll_prs_forge_failure_still_commits_steps_3_and_7_but_withholds_step_8(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A forge failure during `--repoll-prs` outranks the continuation (exit 1, not 0), and
+    `resume()`'s own body makes two further claims about that path that nothing in this suite
+    exercised before this test: `result["pr_sync_error"]` is never read anywhere else, and
+    `_resume_impl`'s `except PrEmissionError` catch (the `repoll = "failed"` branch) is never
+    reached by any other test.
+
+    The two claims, both from `resume()`'s comments/docstring: (1) "§11.5 steps 3 and 7 ran
+    anyway and are committed" — the reconciliation is durable even though the overall call fails
+    — and (2) "Step 8 did NOT run" — a forge failure must not let a real build/verify continuation
+    spend money on a fleet whose merge state the harness could not read.
+
+    Unique discriminator of: `_resume_impl` propagating the forge exception instead of catching
+    it (would crash the whole reconciliation, losing steps 3/7 too — the read below would find
+    `stale_running_reset` unapplied and no `migration_state.json`); `resume()` gating steps 3/7 on
+    `repoll` succeeding; and `resume()` calling `_continue_impl` before checking `failure` (would
+    invoke it here, tripping the monkeypatched refusal below).
+    """
+    from fleet import cli
+
+    db = workspace / "state" / "fleet.db"
+    _seed_pr_record(
+        db, "acme-commons", state="DRAFTED", url="https://github.invalid/acme/monorepo/pull/1",
+    )
+    _put_leased(db, "acme-billing", heartbeat_at=STALE_HEARTBEAT, attempts=2, fence=4, phase=2)
+
+    forge = _FailingViewForge()
+    monkeypatch.setattr(cli, "GH_RUNNER", forge)
+
+    def _refuse_continue(*_args: Any, **_kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("step 8 ran despite a forge failure this same call reported")
+
+    monkeypatch.setattr(cli, "_continue_impl", _refuse_continue)
+
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--repoll-prs"])
+
+    assert result.exit_code == ExitCode.UNEXPECTED_ERROR, result.output
+    assert "PR state ingestion failed" in result.output, result.output
+    assert "steps 3 and 7 ran anyway and are committed" in result.output, result.output
+    assert "Step 8 did NOT" in result.output, result.output
+    assert "step 8: withheld" in result.output, (
+        "the human-readable report must say step 8 was withheld, not silently drop it"
+    )
+
+    status, attempts, fence, owner, _hb = _phase_row(db, "acme-billing")
+    assert status == "PENDING", "step 3 must commit even though the overall call fails"
+    assert attempts == 2, "step 3 must not charge an attempt for a crash"
+    assert fence == 5, "step 3's fence bump must still happen"
+    assert owner is None
+    assert (workspace / "migration_state.json").exists(), "step 7 must commit even on this path"
+
+
+def test_floors_from_reads_the_mapping_not_the_report_list() -> None:
+    """`_floors_from` must key off `computed_floors` (the MAPPING), never `reentry_floors` (the
+    report LIST whose `unchanged` rows carry a reason and no floor at all).
+
+    `_floors_from`'s own docstring names the historical failure mode this guards: reading the
+    report instead of the mapping would silently drop every repo step 5 confirmed already at its
+    floor from step 8's continuation plan — "the fleet would resume minus every repo that needed
+    no demotion, which is most of it." Nothing in this suite called `_floors_from` directly
+    before this test; every other resume test exercises it only through a live `_demote_to_floors`
+    call, where `computed_floors` and a hand-built substitute happen to agree, so a mutation
+    swapping the source key would not necessarily surface as a wrong floor being SERVED — it
+    would surface as a `KeyError`/`AttributeError` deep in `_continue_impl`, or as a repo silently
+    missing from `floors`, neither of which points back at this one-line function. A direct test
+    is the cheap, precise way to pin the contract.
+    """
+    from fleet.cli import _floors_from
+
+    payload = {
+        "computed_floors": {"acme-commons": "BUILD", "acme-billing": "TRANSFORM"},
+        # A shape `_floors_from` must NOT read from: a list of per-repo reason strings, not a
+        # mapping to a `Phase` name, and covering only ONE of the two repos above — exactly the
+        # drop the docstring warns about, made concrete enough that reading this key by mistake
+        # is guaranteed to raise or under-report rather than coincidentally agree.
+        "reentry_floors": ["acme-commons: demoted to BUILD"],
+    }
+    assert _floors_from(payload) == {
+        "acme-commons": Phase.BUILD,
+        "acme-billing": Phase.TRANSFORM,
+    }
+
+
 def test_resume_dry_run_never_reaches_the_forge_even_with_repoll_prs(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
