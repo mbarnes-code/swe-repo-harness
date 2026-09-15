@@ -30,7 +30,7 @@ from typing import Final, Literal, Protocol, runtime_checkable
 
 from fleet.graph.collisions import VersionRequirement
 from fleet.graph.cycles import CoarsePlan, GraphFinding
-from fleet.models.build import BuildTarget, GazelleConfig, ToolchainRequirement, WorkspaceDep
+from fleet.models.build import BAZEL_IDENTIFIER_PATTERN, BuildTarget, GazelleConfig, ToolchainRequirement, WorkspaceDep
 from fleet.models.enums import Ecosystem
 
 __all__ = [
@@ -107,6 +107,12 @@ def render_target(target: BuildTarget) -> str:
     if target.deps:
         lines += _render_attr("deps", sorted(set(target.deps)))
     for key in sorted(target.attrs):
+        if not re.match(BAZEL_IDENTIFIER_PATTERN, key):
+            raise ValueError(
+                f"attribute name {key!r} is not a valid Bazel identifier (must match "
+                f"{BAZEL_IDENTIFIER_PATTERN}); rendered verbatim as an unescaped Starlark "
+                f"identifier in BUILD.bazel (SECURITY_REVIEW.md item #6)"
+            )
         lines += _render_attr(key, target.attrs[key])
     if target.testonly:
         lines += _render_attr("testonly", True)
@@ -703,6 +709,18 @@ def _split_extension(extension: str) -> tuple[str, str]:
     if not var or not tag:
         raise ValueError(
             f"extension id {extension!r} must be '<extension>.<tag_class>' (e.g. maven.install)"
+        )
+    if not re.match(BAZEL_IDENTIFIER_PATTERN, var):
+        raise ValueError(
+            f"extension proxy variable {var!r} is not a valid Bazel identifier (must match "
+            f"{BAZEL_IDENTIFIER_PATTERN}); rendered verbatim as an unescaped Starlark "
+            f"identifier in MODULE.bazel (SECURITY_REVIEW.md item #6)"
+        )
+    if not re.match(BAZEL_IDENTIFIER_PATTERN, tag):
+        raise ValueError(
+            f"extension tag class {tag!r} is not a valid Bazel identifier (must match "
+            f"{BAZEL_IDENTIFIER_PATTERN}); rendered verbatim as an unescaped Starlark "
+            f"identifier in MODULE.bazel (SECURITY_REVIEW.md item #6)"
         )
     return var, tag
 

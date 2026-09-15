@@ -56,6 +56,7 @@ import fleet
 from fleet import cli
 from fleet.bazel.generators import (
     VersionConflict,
+    _split_extension,
     coarse_build_targets,
     mvs_select,
     parse_range,
@@ -63,6 +64,7 @@ from fleet.bazel.generators import (
     render_build_bazel,
     render_gazelle_build,
     render_module_bazel,
+    render_target,
     resolve_workspace_deps,
     stub_alias_target,
     stub_failing_target,
@@ -498,6 +500,45 @@ def test_build_target_rule_still_accepts_a_real_bazel_rule_name() -> None:
     assert target.rule == "java_library"
 
 
+def test_render_target_rejects_a_malformed_attribute_name() -> None:
+    """SECURITY_REVIEW.md item #6's "Two latent siblings" block: `render_target()` renders
+    attribute names from `target.attrs` verbatim, unescaped, as identifiers in generated Starlark.
+    An attribute name like 'evil"name' or 'x; load(...)' should be rejected at render time rather
+    than silently passed through into the generated BUILD.bazel."""
+    target = BuildTarget(
+        package="jvm-root/com/acme/widget",
+        name="widget",
+        rule="java_library",
+        attrs={'evil"attr': "value"},  # Contains a quote, not a valid identifier
+    )
+    with pytest.raises(ValueError, match="attribute name.*not a valid Bazel identifier"):
+        render_target(target)
+
+    # Another injection shape
+    target2 = BuildTarget(
+        package="jvm-root/com/acme/widget",
+        name="widget",
+        rule="java_library",
+        attrs={'x; load("@evil//:x.bzl", "y")': "value"},  # Injection attempt
+    )
+    with pytest.raises(ValueError, match="attribute name.*not a valid Bazel identifier"):
+        render_target(target2)
+
+
+def test_render_target_accepts_valid_attribute_names() -> None:
+    """Control half of the attribute name validation: ordinary attribute names should still work."""
+    target = BuildTarget(
+        package="jvm-root/com/acme/widget",
+        name="widget",
+        rule="java_library",
+        attrs={"custom_attr": "value", "another_attr": ["list", "value"]},
+    )
+    text = render_target(target)
+    assert "custom_attr = " in text
+    assert "another_attr = " in text
+    assert 'value' in text
+
+
 def test_generated_build_text_is_deterministic_and_sorted() -> None:
     """§11.6: every ordering is an explicit `sorted`. Two runs over the same plan must produce
     identical bytes, or the integration branch shows a diff where nothing changed."""
@@ -609,6 +650,30 @@ def test_coarsening_without_a_rule_for_the_ecosystem_fails_loud() -> None:
 # =======================================================================================
 # §3.3 step 3 — MODULE.bazel
 # =======================================================================================
+
+
+def test_split_extension_rejects_a_malformed_proxy_variable() -> None:
+    """SECURITY_REVIEW.md item #6's "Two latent siblings" block: `_split_extension()` parses
+    extension IDs like "maven.install" into a proxy variable and tag class, which are rendered
+    verbatim, unescaped, as identifiers in generated MODULE.bazel Starlark.
+    A malformed proxy variable like 'evil"var' should be rejected at parse time."""
+    with pytest.raises(ValueError, match="extension proxy variable.*not a valid Bazel identifier"):
+        _split_extension('evil"var.install')
+
+
+def test_split_extension_rejects_a_malformed_tag_class() -> None:
+    """Similar to the proxy variable test, the tag class name must be validated."""
+    with pytest.raises(ValueError, match="extension tag class.*not a valid Bazel identifier"):
+        _split_extension('maven.install; load("@evil//:x.bzl", "y")')
+
+
+def test_split_extension_accepts_valid_extension_ids() -> None:
+    """Control half of the validation: ordinary extension IDs should still work."""
+    var, tag = _split_extension("maven.install")
+    assert var == "maven" and tag == "install"
+
+    var, tag = _split_extension("python.toolchain")
+    assert var == "python" and tag == "toolchain"
 
 
 def widget_dep(version: str | None = "31") -> WorkspaceDep:
