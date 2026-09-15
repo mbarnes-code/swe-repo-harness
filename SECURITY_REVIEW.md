@@ -496,6 +496,20 @@ no path was found where this specific `value` reaches a log/error string unredac
 this mechanism, resolving keys "by the *name* each target's `api_key_env` declares" — comparable to
 what the fork's `deepagents` survey found, just not applied uniformly (see Question 5).
 
+> **Status update (2026-09-15, round VII task 9).** Verification confirmed the controller's findings:
+> `SecretRegistry` is defined and constructed only in `settings.py` (lines 963–1636) but has **zero
+> call sites in any of the five `src/fleet/llm/backends/*.py` implementations** — confirmed by grep.
+> `anthropic.py::_api_key()` (line 258) and `openai_compatible.py::_api_key()` (line 339) both resolve
+> their keys via plain `os.environ.get()`, bypassing `SecretRegistry` identically. `bedrock.py` and
+> `vertex.py` ship no `_api_key()` method at all — they have no `api_key_env` field by design.
+> **Ruling (not re-litigated, merely recorded here for closure):** wrapping only `anthropic.py` in
+> `SecretRegistry` would make it the *sole inconsistent backend*, the opposite of the goal. This is a
+> **defense-in-depth gap, not a demonstrated leak** (no path was found where the bare-string `value`
+> reaches a log/error unredacted at call time). A proper fix requires threading
+> `FleetConfig.secrets: SecretRegistry` through the backend registry at construction time — a
+> cross-cutting change across all five backend files, out of scope for this round's remediation plan
+> and properly routed through an architectural follow-up ADR instead.
+
 **Question 2 (LLM cache as a second at-rest leak) — CONFIRMED SAFE, ruling out a hypothesis.**
 `src/fleet/llm/cache.py` never persists raw prompt/evidence content — only `prompt_sha256` (a hash)
 — and the model's *response* is redacted before being written to the cache (`cache.py:654`). So a
