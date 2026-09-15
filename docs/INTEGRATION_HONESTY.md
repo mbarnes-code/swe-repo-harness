@@ -10938,7 +10938,11 @@ repeat-trigger reading of it**: the same test's final section re-invokes `fleet 
 on the now-`SUPERSEDED` stub and asserts zero new `tasks`/`stubs`/`attempts` rows and zero new
 commits on `migrate/<consumer>`. **The literal "already_applied event... keyed on
 revalidation_key" sub-phrase of (4b) was investigated, not merely left unasserted**:
-`_run_one_revalidation_task` (`cli.py:14410`, repointed +38, 2026-09-11, by an uncommitted bug-fix
+`_run_one_revalidation_task` (`cli.py:14432`, repointed +22, 2026-09-15, by the finding
+buildgen.py/#7-class-cli.py symlink-guard security fixes' insertions above it in `cli.py` — pure
+insertion, confirmed by exact-line-content match against the current tree; the 2026-09-11 repoint
+to `cli.py:14410` is superseded, per this file's annotate-in-place convention, not deleted;
+repointed +38, 2026-09-11, by an uncommitted bug-fix
 pass's insertions above it in `cli.py` — pure insertion, confirmed by exact-line-content match
 against the current tree; round VI task 111's own repoint (`cli.py:14372`) is superseded, per this
 file's annotate-in-place convention, not deleted; that one had itself superseded round VI task
