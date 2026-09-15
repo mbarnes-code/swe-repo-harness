@@ -1081,8 +1081,8 @@ async def test_a_resolved_error_severity_collision_does_not_refuse_the_run(
     call — `contracts=`/`dests=` are never populated) happens to keep `severity='error'` in
     lockstep with `resolution is None` (`graph/collisions.py::_coordinate_collisions`), so no
     currently-reachable `fleet sequence` invocation can exercise the distinction. But
-    `_contract_collisions`/`_dest_collisions` (unwired today, per this module's own
-    `_phase1_exit_report` docstring: "remain unwired — a separate, later task") both allow
+    `_contract_collisions`/`_dest_collisions` (unwired today — this module's `CollisionInput`
+    construction site, `cli.py:3628-3629`, never populates `contracts=`/`dests=`) both allow
     `severity='error'` alongside a non-NULL `resolution` — a genuine "the operator must be told,
     but the harness already decided" row — and this writer's own docstring commits to reading
     `resolution IS NULL` specifically so that when either detector is wired in, an already-resolved
