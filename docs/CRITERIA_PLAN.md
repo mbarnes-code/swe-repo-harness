@@ -4128,7 +4128,7 @@ covers it automatically). The DONE marking stands, now for real.
 the *reported* site but not the *class* — an independent re-derivation (a runtime walk of
 `fleet.models`'s submodules plus a textual `grep '^class \w*(.*FleetModel'` sweep, both agreeing on
 36 `FleetModel` subclasses total) found one more model absent from `__all__`: `Resolution`
-(`src/fleet/models/build.py:189`). `Resolution` had a round-trip assertion
+(`src/fleet/models/build.py:196`). `Resolution` had a round-trip assertion
 (`tests/test_ecosystems.py:1187`) but only via object `==`, the exact form §12.46(i)'s literal text
 rules out ("compared via `model_fields`... NOT via object equality"). Closed identically to (b):
 `Resolution` added to `fleet.models.__all__` + a non-degenerate `SAMPLES["Resolution"]` (populated
