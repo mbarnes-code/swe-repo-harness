@@ -513,9 +513,7 @@ def test_resolve_support_files_never_follows_a_symlinked_carry_from_candidate(
     sentinel = "SECRET_SENTINEL_CONTENT_SHOULD_NEVER_BE_CARRIED\n"
     outside.write_text(sentinel, encoding="utf-8")
     (worktree / "Cargo.lock").symlink_to(outside)
-    declared = [
-        SupportFile(path="Cargo.lock", carry_from=["Cargo.lock"], content="GENERATED\n")
-    ]
+    declared = [SupportFile(path="Cargo.lock", carry_from=["Cargo.lock"], content="GENERATED\n")]
     resolved = cli._resolve_support_files([worktree], declared)
     assert len(resolved) == 1
     assert resolved[0].content != sentinel, resolved[0].content
