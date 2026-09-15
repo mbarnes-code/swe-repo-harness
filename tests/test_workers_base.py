@@ -48,6 +48,7 @@ from fleet.workers import rewrite as rewrite_mod
 from fleet.workers.base import (
     TIER_LADDER,
     BaseWorker,
+    UnsafeSourcePathError,
     WorkerContext,
     WorkerError,
     WorkerInput,
@@ -596,6 +597,28 @@ def test_classify_exception_leaves_an_undeclared_llm_error_to_the_generic_arms()
     schema_unsatisfied = SchemaUnsatisfied(target, 2, "response failed schema validation twice")
     assert classify_exception(schema_unsatisfied) is FailureClass.UNKNOWN
     assert error_from_exception(schema_unsatisfied).tier is None
+
+
+# =======================================================================================
+# security finding #7 — a refused symlink read classifies as UNSAFE_SOURCE_PATH, not UNKNOWN
+# =======================================================================================
+def test_classify_exception_gives_a_refused_symlink_read_its_own_non_retryable_class() -> None:
+    """`UnsafeSourcePathError` (`rewrite.py`'s `is_symlink()` guard, security finding #7) is a
+    plain `RuntimeError`, not an `LlmError` — the D133 walk above never reaches it. Left to the
+    generic isinstance arms it would classify as `UNKNOWN`, and `UNKNOWN` is retryable BY DEFAULT
+    (`NON_RETRYABLE` does not contain it): a retry only re-reads the same tracked symlink, so a
+    default-retryable `UNKNOWN` would burn a repair rung re-discovering the exact same refusal.
+    `classify_exception` must name it `UNSAFE_SOURCE_PATH` — one of `NON_RETRYABLE`'s structural
+    members, alongside `PREFLIGHT`/`CYCLE`, because the tree still names the same symlink next
+    attempt.
+    """
+    exc = UnsafeSourcePathError("java/com/acme/Evil.java: worktree path is a symlink")
+    assert classify_exception(exc) is FailureClass.UNSAFE_SOURCE_PATH
+
+    error = error_from_exception(exc)
+    assert error.failure_class is FailureClass.UNSAFE_SOURCE_PATH
+    assert error.retryable is False, "a symlink is the tree's own shape; a retry cannot differ"
+    assert error.tier is None
 
 
 # =======================================================================================

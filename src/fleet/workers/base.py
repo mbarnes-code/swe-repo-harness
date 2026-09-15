@@ -146,6 +146,7 @@ NON_RETRYABLE: frozenset[FailureClass] = frozenset(
         FailureClass.BACKEND_UNAVAILABLE,  # terminal for the RUN, exit 8 (§11.8)
         FailureClass.COLLISION,          # an unresolved `collisions` row; a re-run cannot resolve
         FailureClass.PREFLIGHT,          # the repo's own shape; identical on every attempt
+        FailureClass.UNSAFE_SOURCE_PATH,  # the tree still names the same symlink next attempt
         FailureClass.CYCLE,              # structural
         FailureClass.DEP_CONFLICT,       # structural
         FailureClass.STUB_DIVERGED,      # straight to a human, never to the ladder (§3.5.1)
@@ -551,6 +552,15 @@ def unfinished_units[O: WorkerOutput](
     return [unit for unit in all_units if unit not in done]
 
 
+class UnsafeSourcePathError(RuntimeError):
+    """A worker's unit path resolved to a symlink and was refused before the read that would
+    have dereferenced it (security finding #7, `workers/rewrite.py`). No legitimate rewrite
+    target is ever a symlink, so a tracked one can only be an attempt to have a worker read and
+    leak an arbitrary host file. Defined here, not in the raising worker's own module, so
+    `classify_exception` below can name it directly without a circular import (the worker
+    modules already import from this one, never the reverse). Raised, never swallowed (Rule 11)."""
+
+
 def _llm_origin(exc: BaseException) -> LlmError | None:
     """The nearest `LlmError` in `exc`'s own type or its `__cause__` chain (D133).
 
@@ -590,6 +600,8 @@ def classify_exception(exc: BaseException) -> FailureClass:
             return declared
     if isinstance(exc, BudgetExhausted):
         return BudgetExhausted.failure_class
+    if isinstance(exc, UnsafeSourcePathError):
+        return FailureClass.UNSAFE_SOURCE_PATH
     if isinstance(exc, TimeoutError):
         return FailureClass.TIMEOUT
     if isinstance(exc, MemoryError):

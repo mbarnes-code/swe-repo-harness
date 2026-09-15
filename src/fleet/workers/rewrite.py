@@ -76,6 +76,7 @@ from fleet.vcs.commits import (
 from fleet.vcs.git import Git, GitCommandError
 from fleet.workers.base import (
     BaseWorker,
+    UnsafeSourcePathError,
     WorkerContext,
     WorkerError,
     WorkerInput,
@@ -449,6 +450,18 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                         usage=usage,
                     )
 
+                # Security finding #7 (CRITICAL): `.is_symlink()` does NOT follow the link, unlike
+                # `.is_file()`/`.exists()` below — never swap this for either. A tracked symlink at
+                # a target path lets a malicious/compromised source repo point this read at an
+                # arbitrary absolute host path (an SSH key, a credentials file); `read_text()`
+                # would follow it exactly as the OS does, and the target's content becomes
+                # `"current_content"` in `_evidence()`, unredacted, to a third-party LLM. No
+                # legitimate rewrite target is ever a symlink, so refuse loud before the read
+                # rather than silently dereferencing (Rule 11).
+                if (root / unit).is_symlink():
+                    raise UnsafeSourcePathError(
+                        f"{unit}: worktree path is a symlink, refusing to read through it"
+                    )
                 source = (root / unit).read_text(encoding="utf-8")
                 outcome = await pipeline.rewrite_file(unit, source)
                 if outcome.conflicted:
@@ -1008,11 +1021,22 @@ def _rejected_patch(
 
 
 def _targets_are_present(root: Path, units: Sequence[str], subtree: str) -> bool:
-    """Sync filesystem probes, deliberately outside the async body (ruff ASYNC240)."""
+    """Sync filesystem probes, deliberately outside the async body (ruff ASYNC240).
+
+    Security finding #7: `.is_file()` follows a symlink, so a tracked symlink target used to
+    read as "present" here and reach `run()`'s per-unit loop looking like an ordinary file —
+    `run()`'s own `is_symlink()` guard (added for the same finding) refuses it before the read
+    regardless, but this gate is supposed to be the re-entry admission check, and treating a
+    symlink as present made THIS gate produce the wrong verdict for it: `preconditions_hold`
+    returning True on a symlinked target says the plan still describes this tree, which is false
+    once the target is not the ordinary file the plan assumed. A symlinked unit is therefore
+    "not present" here, exactly like a vanished one.
+    """
     if not root.is_dir():
         return False
     for unit in units:
-        if not (root / unit).is_file():
+        target = root / unit
+        if target.is_symlink() or not target.is_file():
             return False
         if subtree and not unit.startswith(f"{subtree}/"):
             return False

@@ -555,6 +555,11 @@ class FailureClass(StrEnum):
                                          #   (§3.5.1); goes straight to human, not to the ladder
     COLLISION = "COLLISION"              # unresolved `collisions` row (§3.1 step 8)
     PREFLIGHT = "PREFLIGHT"              # git preflight gate (§3.1 step 1)
+    UNSAFE_SOURCE_PATH = "UNSAFE_SOURCE_PATH"  # a rewrite unit's worktree path resolved to a
+                                         #   symlink (security finding #7); refused before the
+                                         #   read that would dereference it. Structural like
+                                         #   PREFLIGHT — the tree still names the same symlink on
+                                         #   the next attempt, so a retry cannot plausibly differ
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"  # token/cost/wall-clock ceiling; fail-closed (§11.2)
     TRANSIENT_INFRA = "TRANSIENT_INFRA"  # never increments `attempts` (ADR-0014)
     BACKEND_UNAVAILABLE = "BACKEND_UNAVAILABLE"  # every target for a tier is DOWN (ADR-0023).

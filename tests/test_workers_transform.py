@@ -76,6 +76,7 @@ from fleet.workers import relocate as relocate_mod
 from fleet.workers import rewrite as rewrite_mod
 from fleet.workers.base import (
     BaseWorker,
+    UnsafeSourcePathError,
     WorkerContext,
     assert_stateless,
     implements_preconditions,
@@ -692,6 +693,68 @@ def test_a_rule_conflict_leaves_the_file_unchanged_and_spends_no_rung(tmp_path: 
     assert decision.action is RetryAction.TERMINATE
     assert decision.charges_attempt is False
     assert decision.state.attempts == 0, "no rung was spent on an operator's YAML"
+
+
+# =======================================================================================
+# 5a. security finding #7 (CRITICAL) — a tracked symlink target is refused, never dereferenced
+# =======================================================================================
+def test_a_tracked_symlink_target_is_refused_before_it_is_dereferenced(tmp_path: Path) -> None:
+    """A source repo can commit a symlink at a path a `RewriteRule` targets. `Path.read_text()`
+    follows a symlink exactly like the OS does, so without a guard the target's content becomes
+    `"current_content"` in `_evidence()` and is shipped, unredacted, to a third-party LLM — a
+    complete arbitrary-host-file-read-and-egress primitive requiring no LLM compromise at all.
+
+    `(root / unit).is_symlink()` must refuse loud, before the read, with `UnsafeSourcePathError` —
+    and never merely skip the unit, which would look identical to "nothing to do here" and lose
+    the loud-failure property Rule 11 requires.
+
+    DISCRIMINATES: reverting the `is_symlink()` guard in `rewrite.py`'s per-unit loop makes this
+    test fail — `pytest.raises` sees no exception, because the old code reads the sentinel content
+    straight through the symlink and hands it to the (fake) engine instead of refusing.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, _initial_anchor = make_repo(tmp_path, {f"{DEST}/other.py": "keep\n"})
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("SENTINEL_SECRET_CONTENT\n", encoding="utf-8")
+    link_path = repo / unit
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    link_path.symlink_to(outside)
+    git(repo, "add", "--all")
+    git(repo, "commit", "-m", "attacker-controlled: track a symlink at the rewrite target")
+    anchor = git(repo, "rev-parse", "HEAD")  # phase anchor already carries the symlink
+
+    engine = FakeRewriter({"r1": lambda t: t})
+    worker = worker_with(engine)
+    payload = rewrite_payload(anchor, [unit])
+
+    with pytest.raises(UnsafeSourcePathError, match=unit):
+        asyncio.run(worker.run(make_ctx(repo), payload))
+
+    assert engine.seen == [], "the sentinel content never reached the pipeline/engine at all"
+    assert log_entries(repo, anchor) == [], "a refused unit is never committed"
+
+
+def test_targets_are_present_treats_a_symlinked_unit_as_absent(tmp_path: Path) -> None:
+    """`_targets_are_present` (`preconditions_hold`'s check) used `.is_file()`, which — like
+    `.read_text()` — follows a symlink, so a symlinked target read as "present" and admitted
+    re-entry as if the plan still described an ordinary file. A symlinked unit must read as
+    NOT present, the same verdict as a vanished one, so `preconditions_hold` returns False and
+    the phase re-runs from `phases.base_ref` rather than treating the symlink as routine.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {f"{DEST}/other.py": "keep\n"})
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("SENTINEL_SECRET_CONTENT\n", encoding="utf-8")
+    link_path = repo / unit
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    link_path.symlink_to(outside)
+    git(repo, "add", "--all")
+    git(repo, "commit", "-m", "attacker-controlled: track a symlink at the rewrite target")
+
+    worker = RewriteWorker()
+    payload = rewrite_payload(anchor, [unit])
+
+    assert asyncio.run(worker.preconditions_hold(make_ctx(repo), payload)) is False
 
 
 # =======================================================================================
