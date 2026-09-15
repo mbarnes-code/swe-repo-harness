@@ -1184,3 +1184,36 @@ def test_the_unmutated_build_authoring_fixture_still_validates_after_the_mutatio
     reply = bedrock_parse_reply(raw, bedrock_target())
 
     client_module._validate(reply, BuildFileProposal, StructuredOutputMode.TOOL_CALL)
+
+
+def test_a_build_authoring_reply_with_a_starlark_injection_rule_fails_schema_validation() -> None:
+    """Mutation of the bedrock `BUILD_AUTHORING` fixture: `rule` (`BuildTargetProposal`,
+    `src/fleet/llm/schemas.py:244`) now carries `pattern=BAZEL_IDENTIFIER_PATTERN`
+    (`^[a-zA-Z_][a-zA-Z0-9_]*$`) -- SECURITY_REVIEW.md item #6's fix, rejecting at the LLM-schema
+    boundary (the earlier, cheaper place) as well as the internal `BuildTarget.rule`
+    (`models/build.py:73`, covered separately in `tests/test_bazel.py`). This mutates
+    `targets[0].rule` to the exact injection payload from the finding's write-up: a string shaped
+    to close the intended `<rule>(` call head and inject a second top-level Starlark statement
+    into the generated `BUILD.bazel`. It satisfies every OTHER constraint on the field (non-empty,
+    under the 100-char cap) and would pass a schema-shape-only check, but fails the closed
+    identifier pattern -- the same failure mode Rule 12 forces onto `mechanism` above, applied to
+    a field one level INSIDE a nested `targets` tuple entry rather than a top-level field."""
+    raw = _load("build_authoring_bedrock_tool_call.json")
+    raw["output"]["message"]["content"][0]["toolUse"]["input"]["targets"][0]["rule"] = (
+        'filegroup(name = "x", srcs = [])\nload("@evil//:x.bzl", "y")\n#'
+    )
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    with pytest.raises(ValidationError, match="rule"):
+        client_module._validate(reply, BuildFileProposal, StructuredOutputMode.TOOL_CALL)
+
+
+def test_the_unmutated_build_authoring_fixture_still_validates_after_the_rule_mutation() -> None:
+    """Control half of the `rule`-injection mutation pair: the identical fixture, unmutated (the
+    single `targets` entry's `rule` still `"js_library"`), must still validate -- proving the
+    failure above is caused by the injection payload, not by an unrelated defect in the fixture,
+    the parse path, or `_validate` itself."""
+    raw = _load("build_authoring_bedrock_tool_call.json")
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    client_module._validate(reply, BuildFileProposal, StructuredOutputMode.TOOL_CALL)

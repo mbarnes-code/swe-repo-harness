@@ -11,6 +11,15 @@ from fleet.models.enums import ContractKind, Ecosystem  # noqa: F401  (ContractK
 from fleet.models.graph import ContractId
 from fleet.models.repo import Coordinate, RepoId
 
+BAZEL_IDENTIFIER_PATTERN = r"^[a-zA-Z_][a-zA-Z0-9_]*$"
+"""The closed shape for any bare, unescaped identifier position in generated BUILD.bazel /
+MODULE.bazel Starlark text -- currently the rule keyword head (`BuildTarget.rule`,
+`BuildTargetProposal.rule` in `llm/schemas.py`), and reused for `render_target()`'s attribute
+names / `_split_extension()`'s var+tag per SECURITY_REVIEW.md item #6. Every real Bazel rule name
+this codebase's ecosystem adapters emit already satisfies it (`java_library`, `ts_project`,
+`go_test`, `filegroup`, ...); it exists to close a Starlark-injection primitive at the schema
+boundary, not to restrict which real rules can be emitted."""
+
 
 class InternalDep(FleetModel):
     """One FIRST-PARTY dependency of a unit: a sibling repo that is migrating into this monorepo.
@@ -70,7 +79,13 @@ class BuildTarget(FleetModel):
 
     package: str = Field(description="Monorepo-relative package dir, i.e. BuildUnit.dest")
     name: str = Field(min_length=1)
-    rule: str = Field(min_length=1, description="e.g. java_library, ts_project, go_test, filegroup")
+    rule: str = Field(
+        min_length=1,
+        pattern=BAZEL_IDENTIFIER_PATTERN,
+        description="e.g. java_library, ts_project, go_test, filegroup. Pattern-constrained "
+        "(SECURITY_REVIEW.md item #6): rendered verbatim as the head of a Starlark function call "
+        "in generated BUILD.bazel, which `bazel build` evaluates.",
+    )
     load_from: str | None = Field(
         default=None, description="bzl label for the load() stmt; None for native rules"
     )

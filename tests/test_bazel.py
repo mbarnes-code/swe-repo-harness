@@ -50,6 +50,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 import fleet
 from fleet import cli
@@ -469,6 +470,32 @@ def targets_fixture() -> list[BuildTarget]:
             testonly=True,
         ),
     ]
+
+
+def test_build_target_rule_rejects_a_starlark_injection_payload() -> None:
+    """SECURITY_REVIEW.md item #6: `render_target()` (`bazel/generators.py`) does
+    `lines = [f"{target.rule}("]` -- `target.rule` is written verbatim, unescaped, as the head of
+    a generated Starlark function call in a real `BUILD.bazel` that `bazel build` evaluates.
+    `BuildTarget.rule` (`models/build.py:73`) now carries
+    `pattern=BAZEL_IDENTIFIER_PATTERN` (`^[a-zA-Z_][a-zA-Z0-9_]*$`), closing the injection
+    primitive at the model boundary. This is the exact payload from the finding's write-up: a
+    string shaped to close the intended `<rule>(` call head and inject a second top-level
+    Starlark statement."""
+    with pytest.raises(ValidationError, match="rule"):
+        BuildTarget(
+            package="jvm-root/com/acme/widget",
+            name="widget",
+            rule='filegroup(name = "x", srcs = [])\nload("@evil//:x.bzl", "y")\n#',
+        )
+
+
+def test_build_target_rule_still_accepts_a_real_bazel_rule_name() -> None:
+    """Control half of the pattern-constraint pair above: an ordinary rule name must still
+    validate, proving the pattern rejects the injection shape specifically and does not exclude
+    any legitimate Bazel rule keyword (every rule name this codebase's ecosystem adapters emit --
+    `java_library`, `ts_project`, `go_test`, `filegroup`, etc. -- is a plain identifier)."""
+    target = BuildTarget(package="jvm-root/com/acme/widget", name="widget", rule="java_library")
+    assert target.rule == "java_library"
 
 
 def test_generated_build_text_is_deterministic_and_sorted() -> None:

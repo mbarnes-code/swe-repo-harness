@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 
 from fleet.llm.roles import Role
 from fleet.models.base import FleetModel
+from fleet.models.build import BAZEL_IDENTIFIER_PATTERN
 from fleet.models.enums import BreakStrategy, Ecosystem, FailureClass
 from fleet.util.hashing import sha256_text
 
@@ -241,7 +242,14 @@ class BuildTargetProposal(FleetModel):
     never emits build-file text, so the emitted file's shape stays deterministic (§3.3)."""
 
     name: str = Field(min_length=1, max_length=200)
-    rule: str = Field(min_length=1, max_length=100)
+    rule: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=BAZEL_IDENTIFIER_PATTERN,
+        description="Reject at the LLM-schema boundary (SECURITY_REVIEW.md item #6): copied "
+        "verbatim into `BuildTarget.rule`, which is rendered unescaped as the head of a "
+        "generated Starlark function call.",
+    )
     srcs: tuple[str, ...] = Field(default=(), max_length=4096)
     deps: tuple[str, ...] = Field(default=(), max_length=1024)
     visibility: tuple[str, ...] = Field(default=(), max_length=32)
