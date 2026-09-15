@@ -447,7 +447,25 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                         usage=usage,
                     )
 
-                source = (root / unit).read_text(encoding="utf-8")
+                target = root / unit
+                if target.is_symlink():
+                    # `.is_symlink()` does NOT follow the link (unlike `.is_file()`/`.read_text()`
+                    # below). A tracked symlink can point anywhere on the host; `cli.py`'s
+                    # `_tracked_at()` lists it with no type filter, so a malicious source repo can
+                    # commit one and this loop is the read that would otherwise dereference it and
+                    # ship the target's content into `_evidence()`'s LLM-bound `current_content`
+                    # (SECURITY_REVIEW.md #7). Refused loudly — no silent skip, no falling back to
+                    # a different content source.
+                    return self._failed(
+                        FailureClass.PREFLIGHT,
+                        retryable=False,
+                        detail=f"{unit}: refusing to read a symlink; the repo's own shape",
+                        landed=landed,
+                        remaining=owed[index:],
+                        output=output,
+                        usage=usage,
+                    )
+                source = target.read_text(encoding="utf-8")
                 outcome = await pipeline.rewrite_file(unit, source)
                 if outcome.conflicted:
                     return self._rule_conflict(outcome, landed, owed[index:], output, usage)
@@ -974,11 +992,18 @@ def _rejected_patch(
 
 
 def _targets_are_present(root: Path, units: Sequence[str], subtree: str) -> bool:
-    """Sync filesystem probes, deliberately outside the async body (ruff ASYNC240)."""
+    """Sync filesystem probes, deliberately outside the async body (ruff ASYNC240).
+
+    A symlinked unit does not count as present: `.is_file()` alone follows the link and would
+    admit re-entry against a path that only exists to gate whether a rewrite is attempted at all
+    (SECURITY_REVIEW.md #7) — `run()`'s own read refuses it regardless, but a `True` here would
+    still misreport the tree as matching the plan.
+    """
     if not root.is_dir():
         return False
     for unit in units:
-        if not (root / unit).is_file():
+        target = root / unit
+        if target.is_symlink() or not target.is_file():
             return False
         if subtree and not unit.startswith(f"{subtree}/"):
             return False

@@ -695,6 +695,71 @@ def test_a_rule_conflict_leaves_the_file_unchanged_and_spends_no_rung(tmp_path: 
 
 
 # =======================================================================================
+# 5a. SECURITY_REVIEW.md #7 — a tracked symlink is refused, not dereferenced
+# =======================================================================================
+def test_run_refuses_a_tracked_symlink_instead_of_reading_through_it(tmp_path: Path) -> None:
+    """A malicious source repo can commit a tracked symlink to an arbitrary host path.
+
+    `cli.py`'s `_tracked_at()` lists it with no type filter, and this loop's `read_text()` used to
+    follow it like any other file, handing the target's content to the pipeline and, downstream,
+    to `_evidence()`'s LLM-bound `current_content`. `.is_symlink()` (checked before the read, and
+    which does NOT itself follow the link) must refuse it outright: no commit, no engine call, and
+    the failure must be loud rather than a silent skip or a fallback to different content.
+    """
+    secret = tmp_path / "host-only-secret.txt"
+    secret.write_text("classified\n", encoding="utf-8")
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {f"{DEST}/keep.py": "alpha\n"})
+    link = repo / unit
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(secret)
+    git(repo, "add", "--all")
+    git(repo, "commit", "-m", "commit a tracked symlink")
+    anchor = git(repo, "rev-parse", "HEAD")
+    assert link.is_symlink(), "fixture precondition: a REAL OS-level symlink, not a mock"
+
+    engine = FakeRewriter({"r1": lambda t: t.replace("classified", "LEAKED")})
+    worker = worker_with(engine)
+    payload = rewrite_payload(anchor, [unit])
+
+    result = asyncio.run(worker.run(make_ctx(repo), payload))
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.PREFLIGHT
+    assert result.error.retryable is False, "a repo's own shape is identical on every retry"
+    assert unit in result.error.stderr_tail
+    assert "symlink" in result.error.stderr_tail
+    assert engine.seen == [], "the engine must never see the symlink target's content"
+    assert log_entries(repo, anchor) == [], "nothing was committed"
+
+
+def test_preconditions_hold_does_not_admit_a_symlinked_target_as_present(tmp_path: Path) -> None:
+    """`_targets_are_present` gates re-entry (§7.1): the checkpoint narrows work to units still
+    owed, and a unit that exists only as a symlink must not be reported present, since that is
+    the one check deciding whether a rewrite over this tree is attempted at all.
+    """
+    secret = tmp_path / "host-only-secret.txt"
+    secret.write_text("classified\n", encoding="utf-8")
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {f"{DEST}/keep.py": "alpha\n"})
+    link = repo / unit
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(secret)
+    git(repo, "add", "--all")
+    git(repo, "commit", "-m", "commit a tracked symlink")
+
+    payload = rewrite_payload(anchor, [unit])
+    assert asyncio.run(RewriteWorker().preconditions_hold(make_ctx(repo), payload)) is False
+
+    link.unlink()
+    (repo / unit).write_text("alpha\n", encoding="utf-8")
+    assert asyncio.run(RewriteWorker().preconditions_hold(make_ctx(repo), payload)) is True, (
+        "control: a real file at the same path IS reported present"
+    )
+
+
+# =======================================================================================
 # 5b. D49 — the dead patch cap enforced, and the LLM branch gated the same way
 # =======================================================================================
 def test_an_oversize_deterministic_patch_is_rejected_before_it_is_ever_committed(
