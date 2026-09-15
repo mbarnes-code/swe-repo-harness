@@ -11102,3 +11102,554 @@ def test_worker_factory_passes_the_runner_through_only_when_one_is_given() -> No
     sentinel: Any = object()
     wired = _worker("buildverify", runner=sentinel)
     assert wired._runner is sentinel  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------------------
+# Round VIII §15.1 item 3, Wave 7.5 batch 44 -- cli.py monorepo/stub facts plumbing (group G6a):
+# `_validate_monorepo_dir_overrides`, `_dest_for`, `_internal_label`, `_unit_deps`,
+# `_active_stub_facts_by_provider`, `_create_stub_records`, `_ActiveStub`, `_active_stub_facts`,
+# `_active_stubs_by_consumer`. `_detect_transform_stub_triggers` is already proven and excluded.
+#
+# Each test below closes one branch that survived every existing reaching test in
+# `tests/test_build_e2e.py`, `tests/test_bazel.py`, and this file's own earlier stub-record
+# tests (`_active_stub_facts_by_provider`'s multi-row-per-consumer shape, `_create_stub_records`'s
+# missing-`coordinates`-row guard, `_active_stub_facts`'s ACTIVE-state filter, and so on) --
+# named in each docstring against the specific existing test(s) that leave it uncovered.
+# --------------------------------------------------------------------------------------
+
+
+def test_validate_monorepo_dir_overrides_permits_two_overrides_that_swap_directories() -> None:
+    """(G6a) `tests/test_build_e2e.py::test_an_override_colliding_with_another_adapters_
+    directory_is_refused` proves the RAISE branch (an override aimed at a directory some
+    *un-overridden* adapter still owns). No test proves the other half of the same set
+    comparison: `taken` deliberately excludes every OVERRIDDEN ecosystem's own default
+    (`eco not in overrides`) so two overrides may legitimately swap/vacate directories between
+    themselves. A mutation flipping that filter to `eco in overrides` would make this raise
+    (false positive) while leaving the existing e2e test's own single-override case unchanged --
+    that test alone cannot see the flip.
+    """
+    from fleet import ecosystems
+    from fleet.cli import _validate_monorepo_dir_overrides
+    from fleet.models.enums import Ecosystem
+
+    ecosystems.discover()
+    defaults = ecosystems.monorepo_dirs()
+
+    # NPM is redirected onto PyPI's OWN default ("py") -- but PyPI is ALSO overridden (to a
+    # directory no adapter owns by default), so PyPI's default is excluded from `taken` and this
+    # must be permitted, not refused as a collision.
+    overrides = {
+        Ecosystem.NPM: defaults[Ecosystem.PYPI],
+        Ecosystem.PYPI: "vendored_py_elsewhere",
+    }
+    _validate_monorepo_dir_overrides(overrides)  # must not raise
+
+
+def test_dest_for_override_substitutes_only_the_leading_monorepo_dir_segment() -> None:
+    """(G6a) A direct, fast unit-level proof of `_dest_for`'s override arithmetic -- every
+    existing exercise of it (`tests/test_build_e2e.py`'s `monorepo_dir_overrides` tests) goes
+    through a full `scan -> transform -> build` fixture with real Bazel/git. `layout()`'s own
+    `adapter.monorepo_dir / adapter.path_tail(coordinate)` shape means the override must replace
+    ONLY the leading segment and leave every deeper segment (`path_tail`'s own group-path tree,
+    e.g. `com/acme/provider`) untouched -- a mutation that substitutes the wrong half (e.g. drops
+    `tail` and keeps `head`) would corrupt every multi-segment destination, which the e2e
+    fixture's own two-segment tail (`acme/ui`) does not discriminate as sharply as a three-
+    segment Maven group path does.
+    """
+    from fleet import ecosystems
+    from fleet.cli import _dest_for, _RepoFacts
+    from fleet.models.enums import Ecosystem
+    from fleet.models.repo import Coordinate
+
+    ecosystems.discover()
+    facts = _RepoFacts(
+        dest_path=None,
+        ecosystem=Ecosystem.MAVEN,
+        published=Coordinate(ecosystem=Ecosystem.MAVEN, group="com.acme", name="provider"),
+    )
+    default = _dest_for("acme-provider", facts, overrides={})
+    assert default == "java/com/acme/provider", default
+
+    overridden = _dest_for("acme-provider", facts, overrides={Ecosystem.MAVEN: "vendored_java"})
+    assert overridden == "vendored_java/com/acme/provider", overridden
+
+    # An override for a DIFFERENT, un-overridden ecosystem must not touch this repo at all.
+    untouched = _dest_for("acme-provider", facts, overrides={Ecosystem.NPM: "vendored_ts"})
+    assert untouched == default, untouched
+
+
+def test_internal_label_names_the_leaf_via_path_segment_and_matches_target_name() -> None:
+    """(G6a) Every existing caller (`tests/test_bazel.py`, `tests/test_build_e2e.py`) uses
+    `_internal_label` to COMPUTE its own expected label -- the same function producing both the
+    actual and the oracle, so a defect in `_internal_label` itself is invisible to all of them.
+    This pins a literal, independently-written expected string (mixed-case leaf, trailing slash)
+    and cross-checks the docstring's own byte-identity claim against `ecosystems.base.target_name`
+    -- the function on the "other side of the edge" the docstring says must never diverge.
+    """
+    from fleet.cli import _internal_label
+    from fleet.ecosystems.base import target_name
+    from fleet.models.build import BuildUnit
+
+    # The trailing slash is only stripped when computing the LEAF; the package half of the
+    # label is `dest` verbatim (never re-normalized), so it survives in the package position.
+    assert _internal_label("java/com/acme/Provider/") == "//java/com/acme/Provider/:provider"
+    assert _internal_label("java/com/acme/Provider") == "//java/com/acme/Provider:provider"
+
+    unit = BuildUnit(
+        unit_id="acme-provider", dest="java/com/acme/Provider", ecosystem=Ecosystem.MAVEN
+    )
+    label = _internal_label(unit.dest)
+    assert label.rsplit(":", maxsplit=1)[-1] == target_name(unit), (
+        "_internal_label's own leaf must be byte-identical to ecosystems.base.target_name's, "
+        "per the docstring's D12 label-agreement invariant"
+    )
+
+
+async def test_unit_deps_redirects_a_dispatched_edge_to_its_own_stub_bazel_label(
+    tmp_path: Path,
+) -> None:
+    """(G6a) `_unit_deps`'s entire reason to exist per its own docstring: "An edge whose
+    destination has an ACTIVE `stubs` row ... is redirected to point at the stub's own Bazel
+    label instead of the provider's." `test_create_stub_records_keys_each_row_on_its_own_
+    triggers_coordinate` (above) disclosed in its own final assertion message that "no test here
+    drives _unit_deps end-to-end against these rows" -- this closes that gap with a direct call
+    against a real `edges`/`stubs`/`coordinates` fixture, not a full CLI build. The stub's
+    `bazel_label`/`pinned_version` are hand-picked sentinels distinct from the provider's real
+    dest/label/version, so a redirect that silently fell through to ordinary resolution would be
+    caught by every one of the three assertions below, not just one.
+    """
+    import aiosqlite
+
+    from fleet.cli import _RepoFacts, _unit_deps
+    from fleet.models.enums import EdgeKind, NodeKind
+    from fleet.models.graph import edge_key_for
+    from fleet.models.repo import Coordinate
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import EdgeRow, SqliteStateRepository
+
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    write_config(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+
+    db_path = tmp_path / "base" / "fleet.db"
+    await initialize_database(db_path)
+    coord_key = "maven:com.acme:provider"
+    async with StateWriter(db_path, owner="test-batch44-unit-deps") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            for repo_id in ("acme-provider", "acme-consumer"):
+                await repo.upsert_repo(
+                    repo_id, name=repo_id, url=f"https://example.invalid/{repo_id}.git", now=now
+                )
+            edge = EdgeRow(
+                edge_key=edge_key_for(
+                    src_kind=NodeKind.REPO,
+                    src_id="acme-consumer",
+                    dst_kind=NodeKind.REPO,
+                    dst_ref=coord_key,
+                    kind=EdgeKind.DECLARED_DEP,
+                    evidence_path="pom.xml",
+                    evidence_line=1,
+                ),
+                run_id=RUN_ID,
+                src_id="acme-consumer",
+                dst_id="acme-provider",
+                dst_coord_key=coord_key,
+                kind=EdgeKind.DECLARED_DEP,
+                base_confidence=1.0,
+                confidence=0.9,
+                evidence_path="pom.xml",
+                evidence_line=1,
+                detected_at=now.isoformat(),
+            )
+            await repo.insert_edges([edge])
+
+            async def unit(conn: aiosqlite.Connection) -> None:
+                await conn.execute(
+                    "INSERT INTO coordinates (coord_key, ecosystem, grp, name, version, "
+                    "  owner_repo_id, first_seen_at) "
+                    "VALUES (?, 'maven', 'com.acme', 'provider', '2.0.0', 'acme-provider', ?)",
+                    (coord_key, now.isoformat()),
+                )
+                await conn.execute(
+                    "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, "
+                    "  consumer_repo_id, provider_repo_id, pinned_version, bazel_label, state, "
+                    "  stub_fidelity, revalidation_round, max_revalidation_rounds, "
+                    "  state_changed_at, created_at) "
+                    "VALUES (?, ?, 'acme-consumer', ?, 'acme-consumer', 'acme-provider', "
+                    "  '1.9.9', '//third_party/stubs/SENTINEL:sentinel-label', 'ACTIVE', "
+                    "  'PUBLISHED_ARTIFACT', 0, 2, ?, ?)",
+                    (str(uuid.uuid4()), RUN_ID, coord_key, now.isoformat(), now.isoformat()),
+                )
+
+            await writer.submit(unit)
+
+            facts = {
+                "acme-consumer": _RepoFacts(dest_path="repos/consumer", ecosystem=Ecosystem.MAVEN),
+                "acme-provider": _RepoFacts(
+                    dest_path="third_party/provider",
+                    ecosystem=Ecosystem.MAVEN,
+                    published=Coordinate(
+                        ecosystem=Ecosystem.MAVEN,
+                        group="com.acme",
+                        name="provider",
+                        version_spec="2.0.0",
+                    ),
+                ),
+            }
+            deps = await _unit_deps(read_conn, settings, RUN_ID, facts=facts, overrides={})
+        finally:
+            await read_conn.close()
+
+    consumer_deps = deps["acme-consumer"]
+    assert len(consumer_deps) == 1, consumer_deps
+    dep = consumer_deps[0]
+    assert dep.label == "//third_party/stubs/SENTINEL:sentinel-label", (
+        f"a dispatched edge to an ACTIVE-stub coordinate must redirect to the STUB's own label, "
+        f"never the provider's real one -- got {dep.label!r}"
+    )
+    from fleet.bazel.layout import stub_dest
+
+    assert dep.dest == stub_dest(coord_key), dep.dest
+    assert dep.published is not None and dep.published.version_spec == "1.9.9", (
+        "the redirected dep's published coordinate must carry the STUB's pinned_version "
+        f"(1.9.9), not the provider's real published version (2.0.0) -- got {dep.published!r}"
+    )
+
+
+async def test_active_stub_facts_by_provider_carries_every_active_row_for_one_consumer(
+    tmp_path: Path,
+) -> None:
+    """(G6a, D131/M1) `_active_stub_facts_by_provider` is never called directly by any existing
+    test -- only transitively through `_detect_transform_stub_triggers` (already proven and
+    excluded from this batch), whose own fixture (`_seed_transitive_stub_fixture`) gives every
+    consumer at most ONE ACTIVE stub row. The return type (`tuple[InheritedStubFact, ...]` per
+    consumer) says a consumer can carry several -- this proves the multi-row case directly: one
+    repo that is itself an active stub consumer for TWO different (provider, coordinate) pairs
+    gets BOTH facts back, not just the last one a plain-assignment (instead of accumulating)
+    mutation would keep.
+    """
+    import aiosqlite
+
+    from fleet.cli import _active_stub_facts_by_provider
+    from fleet.orchestrator.stubs import InheritedStubFact
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    db_path = tmp_path / "fleet.db"
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-batch44-facts-by-provider") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            for repo_id in ("acme-consumer", "acme-provider-a", "acme-provider-b"):
+                await repo.upsert_repo(
+                    repo_id, name=repo_id, url=f"https://example.invalid/{repo_id}.git", now=now
+                )
+
+            async def unit(conn: aiosqlite.Connection) -> None:
+                for stub_id, coord_key, provider_repo_id in (
+                    (
+                        "11111111-1111-4111-8111-000000000001",
+                        "maven:com.acme:a",
+                        "acme-provider-a",
+                    ),
+                    (
+                        "11111111-1111-4111-8111-000000000002",
+                        "maven:com.acme:b",
+                        "acme-provider-b",
+                    ),
+                ):
+                    await conn.execute(
+                        "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, "
+                        "  consumer_repo_id, provider_repo_id, pinned_version, bazel_label, "
+                        "  state, stub_fidelity, revalidation_round, max_revalidation_rounds, "
+                        "  state_changed_at, created_at) "
+                        "VALUES (?, ?, 'acme-consumer', ?, 'acme-consumer', ?, '1.0.0', "
+                        "  '//x:x', 'ACTIVE', 'PUBLISHED_ARTIFACT', 0, 2, ?, ?)",
+                        (
+                            stub_id,
+                            RUN_ID,
+                            coord_key,
+                            provider_repo_id,
+                            now.isoformat(),
+                            now.isoformat(),
+                        ),
+                    )
+
+            await writer.submit(unit)
+            facts_by_provider = await _active_stub_facts_by_provider(read_conn, RUN_ID)
+        finally:
+            await read_conn.close()
+
+    consumer_facts = facts_by_provider["acme-consumer"]
+    assert len(consumer_facts) == 2, (
+        f"a consumer with two independent ACTIVE stub rows must inherit BOTH, got "
+        f"{consumer_facts!r}"
+    )
+    assert set(consumer_facts) == {
+        InheritedStubFact(
+            provider_repo_id="acme-provider-a",
+            coord_key="maven:com.acme:a",
+            fidelity=StubFidelity.PUBLISHED_ARTIFACT,
+        ),
+        InheritedStubFact(
+            provider_repo_id="acme-provider-b",
+            coord_key="maven:com.acme:b",
+            fidelity=StubFidelity.PUBLISHED_ARTIFACT,
+        ),
+    }, consumer_facts
+
+
+async def test_create_stub_records_handles_a_trigger_whose_coordinate_row_is_missing(
+    tmp_path: Path,
+) -> None:
+    """(G6a) `version_rows and version_rows[0][0] is not None` guards against an EMPTY result
+    list, not only a NULL `version` column -- `test_create_stub_records_inserts_a_valid_row_for_
+    both_fidelities` (above) seeds a `coordinates` row for the trigger's `coord_key` even in its
+    EMPTY_FAILING case (NULL version, row still present). No existing test drives the case where
+    `coordinates` has NO row at all for that `coord_key` -- removing the `version_rows and` guard
+    (leaving only `version_rows[0][0] is not None`) would raise `IndexError` on this case alone,
+    while every existing `_create_stub_records` test would stay green.
+    """
+    from fleet.cli import _create_stub_records
+    from fleet.orchestrator.stubs import StubTrigger
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    db_path = tmp_path / "fleet.db"
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-batch44-missing-coord") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            for repo_id in ("acme-provider", "acme-consumer"):
+                await repo.upsert_repo(
+                    repo_id, name=repo_id, url=f"https://example.invalid/{repo_id}.git", now=now
+                )
+            # Deliberately NO `coordinates` row for this coord_key at all.
+            trigger = StubTrigger(
+                consumer_repo_id="acme-consumer",
+                provider_repo_id="acme-provider",
+                coord_key="maven:com.acme:never-seen",
+            )
+            created = await _create_stub_records(
+                read_conn,
+                writer,
+                run_id=RUN_ID,
+                triggers=[trigger],
+                max_revalidation_rounds=2,
+                now=now,
+            )
+        finally:
+            await read_conn.close()
+
+    assert len(created) == 1, created
+    assert created[0].fidelity is StubFidelity.EMPTY_FAILING, (
+        f"a trigger whose coordinate row does not exist must degrade to EMPTY_FAILING, not "
+        f"crash -- got {created[0]!r}"
+    )
+    plain = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        rows = plain.execute(
+            "SELECT pinned_version FROM stubs WHERE run_id = ?", (RUN_ID,)
+        ).fetchall()
+    finally:
+        plain.close()
+    assert rows == [(None,)], rows
+
+
+def test_active_stub_is_frozen_and_compares_by_value() -> None:
+    """(G6a) `_ActiveStub` instances are shared, deduplicated, read-only facts -- its own
+    docstring: "the single query `_stub_workspace_deps` and `_stub_package_files` both read".
+    No test asserts the `frozen=True` that makes sharing one instance across two independent
+    BUILD-phase renderers safe: if either caller ever mutated a field, the other caller's
+    already-emitted package would silently disagree. Dropping `frozen=True` from the class's own
+    decorator is a real, one-line source change this test catches that no other test in this
+    file's stub suite would.
+    """
+    from dataclasses import FrozenInstanceError
+
+    from fleet.cli import _ActiveStub
+
+    stub = _ActiveStub(
+        coord_key="maven:com.acme:x",
+        provider_repo_id="acme-x",
+        pinned_version="1.0.0",
+        fidelity="PUBLISHED_ARTIFACT",
+    )
+    with pytest.raises(FrozenInstanceError):
+        stub.pinned_version = "2.0.0"  # type: ignore[misc]
+
+    same = _ActiveStub(
+        coord_key="maven:com.acme:x",
+        provider_repo_id="acme-x",
+        pinned_version="1.0.0",
+        fidelity="PUBLISHED_ARTIFACT",
+    )
+    assert stub == same
+
+
+async def test_active_stub_facts_excludes_non_active_rows_and_keeps_field_order(
+    tmp_path: Path,
+) -> None:
+    """(G6a) `_active_stub_facts` is never called directly by any existing test -- only via
+    `_stub_workspace_deps`/`_stub_package_files`'s own e2e fixtures, none of which ever seed a
+    non-`ACTIVE` `stubs` row alongside an `ACTIVE` one for the SAME run. This proves the `state =
+    'ACTIVE'` predicate itself (a `SUPERSEDED` row's coordinate must never appear) and that each
+    of the four selected columns lands in the field `_ActiveStub` says it does -- using four
+    visibly distinct values so a column-index transcription bug (e.g. swapping
+    `provider_repo_id`/`pinned_version`) cannot pass by accident.
+    """
+    import aiosqlite
+
+    from fleet.cli import _active_stub_facts, _ActiveStub
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    db_path = tmp_path / "fleet.db"
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-batch44-active-filter") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            for repo_id in ("acme-consumer-1", "acme-consumer-2", "acme-provider-live"):
+                await repo.upsert_repo(
+                    repo_id, name=repo_id, url=f"https://example.invalid/{repo_id}.git", now=now
+                )
+
+            async def unit(conn: aiosqlite.Connection) -> None:
+                await conn.execute(
+                    "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, "
+                    "  consumer_repo_id, provider_repo_id, pinned_version, bazel_label, state, "
+                    "  stub_fidelity, revalidation_round, max_revalidation_rounds, "
+                    "  state_changed_at, created_at) "
+                    "VALUES ('11111111-1111-4111-8111-000000000031', ?, 'acme-consumer-1', "
+                    "  'maven:com.acme:live', 'acme-consumer-1', 'acme-provider-live', "
+                    "  '4.4.4', '//x:x', 'ACTIVE', 'PUBLISHED_ARTIFACT', 0, 2, ?, ?)",
+                    (RUN_ID, now.isoformat(), now.isoformat()),
+                )
+                # A SUPERSEDED row at a DIFFERENT coord_key -- must never appear in the result.
+                # `resolved_at` must be set: schema.sql's own CHECK (state = 'ACTIVE' OR
+                # resolved_at IS NOT NULL).
+                await conn.execute(
+                    "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, "
+                    "  consumer_repo_id, provider_repo_id, pinned_version, bazel_label, state, "
+                    "  stub_fidelity, revalidation_round, max_revalidation_rounds, "
+                    "  state_changed_at, resolved_at, created_at) "
+                    "VALUES ('11111111-1111-4111-8111-000000000032', ?, 'acme-consumer-2', "
+                    "  'maven:com.acme:gone', 'acme-consumer-2', 'acme-provider-live', "
+                    "  '5.5.5', '//y:y', 'SUPERSEDED', 'PUBLISHED_ARTIFACT', 1, 2, ?, ?, ?)",
+                    (RUN_ID, now.isoformat(), now.isoformat(), now.isoformat()),
+                )
+
+            await writer.submit(unit)
+            facts = await _active_stub_facts(read_conn, RUN_ID)
+        finally:
+            await read_conn.close()
+
+    assert set(facts) == {"maven:com.acme:live"}, (
+        f"a SUPERSEDED row must never appear -- got {facts!r}"
+    )
+    assert facts["maven:com.acme:live"] == _ActiveStub(
+        coord_key="maven:com.acme:live",
+        provider_repo_id="acme-provider-live",
+        pinned_version="4.4.4",
+        fidelity="PUBLISHED_ARTIFACT",
+    ), facts["maven:com.acme:live"]
+
+
+async def test_active_stubs_by_consumer_includes_empty_failing_unlike_workspace_deps(
+    tmp_path: Path,
+) -> None:
+    """(G6a) The function's own docstring: "EMPTY_FAILING rows are INCLUDED here, unlike
+    `_stub_workspace_deps`'s PUBLISHED_ARTIFACT-only filter." The only existing direct caller
+    (`test_pr_impl_admits_a_second_layer_dependent_and_reports_stub_limited_not_full`) only ever
+    seeds PUBLISHED_ARTIFACT rows, so the EMPTY_FAILING-inclusion half of this function's WHERE
+    clause (`state = 'ACTIVE'`, deliberately no `stub_fidelity` filter) has never been exercised.
+    One consumer with one of each fidelity must get BOTH back.
+    """
+    import aiosqlite
+
+    from fleet.cli import _active_stubs_by_consumer
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    now = datetime(2026, 9, 10, tzinfo=UTC)
+    db_path = tmp_path / "fleet.db"
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-batch44-empty-failing-included") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            for repo_id in ("acme-consumer", "acme-provider-published", "acme-provider-empty"):
+                await repo.upsert_repo(
+                    repo_id, name=repo_id, url=f"https://example.invalid/{repo_id}.git", now=now
+                )
+
+            async def unit(conn: aiosqlite.Connection) -> None:
+                for stub_id, coord_key, provider_repo_id, fidelity, version in (
+                    (
+                        "11111111-1111-4111-8111-000000000021",
+                        "maven:com.acme:published",
+                        "acme-provider-published",
+                        "PUBLISHED_ARTIFACT",
+                        "1.0.0",
+                    ),
+                    (
+                        "11111111-1111-4111-8111-000000000022",
+                        "maven:com.acme:empty",
+                        "acme-provider-empty",
+                        "EMPTY_FAILING",
+                        None,
+                    ),
+                ):
+                    await conn.execute(
+                        "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, "
+                        "  consumer_repo_id, provider_repo_id, pinned_version, bazel_label, "
+                        "  state, stub_fidelity, revalidation_round, max_revalidation_rounds, "
+                        "  state_changed_at, created_at) "
+                        "VALUES (?, ?, 'acme-consumer', ?, 'acme-consumer', ?, ?, '//x:x', "
+                        "  'ACTIVE', ?, 0, 2, ?, ?)",
+                        (
+                            stub_id,
+                            RUN_ID,
+                            coord_key,
+                            provider_repo_id,
+                            version,
+                            fidelity,
+                            now.isoformat(),
+                            now.isoformat(),
+                        ),
+                    )
+
+            await writer.submit(unit)
+            per_consumer = await _active_stubs_by_consumer(read_conn, RUN_ID)
+        finally:
+            await read_conn.close()
+
+    stubs_for_consumer = per_consumer["acme-consumer"]
+    assert stubs_for_consumer == {
+        "maven:com.acme:published": StubFidelity.PUBLISHED_ARTIFACT,
+        "maven:com.acme:empty": StubFidelity.EMPTY_FAILING,
+    }, stubs_for_consumer
