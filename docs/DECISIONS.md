@@ -15814,3 +15814,24 @@ REVALIDATION)`, catch `RevalidationBudgetExhausted` → `settle_revalidation(bud
 MECHANISM, M, includes the `VerifyPipelineWorker` fix above) lands first; B2 (the §12.39 case (ii)
 two-round fixture proving `BUDGET_EXHAUSTED` through the real path — TEST-ONLY, S/M) lands only
 after B1. §12.39 stays OUT of the `<n> of 48` count until both land.
+
+---
+
+## ADR-0137 — §12.29 D76 / item #5 Finding B: Cargo repository vendoring requires network access during `--network=none` verification; disclosed as a known limitation
+
+**Decision (2026-09-15, round VII controller, security-review fixes task 5).** `SECURITY_REVIEW.md` item #5 Finding B (empirically confirmed via direct `--network=none` Docker runs against a throwaway Rust crate with committed lockfile) reveals that `crate_universe`'s `LockGenerator::generate` invokes `cargo fetch` **without the `--locked` flag, on every Phase 3/Phase 4 Cargo build**, and a committed `Cargo.lock` does not prevent this network requirement — `cargo fetch` still needs to reach the registry to download the actual crate archives, lockfile or not (table at `SECURITY_REVIEW.md` lines 304-308 documents three scenarios: no lock, real committed lock with `--locked`, real committed lock without the flag, all three failing with `Could not resolve host: index.crates.io` exit 101 under `--network=none`).
+
+This affects **all ~33 Cargo-touching repos** in the local Gitea corpus (not a lock/no-lock subset), a wider blast radius than §12.29's original scope. **This is a real, reproducible build-time failure mode currently invisible to the harness's own error handling** — no dedicated `FailureClass` distinguishes a Cargo-registry DNS failure from any other `bazel build` exit code, because `classify_build_failure()` deliberately classifies from mechanical evidence only (Global Constraints' note on `classify_build_failure()`'s docstring, which forbids the "add a network-shaped `FailureClass`" remediation Finding B originally offered). Currently-affected Cargo repos surface as ordinary `BUILD_ERROR` retries that exhaust the repair ladder without a distinguishing signal.
+
+**Rationale.** Cargo's offline-vendoring story is architecturally different from Go/NPM/JVM, whose resolvers produce genuine lockfiles pre-build or (Gazelle) run zero-network by explicit design (`ecosystems/go.py:386-392`). Fixing this requires a **structural** solution: a `cargo vendor`-based full-source vendoring approach analogous to this project's own documented pattern for other sovereign-build efforts (`CLAUDE.md` Sovereign vendoring section), or a Cargo-specific offline-registry cache mirroring `ecosystems/go.py`'s zero-network approach. Both are genuine engineering work, not a quick-fix classifier or `FailureClass` addition, so they are out of scope for this round's remediation plan. **The decision is to disclose this as a known, documented limitation of the current `crate_universe` integration, not to silence it further.**
+
+**What's Resolved.** Finding A (Finding A — the `verify.network` field was an unvalidated `str` instead of `Literal["none"]`, allowing an env-var override to bypass the sandbox's network guarantee) was fixed in Task 4 by constraining `VerifySection.network` to `Literal["none"]`, ensuring the type system enforces the design intent that verification is always hermetic.
+
+**What Remains Open and Disclosed.** Finding B: Cargo's own network needs during `cargo fetch`. A future round (not this one) will either:
+1. Implement the structural fix (Cargo offline vendoring), rendering this ADR a historical note, or
+2. Implement a narrower mitigation (e.g., a dedicated `CARGO_REGISTRY_NETWORK_ERROR` `FailureClass` and retry budget) and amend this entry to record the decision to live with the architectural constraint, or
+3. Keep the limitation disclosed here and document it in deployment guidance.
+
+**Alternative rejected.** "Add a `CARGO_REGISTRY_NETWORK_ERROR` `FailureClass` this round to at least surface the error legibly" — rejected per scope: the finding would be legible, but the underlying repo would remain un-buildable under `--network=none`, so surfacing the error without fixing the cause merely converts an invisible timeout into a visible one. The _reason_ for the network requirement is Cargo-internal, not a harness misconfiguration, so a classifier cannot close the gap — only a vendoring/cache fix can.
+
+---
