@@ -7870,8 +7870,12 @@ duration of the run. Confirm exclusivity before starting, not just at kickoff.
 **Pilot prerequisites (infrastructure, not harness work):**
 - [ ] Select and provision one Spark for the pilot; confirm it is not otherwise in use.
 - [ ] Install/serve `nvidia/nemotron-3-super-120b-a12b` on that Spark; confirm a health check.
-- [ ] Add the corresponding `ModelClient` backend registry entry and local-only pilot profile
-      (mirroring §12.41's existing local-only-profile precedent).
+- [x] Add the corresponding `ModelClient` backend registry entry and local-only pilot profile
+      (mirroring §12.41's existing local-only-profile precedent). **Done (round IX, 2026-09-15,
+      `2f81fe2`)**: `config/models.yaml`'s `pilot:` profile, routed through the existing
+      `openai_compatible` backend (no new abstraction). `base_url` is a documented placeholder
+      (ADR-0138) pending the Spark being selected/provisioned below — an operator must fill in the
+      real host (and any verified `capabilities_override`) once that happens.
 - [ ] Stand up the isolated virtual environment and snapshot the pilot's repo sample into it.
 
 **Exit criteria.** The pilot phase passes when, against the full sample: every repo reaches a

@@ -11164,11 +11164,23 @@ would be process overhead disproportionate to the change (Rule 2).
 **§12: 48 of 48**, re-derived directly against `docs/CRITERIA_PLAN.md` at this round's HEAD (see
 declaration above) — unaffected by this round, which touched no `## N.` section.
 
-**Next: §15.2 Real-Repo Pilot Phase.** Per `docs/SPEC.md` §15.2, the pilot has infrastructure
-prerequisites this project's own subagents cannot perform (no passwordless sudo on either Spark,
-per the customer's global environment notes): selecting/provisioning a Spark, installing/serving
-`nvidia/nemotron-3-super-120b-a12b`, and standing up the isolated pilot environment. These are
-flagged to the human partner as blocked-pending-infrastructure, not attempted here. The one
-pilot-prerequisite item that **is** ordinary harness code (a `ModelClient` backend registry entry
-plus a local-only pilot profile, mirroring §12.41's existing local-only-profile precedent) is
-in-scope for subagent dispatch and is not yet started.
+**§15.2 Real-Repo Pilot Phase — the one harness-code prerequisite item is now done too** (same
+round, same session, commit `2f81fe2`): `config/models.yaml` gained a `pilot:` profile mirroring
+§12.41's `local:` precedent exactly — routed through the existing `openai_compatible` backend (no
+new Python abstraction), `nvidia/nemotron-3-super-120b-a12b` across all three tiers, `price: free`,
+no `api_key_env`, and **deliberately no `capabilities_override`** (the real Spark's capabilities
+are unverified — asserting one before an operator confirms what the live endpoint supports would
+be exactly the unearned claim `config/models.yaml`'s own commentary warns against). `base_url` is
+a documented placeholder (`http://pilot-spark.internal:8000/v1`, ADR-0138) pending the Spark being
+selected and provisioned. Confirmed no source-level profile-name enum exists to update —
+`FleetSettings.load` reads profile membership straight off `config/models.yaml`, so this was a
+config-only, zero-`src/`-edit addition, consistent with §12.41's own "zero `src/` edits" property.
+Independently task-reviewed: spec ✅ (all sub-clauses checked directly against the diff), quality
+approved, zero findings. `docs/SPEC.md`'s §15.2 checklist item is checked off accordingly.
+
+**Remaining §15.2 work is infrastructure this project's own subagents cannot perform** (no
+passwordless sudo on either Spark, per the customer's global environment notes): selecting and
+provisioning a Spark, installing/serving `nvidia/nemotron-3-super-120b-a12b` with a health check,
+and standing up the isolated pilot environment (virtual env + repo-sample snapshot). These three
+checklist items — and the pilot run itself once they're done — need the human partner's direct
+action; flagged here rather than attempted.
