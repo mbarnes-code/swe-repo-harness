@@ -3815,6 +3815,96 @@ def test_pr_sync_clears_the_unmerged_dependency_finding_once_t1_fires(
     )
 
 
+def test_pr_sync_does_not_fire_t1_under_manual_revalidation_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_fire_t1_for_provider` threads `policy` straight to `orchestrator.stubs.supersede`
+    (`cli.py`'s `supersede_stub` import), whose own docstring is explicit: "Under
+    `stubs.revalidation: manual` the automatic trigger is disabled entirely and the operator's
+    `fleet stubs resolve` (`operator_triggered=True`) is the only path". `fleet pr --sync`'s two
+    call sites (D102's newly-observed-merge branch and the D103 gap-1 sweep) both construct
+    `_fire_t1_for_provider` with `operator_triggered` left at its `False` default (this function's
+    own docstring says so), so under `manual` policy `supersede_stub` must return `()` for every
+    stub even though the provider's PR just went `MERGED` — `t1_decisions` ends up empty and
+    `_fire_t1_for_provider` hits its OWN `if not t1_decisions: return frozenset()` early return
+    with the stub left exactly as it was (`ACTIVE`), never reaching `t1_unit`'s write.
+
+    `orchestrator.stubs.py`'s `manual` gating is unit-tested directly in `tests/test_stubs.py`,
+    but nothing drives it through `cli.py`'s own `fleet pr --sync` wiring — every CLI-level T1
+    fixture in this file (`test_pr_sync_clears_the_unmerged_dependency_finding_once_t1_fires`
+    immediately above, and the D105/D106 tests below) runs under the shared `workspace` fixture's
+    config, which carries no `stubs:` section and so defaults to `batched`. A mutation hardcoding
+    `RevalidationPolicy.BATCHED` at either `_pr_sync_impl` call site instead of reading
+    `settings.config.stubs.revalidation`, or one that dropped `_fire_t1_for_provider`'s
+    `policy=policy` forwarding to `supersede_stub`, would leave every existing fixture green.
+
+    Old-fails/new-passes: the ONLY difference from
+    `test_pr_sync_clears_the_unmerged_dependency_finding_once_t1_fires`'s fixture is this test's
+    `stubs:\\n  revalidation: manual\\n` config line — same stub, same merged provider, same
+    `_SelectiveMergedForge`. Under the old (missing) config section — i.e. `batched`, the shared
+    fixture's own policy — this exact scenario asserts `stub_state == 'SUPERSEDED'`; under
+    `manual` it must assert `stub_state == 'ACTIVE'`.
+    """
+    from fleet import cli
+
+    write_config(tmp_path, fleet=FLEET_YAML + "stubs:\n  revalidation: manual\n")
+    settings = FleetSettings.load(tmp_path / "config")
+    fresh_db(tmp_path / "state" / "fleet.db")
+    seed_run(
+        tmp_path / "state" / "fleet.db",
+        config_digests=json.dumps(dict(settings.section_digests), sort_keys=True),
+    )
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path
+
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_verify_degraded(db, "acme-commons")
+    _put_stub(db, consumer="acme-commons", provider="acme-billing", coord_key="acme-billing@1.0.0")
+    billing_url = "https://github.invalid/acme/monorepo/pull/2"
+    _seed_fresh_pr_record(db, "acme-billing", state="DRAFTED", url=billing_url)
+
+    # T1's own precondition (ADR-0011 stacking): the PROVIDER's own `phases` row must read
+    # SUCCEEDED — exactly `test_pr_sync_clears_the_unmerged_dependency_finding_once_t1_fires`'s
+    # own recipe.
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for phase, status in (
+            (1, "SUCCEEDED"), (2, "SUCCEEDED"), (3, "SUCCEEDED"), (4, "SUCCEEDED"),
+        ):
+            conn.execute(
+                "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (RUN_ID, "acme-billing", phase, status, "2026-08-08T12:00:00.000000+00:00"),
+            )
+    finally:
+        conn.close()
+
+    forge = _SelectiveMergedForge(merged_url=billing_url)
+    monkeypatch.setattr(cli, "GH_RUNNER", forge)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "pr", "--sync"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["merged"] == ["acme-billing"], (
+        "the forge observation itself (the PR going MERGED) must still land — `manual` policy "
+        f"gates T1's stub transition, not step 5's own PR ingestion, got {payload!r}"
+    )
+
+    conn = sqlite3.connect(db)
+    try:
+        stub_state = conn.execute(
+            "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = 'acme-commons' "
+            "  AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert stub_state == "ACTIVE", (
+        f"`stubs.revalidation: manual` must disable T1 entirely for `fleet pr --sync` (only "
+        f"`fleet stubs resolve`'s operator_triggered=True may fire it) — got {stub_state!r}"
+    )
+
+
 def test_resume_repoll_prs_does_not_undo_t1_in_the_same_call(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

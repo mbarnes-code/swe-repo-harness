@@ -27,14 +27,17 @@ from fleet.cli import (
     HoistRollbackConflictError,
     HoistRollbackOutcome,
     OrderedRevertEntry,
+    PrEmissionError,
     RollbackAnchorError,
     _ordered_revert_shas,
     _pr_records,
+    _record_verification,
+    _verifications,
     _write_pr_record,
     execute_hoist_rollback,
 )
 from fleet.llm.roles import SPEC_ROLE_TIERS
-from fleet.models.enums import PrState
+from fleet.models.enums import Phase, PrState
 from fleet.models.tasks import PullRequestDraft
 from fleet.sandbox.worktree import WorktreeManager
 from fleet.settings import FleetSettings
@@ -1095,3 +1098,178 @@ async def test_a_contracts_own_pr_record_coexists_with_its_owning_repos_own_pr_r
     )
     assert records.get((OWNER_REPO, None)) == owner_draft, records
     assert records.get((OWNER_REPO, CONTRACT_ID)) == contract_draft, records
+
+
+# --------------------------------------------------------------------------------------
+# Round VIII batch 47: `_pr_records`'s `except ValidationError` refusal (Rule 11) has no
+# existing test anywhere in the suite -- every fixture that reaches `_pr_records` seeds a
+# genuine `PullRequestDraft.model_dump_json()` payload (via `_write_pr_record`/`_upsert_pr_record`
+# or this file's own `_seed_pr`/`_pr_draft`), so the `except ValidationError` branch has never
+# once been exercised. A corrupt `findings.payload` for `kind = PR_RECORD_KIND` is not
+# far-fetched: `PullRequestDraft`'s schema can grow a new required field across a version, or a
+# row can be hand-edited in `fleet.db` during an incident -- and this function's own docstring
+# says treating it as absent would silently open a SECOND PR for a repo that already has one, so
+# the refusal (not a skip, not a `None`) is the whole point of the branch.
+# --------------------------------------------------------------------------------------
+
+
+async def test_pr_records_refuses_rather_than_ignores_an_unparseable_payload(
+    db_path: Path,
+) -> None:
+    """Old-fails/new-passes discriminator: an `except ValidationError: raise PrEmissionError`
+    that silently `continue`d past the bad row instead (the failure mode this branch exists to
+    prevent) would make `_pr_records` return the genuinely-parseable second row and NOT raise --
+    this test's own assertion (`pytest.raises(PrEmissionError)`) is exactly the new behaviour that
+    distinguishes the two, and it fails outright under that mutation (no exception raised).
+    """
+    _seed_run(db_path)
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        # Missing every required field `PullRequestDraft` declares -- `{}` cannot possibly
+        # validate against the model, regardless of how the schema evolves.
+        conn.execute(
+            "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+            "                      created_at) VALUES (?, ?, ?, 'info', ?, ?, ?)",
+            (
+                RUN_ID,
+                OWNER_REPO,
+                PR_RECORD_KIND,
+                "pr:corrupt",
+                "{}",
+                "2026-09-07T00:00:00+00:00",
+            ),
+        )
+        # A second, genuinely well-formed row for a DIFFERENT repo -- proves the refusal fires
+        # even though a valid record exists elsewhere in the same run, i.e. it is not simply that
+        # `_pr_records` found nothing parseable at all.
+        good = _pr_draft(
+            repo_id="blast-a",
+            contract_id=None,
+            url="https://forge.invalid/blast-a/pull/1",
+            body="a genuinely well-formed record, elsewhere in the same run",
+        )
+        conn.execute(
+            "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+            "                      created_at) VALUES (?, ?, ?, 'info', ?, ?, ?)",
+            (
+                RUN_ID,
+                "blast-a",
+                PR_RECORD_KIND,
+                "pr:blast-a",
+                good.model_dump_json(),
+                "2026-09-07T00:00:00+00:00",
+            ),
+        )
+    finally:
+        conn.close()
+
+    read_conn = await connect_ro(db_path)
+    try:
+        with pytest.raises(PrEmissionError, match=OWNER_REPO):
+            await _pr_records(read_conn, RUN_ID)
+    finally:
+        await read_conn.close()
+
+
+# --------------------------------------------------------------------------------------
+# Round VIII batch 47: `_upsert_pr_record`'s `UPDATE phases SET pr_url = ? ... AND phase = ?`
+# scoping. Every existing test that reads `phases.pr_url` back (`tests/test_pr_e2e.py`,
+# `tests/test_cli.py`) queries ONLY `WHERE phase = 4` (VERIFY) -- none of them assert that the
+# OTHER three phase rows for the same repo are left untouched, so a mutation dropping
+# `AND phase = ?` from the WHERE clause (writing `pr_url` onto every phase row for the repo, which
+# the schema permits -- `phases.pr_url` is a plain nullable column with no phase-scoped
+# constraint) would leave every current fixture green. This also exercises `_write_pr_record`
+# itself (not `_upsert_pr_record` directly), since that is the single-writer-contract path every
+# production call site actually uses.
+# --------------------------------------------------------------------------------------
+
+
+async def test_write_pr_record_sets_pr_url_only_on_the_verify_phase_row(db_path: Path) -> None:
+    """Old-fails/new-passes: with `AND phase = ?` removed from `_upsert_pr_record`'s UPDATE, the
+    TRANSFORM/BUILD/VERIFY rows this test seeds would ALL come back with the draft's `url` instead
+    of only the VERIFY (phase 4) row -- this test's per-phase assertions catch that; the current
+    (correct) code leaves phases 2 and 3 exactly as seeded (`NULL`).
+    """
+    _seed_run(db_path)
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        for phase in (Phase.TRANSFORM, Phase.BUILD, Phase.VERIFY):
+            conn.execute(
+                "INSERT INTO phases (run_id, repo_id, phase, updated_at) VALUES (?, ?, ?, ?)",
+                (RUN_ID, OWNER_REPO, int(phase), "2026-09-07T00:00:00+00:00"),
+            )
+    finally:
+        conn.close()
+
+    draft = _pr_draft(
+        repo_id=OWNER_REPO,
+        contract_id=None,
+        url="https://forge.invalid/owner/pull/9",
+        body="body",
+    )
+    async with StateWriter(db_path, owner="test-batch47-phase-scope") as writer:
+        await _write_pr_record(writer, RUN_ID, draft, now=T0)
+
+    plain = sqlite3.connect(db_path)
+    try:
+        by_phase = dict(
+            plain.execute(
+                "SELECT phase, pr_url FROM phases WHERE run_id = ? AND repo_id = ?",
+                (RUN_ID, OWNER_REPO),
+            ).fetchall()
+        )
+    finally:
+        plain.close()
+
+    assert by_phase[int(Phase.VERIFY)] == draft.url, by_phase
+    assert by_phase[int(Phase.TRANSFORM)] is None, (
+        f"the TRANSFORM phase row must be untouched by a VERIFY-phase PR record write, got "
+        f"{by_phase[int(Phase.TRANSFORM)]!r}"
+    )
+    assert by_phase[int(Phase.BUILD)] is None, (
+        f"the BUILD phase row must be untouched by a VERIFY-phase PR record write, got "
+        f"{by_phase[int(Phase.BUILD)]!r}"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# Round VIII batch 47: `_record_verification` / `_verifications`'s `rdeps_sample_seed` round
+# trip. `tests/test_cli.py::test_verify_sink_persists_the_report_when_the_dispatch_produced_one`
+# drives this same pair but discards the returned seed (`persisted_report, _seed = persisted[...]`)
+# without asserting its value, and the D131 gate test in that file calls `_record_verification`
+# with `seed=""` -- so no test anywhere asserts that a NON-empty seed survives the JSON envelope
+# round trip through `findings.payload` and back out through `_verifications`.
+# --------------------------------------------------------------------------------------
+
+
+async def test_record_verification_round_trips_a_non_empty_seed(db_path: Path) -> None:
+    """Old-fails/new-passes: a mutation to `_verifications`'s `str(envelope.get(
+    "rdeps_sample_seed") or "")` -- e.g. dropping the key read and hardcoding `""` -- would leave
+    every current fixture green (they only ever write/read an empty seed), while this test's
+    exact-match assertion on a real, non-empty seed value fails outright.
+    """
+    from fleet.models.tasks import VerificationReport
+
+    _seed_run(db_path)
+    report = VerificationReport(
+        run_id=uuid.UUID(RUN_ID),
+        repo_id=OWNER_REPO,
+        build_ok=True,
+        test_ok=True,
+        verdict="PASS",
+    )
+    seed = "a-real-nonempty-seed-9f8e7d6c"
+    async with StateWriter(db_path, owner="test-batch47-seed") as writer:
+        await _record_verification(writer, RUN_ID, OWNER_REPO, report, seed=seed, now=T0)
+
+    read_conn = await connect_ro(db_path)
+    try:
+        persisted = await _verifications(read_conn, RUN_ID)
+    finally:
+        await read_conn.close()
+
+    persisted_report, persisted_seed = persisted[OWNER_REPO]
+    assert persisted_report.verdict == "PASS"
+    assert persisted_seed == seed, (
+        f"the persisted rdeps_sample_seed must round-trip byte-for-byte, got {persisted_seed!r}"
+    )
