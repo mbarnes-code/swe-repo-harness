@@ -496,6 +496,32 @@ def test_resolve_support_files_finds_a_carry_candidate_in_a_later_worktree(
     assert resolved[0].content == real, resolved[0].content
 
 
+def test_resolve_support_files_never_follows_a_symlinked_carry_from_candidate(
+    tmp_path: Path,
+) -> None:
+    """A source repo can commit a tracked symlink at a `carry_from` candidate path pointing at an
+    absolute host path (an SSH key, a credentials file). Without an `is_symlink()` guard,
+    `found.read_text(...)` follows the link and returns the TARGET's content as `SupportFile`
+    content, which `workers/buildgen.py::materialize()` then writes into the monorepo worktree and
+    commits onto the shared integration branch — reaching the generated pull request with no LLM
+    involvement needed. The fix must treat a symlinked candidate exactly like a missing one: fall
+    through to the declared default (here) rather than ever reading the link's target.
+    """
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    outside = tmp_path / "outside-the-repo"
+    sentinel = "SECRET_SENTINEL_CONTENT_SHOULD_NEVER_BE_CARRIED\n"
+    outside.write_text(sentinel, encoding="utf-8")
+    (worktree / "Cargo.lock").symlink_to(outside)
+    declared = [
+        SupportFile(path="Cargo.lock", carry_from=["Cargo.lock"], content="GENERATED\n")
+    ]
+    resolved = cli._resolve_support_files([worktree], declared)
+    assert len(resolved) == 1
+    assert resolved[0].content != sentinel, resolved[0].content
+    assert resolved[0].content == "GENERATED", resolved[0].content
+
+
 # ======================================================================================
 # _carried
 # ======================================================================================

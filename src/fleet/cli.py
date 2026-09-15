@@ -10134,15 +10134,37 @@ def _resolve_support_files(
 
     A candidate that is not valid UTF-8 is skipped rather than mangled: `SupportFile.content` is
     text, and a lockfile that did not survive decoding is not the repo's lockfile.
+
+    A candidate that is a symlink is skipped the same way, and never followed: no legitimate
+    `carry_from` candidate is ever a symlink, so one is the same shape of "not usable" as a
+    missing or undecodable file, not a special case worth its own error path (a tracked symlink
+    pointing outside the repo/worktree — an SSH key, a credentials file — must never have its
+    target's content read and carried into a committed monorepo file).
     """
     roots = [worktree] if isinstance(worktree, Path) else list(worktree)
     out: list[SupportFile] = []
     for support in declared:
         content = support.content
         for candidate in support.carry_from:
-            found = next(
-                (root / candidate for root in roots if (root / candidate).is_file()), None
-            )
+            found = None
+            for root in roots:
+                candidate_path = root / candidate
+                if not candidate_path.is_file():
+                    continue
+                if candidate_path.is_symlink():
+                    default_logger("fleet.resolve-support").warning(
+                        "support_file_candidate_is_symlink",
+                        path=support.path,
+                        candidate=str(candidate_path),
+                        detail=(
+                            f"{support.path!r}: carry_from candidate {str(candidate_path)!r} "
+                            f"is a symlink; skipping it rather than following it to whatever "
+                            f"it points at"
+                        ),
+                    )
+                    continue
+                found = candidate_path
+                break
             if found is None:
                 continue
             try:
