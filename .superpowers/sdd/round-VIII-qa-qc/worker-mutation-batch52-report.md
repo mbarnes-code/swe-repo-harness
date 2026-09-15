@@ -127,3 +127,104 @@ unmeasured guess in a committed file.
 ## Report path
 
 `.superpowers/sdd/round-VIII-qa-qc/worker-mutation-batch52-report.md` (this file).
+
+## CORRECTION (dated 2026-09-15, filed after independent review)
+
+This is an appended correction, not a rewrite — the original text above (including the item-1 row
+of the mutation-proofs table and the "Which test files I ran" section) is left exactly as
+originally written, and is factually **wrong** in the two respects corrected below. **This was
+caught by review** (`.superpowers/sdd/round-VIII-qa-qc/review-mutation-batch52-report.md`), not by
+me, and unlike the item-5 `IntegrityError` self-correction in the body above (which I caught and
+fixed before committing), I did not catch this one myself. I have since independently re-run the
+mutation in a properly interpreter-pinned worktree (this same branch's worktree,
+`sys.executable`/`fleet.__file__` confirmed to resolve under
+`/home/redmage/swe repo harness worktrees/wt-roundviii-mutation-batch52` before trusting any
+result) and confirmed both of the reviewer's findings reproduce exactly.
+
+**What the original report claimed (item 1, `_reset_stale_running`, the `" LIMIT 1"` mutation):**
+
+> RED (`reclaimed == 1`, not 2)
+
+and the control:
+
+> `test_resume_reclaims_a_stale_lease_without_charging_an_attempt` ... GREEN
+
+**What is actually measured, independently reproduced:**
+
+- The mutation as literally coded (appending `" LIMIT 1"` to the end of the full concatenated
+  expression `_RESET_RUNNING_TO_PENDING_SQL + _STALE_HEARTBEAT_PREDICATE` at the call site,
+  cli.py:18284) is syntactically valid SQL and *does* produce `reclaimed == 1` — that is what my
+  original manual test actually exercised and is not itself wrong.
+- But that is **not the mutation the prose in this report's own docstring describes**
+  ("appending `LIMIT 1` to `_RESET_RUNNING_TO_PENDING_SQL`"), which reads naturally as mutating
+  the named constant itself (cli.py:16708-16712) rather than the call-site concatenation. The
+  reviewer applied the mutation as the prose describes it — appending `" LIMIT 1"` directly onto
+  `_RESET_RUNNING_TO_PENDING_SQL`'s own closing quote, i.e. *before* `_STALE_HEARTBEAT_PREDICATE`
+  is concatenated on — and that is the version I re-ran and confirmed:
+
+  ```
+  _RESET_RUNNING_TO_PENDING_SQL: Final = (
+      "UPDATE phases SET status = 'PENDING', lease_owner = NULL, heartbeat_at = NULL, "
+      "       lease_expires_at = NULL, lease_fence = lease_fence + 1, updated_at = ? "
+      " WHERE run_id = ? AND status = 'RUNNING' LIMIT 1"
+  )
+  ```
+
+  Concatenated with `_STALE_HEARTBEAT_PREDICATE` (`" AND heartbeat_at IS NOT NULL AND ..."`), the
+  resulting text is `... WHERE run_id = ? AND status = 'RUNNING' LIMIT 1 AND heartbeat_at IS NOT
+  NULL AND ...`. SQLite's `LIMIT` clause accepts an arbitrary expression as its value (this build
+  has `ENABLE_UPDATE_DELETE_LIMIT` compiled in — confirmed via `PRAGMA compile_options`), so `1
+  AND heartbeat_at IS NOT NULL AND ...` is parsed as ONE boolean expression standing in for the
+  limit value, evaluated with no row/column context available — hence the error names a column
+  (`heartbeat_at`) that is real in the table but unreachable from where the parser is evaluating
+  it, rather than silently limiting the UPDATE to one row.
+- Independently reproduced, running my own new test against this exact mutation (backup → edit →
+  `diff --no-index` confirmed one non-empty hunk → test → restore → `diff`/`sha256sum` confirmed
+  byte-identical restoration):
+
+  ```
+  sqlite3.OperationalError: no such column: heartbeat_at
+  ```
+
+  — exactly the reviewer's claimed failure mode, not `reclaimed == 1`.
+- Independently reproduced the control-test claim as well, running
+  `tests/test_cli.py::test_resume_reclaims_a_stale_lease_without_charging_an_attempt` (the real
+  `fleet resume --no-continue` CLI path) against the same mutation:
+
+  ```
+  AssertionError: assert 1 == <ExitCode.SUCCESS: 0>
+   +  where 1 = <Result OperationalError('no such column: heartbeat_at')>.exit_code
+  ```
+
+  The control test goes **RED**, not GREEN as originally claimed. This is because the mutated SQL
+  is broken for *every* invocation of `_reset_stale_running` — it is a SQL syntax/evaluation
+  defect, not a row-count defect — so it cannot discriminate "does the sweep reclaim more than one
+  stale row" (the property my new test targets) from "is this SQL well-formed at all." Any test
+  that reaches `_reset_stale_running` at all goes red under this particular mutation, single-row
+  fixture or not.
+
+**Why the two mutations differ:** the call-site concatenation order matters. Appending `" LIMIT
+1"` strictly *after* the full concatenated `_RESET_RUNNING_TO_PENDING_SQL + _STALE_HEARTBEAT_
+PREDICATE` string (what my terminal session actually ran) puts the `LIMIT` clause last, which is
+syntactically the normal place for it and works as an ordinary row-limiting `LIMIT`. Appending it
+onto the `_RESET_RUNNING_TO_PENDING_SQL` constant's own last line (what the report's prose
+describes, and what the reviewer correctly applied on that reading) puts the `LIMIT` clause in the
+*middle* of the final concatenated string, before the predicate, which is a different and broken
+mutation. I did not notice this discrepancy between what I wrote and what I ran before committing
+the original report.
+
+**Does this affect the new test's coverage value? No.** The underlying gap the new test
+(`test_reset_stale_running_reclaims_every_stale_row_in_one_sweep_not_only_the_first`) proves —
+that no existing fixture before this batch seeded two simultaneously-stale `phases` rows, so a
+regression that silently scoped the sweep to one row would have passed every existing test — is
+still real and still correctly demonstrated by that test's own assertions on the unmutated code
+path. What is wrong is only this report's *specific claimed mutation outcome and control result*
+for item 1, which I have now corrected above to what is actually measured. Per the reviewer's
+Minor note, the "Which test files I ran for verification, and why they're a sufficient covering
+set" section's framing for item 1 — that the control test "confirm[s] they do NOT discriminate the
+defect I found" — **also does not hold for this specific mutation** (the control goes red for a
+different, non-discriminating reason: broken SQL, not a preserved single-row scope) and should be
+read as superseded by this correction rather than relied upon. No sound mutation that (a)
+redistributes the reclaim to a single row and (b) leaves the single-row control passing was found
+by either the reviewer or myself; none was required to close this finding, only this correction to
+the report's claimed measurements.
