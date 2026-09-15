@@ -249,6 +249,11 @@ def load_rules(directory: str | Path) -> tuple[RewriteRule, ...]:
     seen: dict[str, Path] = {}
     rules: list[RewriteRule] = []
     for rule_file in sorted(p for p in root.rglob("*") if p.suffix in {".yaml", ".yml"}):
+        if rule_file.is_symlink():
+            raise ConfigFileError(
+                "refusing to load a symlink; rules must be real files",
+                file=rule_file,
+            )
         for entry in _rules_in_file(rule_file):
             try:
                 rule = RewriteRule.model_validate(dict(entry))

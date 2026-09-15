@@ -750,6 +750,29 @@ def test_a_rule_naming_an_unregistered_engine_is_a_startup_error(tmp_path: Path)
     assert "kt-morph" in message and "kotlin-imports" in message and "java.yaml" in message
 
 
+def test_a_symlinked_rule_file_is_refused_at_startup(tmp_path: Path) -> None:
+    """A symlinked rule file in the transform.rules_dir must be refused, not followed.
+    `.is_symlink()` is checked before opening, and the refusal is loud with a named exception."""
+    rules_dir = tmp_path / "config" / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a real rule file outside the rules directory
+    outside_rule = tmp_path / "outside.yaml"
+    outside_rule.write_text(
+        "rules:\n  - rule_id: external\n    engine: libcst\n",
+        encoding="utf-8",
+    )
+
+    # Create a symlink to it in the rules directory
+    symlink = rules_dir / "symlinked.yaml"
+    symlink.symlink_to(outside_rule)
+
+    assert symlink.is_symlink(), "fixture precondition: a REAL OS-level symlink"
+    config = write_config(tmp_path)
+    with pytest.raises(ConfigFileError, match="refusing to load a symlink"):
+        load(config, root=tmp_path)
+
+
 def test_a_ladder_rung_naming_an_undeclared_role_is_a_startup_error(tmp_path: Path) -> None:
     """The ADR-0021 ladder resolves `role` through `config/models.yaml`; an unknown role would
     otherwise surface as a failed escalation on attempt 3, after two attempts were paid for."""
