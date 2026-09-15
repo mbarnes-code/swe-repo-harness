@@ -241,7 +241,15 @@ class BuildTargetProposal(FleetModel):
     never emits build-file text, so the emitted file's shape stays deterministic (§3.3)."""
 
     name: str = Field(min_length=1, max_length=200)
-    rule: str = Field(min_length=1, max_length=100)
+    rule: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[a-zA-Z_][a-zA-Z0-9_]*$",
+        description="Bazel rule name, e.g. java_library, ts_project, go_test, filegroup. A "
+        "conservative identifier pattern, not a closed set: real Bazel rule names are "
+        "open-ended, but this is rendered verbatim as the head of a Starlark call, so anything "
+        "that isn't a bare identifier is a Starlark-injection primitive.",
+    )
     srcs: tuple[str, ...] = Field(default=(), max_length=4096)
     deps: tuple[str, ...] = Field(default=(), max_length=1024)
     visibility: tuple[str, ...] = Field(default=(), max_length=32)

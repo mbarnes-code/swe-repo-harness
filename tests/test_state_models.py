@@ -1428,6 +1428,28 @@ def test_self_edges_are_rejected() -> None:
         )
 
 
+def test_a_build_target_rule_that_breaks_out_of_the_call_head_is_rejected() -> None:
+    """SECURITY_REVIEW.md finding #6 (CRITICAL): `render_target()`
+    (`src/fleet/bazel/generators.py:103`) renders `BuildTarget.rule` verbatim as the head of a
+    Starlark function call — `f"{target.rule}("` — written into a real `BUILD.bazel` file that
+    `bazel build`/`bazel test` evaluates as code. Before this task, `rule` was free text
+    (`min_length=1`, no `pattern`), so any code path constructing a `BuildTarget` directly (not
+    only the LLM `build_authoring` escape hatch, whose own schema boundary is covered separately
+    in `tests/test_llm_golden_responses.py`) could smuggle a Starlark-injection primitive through
+    as model-layer defense in depth. A value containing an embedded newline and a `load(...)`
+    fragment — the finding's own example class — would render a top-level `load()` statement
+    ahead of the (now commented-out) original call."""
+    with pytest.raises(ValidationError, match="rule"):
+        BuildTarget(
+            package="libs/com/acme/commons", name="commons",
+            rule='java_library\nload("//evil:evil.bzl", "pwned")\n#',
+        )
+    # Control: an ordinary Bazel identifier must still validate — the pattern must reject the
+    # injection shape without restricting any real rule name the harness emits.
+    control = BuildTarget(package="libs/com/acme/commons", name="commons", rule="java_library")
+    assert control.rule == "java_library"
+
+
 @pytest.mark.parametrize(
     ("label", "kwargs", "match"),
     [

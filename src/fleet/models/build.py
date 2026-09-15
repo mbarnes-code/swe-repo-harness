@@ -70,7 +70,14 @@ class BuildTarget(FleetModel):
 
     package: str = Field(description="Monorepo-relative package dir, i.e. BuildUnit.dest")
     name: str = Field(min_length=1)
-    rule: str = Field(min_length=1, description="e.g. java_library, ts_project, go_test, filegroup")
+    rule: str = Field(
+        min_length=1,
+        pattern=r"^[a-zA-Z_][a-zA-Z0-9_]*$",
+        description="e.g. java_library, ts_project, go_test, filegroup. A conservative "
+        "identifier pattern, not a closed set: real Bazel rule names are open-ended, but "
+        "rendered verbatim as the head of a Starlark call (render_target()), so anything that "
+        "isn't a bare identifier is a Starlark-injection primitive.",
+    )
     load_from: str | None = Field(
         default=None, description="bzl label for the load() stmt; None for native rules"
     )
