@@ -8619,6 +8619,38 @@ def test_regenerate_pr_body_preserves_the_original_migration_notes_verbatim() ->
     assert regenerated == expected
 
 
+def test_regenerate_pr_body_redacts_a_secret_shaped_value_in_weak_edges() -> None:
+    """SECURITY_REVIEW.md item #4's ESCALATION named `_regenerate_pr_body` the SECOND unredacted
+    call site (Task 7's brief), alongside `workers/prwriter.py::_compose` (fixed there): its
+    `render_body()` call — on every PR-promotion/revalidation round — renders `record.weak_edges`
+    verbatim from data a worker plan can legitimately populate with a URL or log excerpt, with no
+    redaction between `render_body()`'s return and what `_promote_one_pr` hands to the forge.
+
+    The control is the raw `render_body()` call below: it must still return the UNREDACTED value
+    (the same contract `tests/test_pr_body_redaction.py` pins), proving the fixture actually
+    reaches the gap and that the fix lives in `_regenerate_pr_body`, not in `render_body` itself.
+    """
+    pat = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+    tainted = f"hoisted via https://oauth2:{pat}@gitea.local:3001/acme/widgets.git"
+    record = _held_pr_record(contract_id=tainted)
+    unit = (_pr_candidate(stubbed=False),)
+
+    # Control: render_body() itself does not redact (the same contract
+    # tests/test_pr_body_redaction.py pins) — this proves the fixture reaches the gap and that
+    # the fix belongs in `_regenerate_pr_body`, not in `render_body` itself.
+    tainted_payload = _stub_payload(stubbed=False, revalidation_round=1).model_copy(
+        update={"contract_id": tainted}
+    )
+    raw = render_body(tainted_payload, repo_id="acme-lib-py", draft=False)
+    assert pat in raw, "the fixture is broken: contract_id never reached a raw render_body call"
+
+    regenerated = _regenerate_pr_body(unit, record, {}, draft=False)
+    assert pat not in regenerated, f"a live PAT reached the regenerated PR body: {regenerated!r}"
+    assert "github_pat_" not in regenerated
+    assert "«redacted:" in regenerated, "the placeholder must survive, or debugging is blind"
+    assert "gitea.local" in regenerated, "over-redaction destroyed the debuggable part too"
+
+
 def test_report_with_stubs_clears_a_stale_stub_limited_verdict_once_the_stub_resolves() -> None:
     """The bug this task's fix closes: `_pr_candidates`'s stub query only ever returns
     `ACTIVE`/`SUPERSEDED` rows, so a stub that has since RESOLVED reads as `states == {}` — exactly

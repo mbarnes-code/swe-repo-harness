@@ -15893,6 +15893,19 @@ def _regenerate_pr_body(
     The one exception, per this task's brief: model-authored prose is carried through UNCHANGED
     from `record.body`'s own `### Migration notes` section (`_extract_migration_notes`), never
     regenerated — that would mean a fresh LLM call this mechanism has no business making.
+
+    SECURITY_REVIEW.md item #4 ESCALATION named this function's `render_body()` call as the
+    second unredacted call site alongside `workers/prwriter.py::_compose` (§7's fix for the
+    first): `render_body()` renders `record.weak_edges`/`relocation_summary`/etc. verbatim from
+    data a worker plan can legitimately populate with a URL or log excerpt, and this function is
+    the ONLY other place in the tree that calls it on a body ultimately posted to the forge
+    (`_promote_one_pr` writes this return value straight to the forge, not through
+    `cli.py::_write_pr_record`'s DB-mirror redaction). `redact_text()` wraps the return here
+    rather than living inside `render_body()` itself, matching `workers/prwriter.py::_compose`'s
+    choice and for the same reason: `render_body()`'s own direct-call contract
+    (`tests/test_pr_body_redaction.py` and this module's own
+    `test_regenerate_pr_body_matches_a_fresh_render_once_the_stub_is_gone` and its neighbours)
+    depends on an unredacted return.
     """
     primary = min(unit, key=lambda candidate: candidate.repo_id)
     member_ids = frozenset(candidate.repo_id for candidate in unit)
@@ -15925,11 +15938,13 @@ def _regenerate_pr_body(
         weak_edges=list(record.weak_edges),
         revalidation_round=record.revalidation_round + 1,
     )
-    return render_body(
-        payload,
-        repo_id=record.repo_id,
-        draft=draft,
-        notes=_extract_migration_notes(record.body),
+    return redact_text(
+        render_body(
+            payload,
+            repo_id=record.repo_id,
+            draft=draft,
+            notes=_extract_migration_notes(record.body),
+        )
     )
 
 

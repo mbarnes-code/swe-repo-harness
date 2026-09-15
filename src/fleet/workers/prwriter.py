@@ -56,6 +56,7 @@ from fleet.models.enums import (
     StubState,
 )
 from fleet.models.tasks import PullRequestDraft, TokenUsage, VerificationReport
+from fleet.obs.redact import redact_text
 from fleet.orchestrator.registry import register_worker
 from fleet.util.errors import exception_type_name
 from fleet.util.proc import CommandRunner
@@ -413,7 +414,19 @@ class PrwriterWorker(BaseWorker[PrwriterInput, PrwriterOutput]):
     async def _compose(
         self, ctx: WorkerContext, payload: PrwriterInput, *, draft: bool
     ) -> tuple[str, str, TokenUsage]:
-        """Title and body. Code renders every verdict; the model may only add prose."""
+        """Title and body. Code renders every verdict; the model may only add prose.
+
+        SECURITY_REVIEW.md item #4 ESCALATION: this is the egress boundary — the last point
+        before `title`/`body` leave this worker for `body_path.write_text` and `gh.create_pr`,
+        which is a REAL, public GitHub/Gitea PR. `redact_text()` runs on both here, not inside
+        `render_body()`: `render_body()` is a pure data→markdown renderer with its own contract
+        (`tests/test_pr_body_redaction.py` calls it directly and asserts an UNREDACTED return,
+        proving the DB-mirror redaction at `cli.py::_write_pr_record` is a separate, correct
+        layer) — redacting inside it would silently narrow what that test proves. Title is
+        redacted BEFORE the `[:120]` truncation, not after: truncating first could slice a
+        matched secret in half, leaving the visible remainder unredacted and the regex unable to
+        match the partial span.
+        """
         usage = TokenUsage()
         notes = ""
         title = payload.title or _default_title(payload, repo_id=ctx.repo_id)
@@ -442,7 +455,7 @@ class PrwriterWorker(BaseWorker[PrwriterInput, PrwriterOutput]):
                 title = proposed.value.title
                 usage = accumulate(usage, proposed.usage)
         body = render_body(payload, repo_id=ctx.repo_id, draft=draft, notes=notes)
-        return title[:120], body, usage
+        return redact_text(title)[:120], redact_text(body), usage
 
     def _body_path(self, ctx: WorkerContext, payload: PrwriterInput) -> Path:
         return (

@@ -3483,6 +3483,65 @@ async def test_prwriter_prose_is_optional_and_the_verdict_never_comes_from_the_m
     assert bare.output.pr.title.startswith("[fleet wave 2]")
 
 
+_PRWRITER_PAT = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+
+
+async def test_prwriter_redacts_a_secret_shaped_model_title_and_body(tmp_path) -> None:
+    """SECURITY_REVIEW.md item #4's ESCALATION: `_compose`'s `title = proposed.value.title` and
+    `notes = prose.value.body` (folded into `render_body`'s returned string) both used to carry
+    raw LLM-generated prose straight into a real, public GitHub/Gitea PR — `prwriter.py` had zero
+    `from fleet.obs.redact import` anywhere in the file. A secret-shaped value that reached the
+    model (via item #4's original evidence-redaction gap, or one the model's own prose happens to
+    echo) must not survive into the posted title, the posted body, the `body_path` file handed to
+    `gh create --body-file`, or the `--title` argv itself — every surface a reviewer or the forge
+    can see.
+    """
+    gh = gh_runner()
+    model = FakeModelClient(
+        {
+            "pr_body": PrBody(
+                body=f"Vendored the widget service. Leaked: {_PRWRITER_PAT}", highlights=()
+            ),
+            "pr_title": PrTitle(title=f"migrate acme-widget {_PRWRITER_PAT}"),
+        }
+    )
+    result = await PrwriterWorker(runner=gh).run(
+        make_ctx(tmp_path, model=model), a_pr_payload(log_dir=str(tmp_path / "logs"))
+    )
+    out = result.output
+    assert out is not None and out.pr is not None
+
+    for surface in (out.pr.title, out.pr.body, read(out.body_path)):
+        assert _PRWRITER_PAT not in surface, f"a live PAT reached a PR surface: {surface!r}"
+        assert "github_pat_" not in surface
+    assert "«redacted:" in out.pr.title
+    assert "«redacted:" in out.pr.body
+
+    create = gh.argv_for("create")
+    assert create is not None
+    assert not any(_PRWRITER_PAT in arg for arg in create), "the PAT reached the gh create argv"
+
+
+async def test_prwriter_leaves_innocuous_model_prose_unredacted(tmp_path) -> None:
+    """Control for the test above: the fix is not free to over-redact ordinary prose."""
+    gh = gh_runner()
+    model = FakeModelClient(
+        {
+            "pr_body": PrBody(body="Vendored the widget service.", highlights=()),
+            "pr_title": PrTitle(title="migrate acme-widget"),
+        }
+    )
+    result = await PrwriterWorker(runner=gh).run(
+        make_ctx(tmp_path, model=model), a_pr_payload(log_dir=str(tmp_path / "logs"))
+    )
+    out = result.output
+    assert out is not None and out.pr is not None
+    assert out.pr.title == "migrate acme-widget"
+    assert "Vendored the widget service." in out.pr.body
+    assert "«redacted:" not in out.pr.title
+    assert "«redacted:" not in out.pr.body
+
+
 async def test_prwriter_refuses_a_failed_verification_and_a_foreign_report(tmp_path) -> None:
     """A PR opened on a `FAIL` report presents a red verification as reviewable work; a PR
     rendered from another repo's report is the one error a reviewer cannot catch by reading it."""
