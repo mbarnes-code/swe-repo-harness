@@ -59,6 +59,7 @@ from fleet.state.repository import (
     RepoBudgetRefusedError,
     RepositoryError,
     ReservationRefusedError,
+    RunCallBudgetRefusedError,
     SqliteStateRepository,
     StateRepository,
     SymbolRow,
@@ -964,6 +965,147 @@ async def test_concurrent_repo_reservations_never_collectively_exceed_the_repo_c
     assert repo_row is not None and run_row is not None
     assert repo_row.reserved_usd == pytest.approx(10.0)
     assert run_row.reserved_usd == pytest.approx(10.0), "each dollar is held once in EACH ledger"
+
+
+# --------------------------------------------------------------------------------------
+# the v12 call-count run ceiling (ADR-0142) — which mutation reddens which case
+# --------------------------------------------------------------------------------------
+#
+# Measured against `_reserve_run_sql`, gate (`git diff --numstat` vs a backup) read before every
+# result, module import confirmed each time, and a cosmetic reflow of the same predicate kept as
+# a control (all three cases stayed green under it, so these assert meaning and not layout):
+#
+#   mutation                                      | concurrent | no-ceiling | zero-priced
+#   `calls_made + 1 <= max_calls` -> `calls_made <=` |    RED    |   green    |    RED
+#   drop the whole call-count predicate             |    RED    |   green    |    RED
+#   `max_calls IS NULL` -> `IS NOT NULL`            |    RED    |    RED     |    RED
+#   drop `calls_made = calls_made + 1` from the SET |    RED    |    RED     |    RED
+#
+# The first row is the discriminating one in Rule 12's sense: under it the PRE-EXISTING budget
+# CAS tests all pass (4 of 4) while two of these fail, so they catch something no assertion in
+# this file caught before.
+#
+# Disclosed rather than glossed: `no-ceiling` is the unique discriminator of NONE of the four.
+# It is blind to the first two by construction — nothing caps it, so a mutation to the cap's
+# arithmetic cannot move it — and the two that do redden it redden its siblings as well, with
+# `IS NOT NULL` additionally reddening the whole pre-existing suite (4 of 4 failed), which makes
+# that mutation no discriminator at all. It is kept anyway, as the only place the opt-in contract
+# is stated in this feature's own terms: an unset ceiling must cap nothing, and that is the
+# property whose silent breakage would break every existing profile at once.
+
+
+async def test_concurrent_calls_never_collectively_exceed_the_run_call_ceiling(
+    repo: SqliteStateRepository,
+) -> None:
+    """24 racers dispatch into a run whose `max_calls` is 6: exactly six win, and `calls_made` is
+    exactly six afterwards. Neither over- nor under-admission (v12, ADR-0142).
+
+    Why a burst rather than a loop: the over-admission this guards is only reachable when the
+    admissions are in flight *inside one turn of the event loop*, which is what `gather` over 24
+    coroutines produces and what a driver awaiting one call at a time can never reach. A
+    read-then-write "count the calls" implementation passes a sequential driver and fails this.
+
+    The quantity watched is admissions measured against the LIVE ceiling, two ways that cannot
+    both be wrong in the same direction: the number of coroutines that returned granted, and the
+    durable `calls_made` the next process would read. They are asserted equal to each other and
+    to 6, so an instrument reading only one of them cannot certify a mismatch as clean.
+
+    `calls_made == 6` after **24** attempts is also the statement that a refusal is free: the
+    increment lives inside the CAS's own `WHERE`, so the 18 refusals consumed nothing. An
+    implementation that incremented before testing would leave 24 here and starve a run of the
+    calls it never made.
+    """
+    await repo.open_budget_ledger(RUN, max_usd=1_000.0, now=NOW, max_calls=6)
+    await repo.open_repo_ledger(RUN, REPO, max_usd=1_000.0, now=NOW)
+
+    async def attempt() -> bool:
+        try:
+            await repo.reserve_repo_budget(
+                RUN, REPO, reservation_id=_rid(), amount_usd=1.0, now=NOW
+            )
+        except RunCallBudgetRefusedError:
+            return False
+        return True
+
+    outcomes = await asyncio.gather(*(attempt() for _ in range(24)))
+
+    run_row = await repo.get_budget(RUN)
+    assert run_row is not None
+    assert sum(outcomes) == 6, "more LLM calls were granted than run_max_llm_calls allows"
+    assert run_row.calls_made == 6, "the durable count disagrees with what was granted"
+    assert run_row.max_calls == 6
+    # The dollar ceiling was nowhere near: $6 of $1 000. Had it been the predicate that refused,
+    # these 18 refusals would be a cost breach wearing a call breach's type.
+    assert run_row.reserved_usd == pytest.approx(6.0)
+
+
+async def test_a_run_with_no_call_ceiling_is_capped_by_nothing(
+    repo: SqliteStateRepository,
+) -> None:
+    """`max_calls IS NULL` means no cap, and that is the default every pre-v12 row carries.
+
+    This is the ONLY case here that fails when the no-cap branch of the predicate is broken (an
+    `IS NOT NULL` slip), and it is the case that proves the feature is opt-in: a ceiling that
+    quietly applied itself to runs nobody configured would break every existing profile. The
+    count is still *tracked* — `calls_made` moves — because tracking is what makes the column
+    meaningful the moment an operator does set a ceiling.
+    """
+    await repo.open_budget_ledger(RUN, max_usd=1_000.0, now=NOW)
+    await repo.open_repo_ledger(RUN, REPO, max_usd=1_000.0, now=NOW)
+
+    for _ in range(12):
+        await repo.reserve_repo_budget(RUN, REPO, reservation_id=_rid(), amount_usd=1.0, now=NOW)
+
+    run_row = await repo.get_budget(RUN)
+    assert run_row is not None
+    assert run_row.max_calls is None, "an unset ceiling must stay unset"
+    assert run_row.calls_made == 12, "the count is tracked even when nothing caps it"
+
+
+async def test_a_zero_priced_target_still_hits_the_call_ceiling(
+    repo: SqliteStateRepository,
+) -> None:
+    """THE motivating gap, end to end: a `price: free` target halts on calls though it never
+    spends a cent (ADR-0142).
+
+    `estimate_cost`'s own docstring records that such a target "reserves and spends `0.0` with
+    the ledger machinery fully live" — fully live and structurally inert, because
+    `run_max_cost_usd` is a predicate on dollars that never move. Every reservation here is
+    `$0.00` against a $1 000 ceiling, so the dollar predicate cannot refuse anything; the run
+    stops anyway, at exactly the call ceiling.
+
+    `spent_usd`/`reserved_usd` are asserted to be 0.0 at the end precisely so this cannot be
+    mistaken for the dollar ceiling doing the work: had any dollars moved, the halt would prove
+    nothing about the free-target case this exists for.
+    """
+    await repo.open_budget_ledger(RUN, max_usd=1_000.0, now=NOW, max_calls=4)
+    await repo.open_repo_ledger(RUN, REPO, max_usd=1_000.0, now=NOW)
+
+    granted = 0
+    refusals: list[BudgetRefusedError] = []
+    for _ in range(9):
+        try:
+            await repo.reserve_repo_budget(
+                RUN, REPO, reservation_id=_rid(), amount_usd=0.0, now=NOW
+            )
+        except BudgetRefusedError as exc:
+            refusals.append(exc)
+        else:
+            granted += 1
+
+    run_row = await repo.get_budget(RUN)
+    assert run_row is not None
+    assert granted == 4, "the free target dispatched past its call ceiling"
+    assert run_row.calls_made == 4
+    assert run_row.spent_usd == pytest.approx(0.0)
+    assert run_row.reserved_usd == pytest.approx(0.0), (
+        "a free target moved dollars, so this run does not test the gap it exists to test"
+    )
+    assert refusals and all(isinstance(e, RunCallBudgetRefusedError) for e in refusals), (
+        "a call-count refusal must not present as a cost refusal: the two have different "
+        "remedies and only one of them can be relieved by waiting"
+    )
+    assert "calls_made=4" in str(refusals[0]) and "max_calls=4" in str(refusals[0])
 
 
 async def test_a_run_refusal_leaves_no_phantom_repo_reservation(

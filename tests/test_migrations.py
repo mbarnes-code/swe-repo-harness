@@ -391,14 +391,14 @@ def _table_shape(path: Path, table: str) -> list[tuple[object, ...]]:
 def test_registry_is_strictly_ordered_contiguous_and_ends_at_the_baseline():
     """A glob-discovered ladder can silently reorder; a gap or a duplicate corrupts data.
 
-    §6 fixes the ladder as `1 → 2 … 10 → 11`, so the registry must be exactly that: strictly
+    §6 fixes the ladder as `1 → 2 … 11 → 12`, so the registry must be exactly that: strictly
     ascending, no duplicate VERSION, no gap, and ending on the version `schema.sql` installs.
     """
     versions = [step.version for step in STEPS]
     assert versions == sorted(versions), "steps are not in ascending order"
     assert len(set(versions)) == len(versions), "duplicate VERSION in the registry"
     assert versions == list(range(EARLIEST_MIGRATABLE_VERSION + 1, LATEST_VERSION + 1))
-    assert versions == [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    assert versions == [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     assert len({step.module for step in STEPS}) == len(STEPS), "two steps share a module"
 
 
@@ -939,11 +939,11 @@ def test_the_migrated_test_count_column_a_migration_builds_matches_a_fresh_one(t
     assert _table_shape(migrated, "repos") == _table_shape(fresh, "repos")
 
 
-def test_migrating_a_current_v11_database_is_idempotent_for_migrated_test_count(tmp_path):
+def test_migrating_a_current_database_is_idempotent_for_migrated_test_count(tmp_path):
     """`fleet migrate-db` run twice on an already-current database must not touch a column it
     already added — the general no-op guarantee `test_migrating_an_already_current_database_is_a_
     no_op` proves for the whole schema, re-asserted here for the specific value this rung writes."""
-    db = _v6_database(tmp_path / "fleet.db", up_to=11)
+    db = _v6_database(tmp_path / "fleet.db", up_to=LATEST_VERSION)
     conn = sqlite3.connect(db, isolation_level=None)
     try:
         conn.execute("UPDATE repos SET migrated_test_count = 5 WHERE repo_id = 'repo-a'")
@@ -955,6 +955,133 @@ def test_migrating_a_current_v11_database_is_idempotent_for_migrated_test_count(
     assert _query(
         db, "SELECT repo_id, migrated_test_count FROM repos ORDER BY repo_id"
     ) == [("repo-a", 5), ("repo-b", None)]
+
+
+# --------------------------------------------------------------------------------------
+# 11 -> 12: the call-count run ceiling (ADR-0142)
+# --------------------------------------------------------------------------------------
+
+
+def _budget_ledger_ddl_before_v12() -> str:
+    """`budget_ledger`'s live `CREATE TABLE` with exactly this rung's two columns and their CHECK
+    stripped back out — derived from the real baseline rather than hand-copied, so the fixture
+    cannot drift from the REST of the table's shape the way a hand-typed `CREATE TABLE` could."""
+    out = _support.baseline_table_ddl(SCHEMA_SQL)["budget_ledger"]
+    for marker in (
+        "calls_made INTEGER NOT NULL DEFAULT 0, ",
+        "max_calls INTEGER, ",
+        ", CHECK (calls_made >= 0)",
+    ):
+        assert out.count(marker) == 1, f"v012's {marker!r} moved; update this fixture"
+        out = out.replace(marker, "", 1)
+    for gone in ("calls_made", "max_calls"):
+        assert gone not in out, f"v012's {gone} survived the strip; update this fixture"
+    assert "spent_usd" in out and "halted" in out, "the strip ate more than v012's own columns"
+    return out
+
+
+def _v11_database_without_the_call_columns(path: Path) -> Path:
+    """A database GENUINELY at `user_version = 11`, `budget_ledger` missing both v12 columns —
+    the shape a real database already at v11 before this rung shipped actually has.
+
+    `_v6_database(..., up_to=11)` does NOT produce this shape: `budget_ledger` is on 6 -> 7's
+    `_REBUILD` list, and that rebuild sources its target DDL from the *live* `state/schema.sql`
+    (`v012_run_call_ceiling`'s own docstring explains why), so replaying the ladder with TODAY's
+    code gives both columns five rungs early, at v7. Both shapes are real, and this fixture is
+    the second one, built by hand because the ladder itself can no longer produce it.
+    """
+    _fresh_baseline(path)
+    conn = sqlite3.connect(path, isolation_level=None)
+    try:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DROP TABLE budget_ledger")
+        conn.execute(_budget_ledger_ddl_before_v12())
+        conn.execute(
+            "INSERT INTO runs (run_id, started_at, config_sha256, harness_version) "
+            "VALUES (?,?,?,?)",
+            ("run-a", NOW, "a" * 64, "0.1.0"),
+        )
+        conn.execute(
+            "INSERT INTO budget_ledger (run_id, spent_usd, max_usd, updated_at) VALUES (?,?,?,?)",
+            ("run-a", 12.5, 400.0, NOW),
+        )
+        conn.execute("PRAGMA user_version = 11")
+    finally:
+        conn.close()
+    return path
+
+
+def test_the_eleven_to_twelve_step_adds_the_call_columns_uncapped_and_at_zero(tmp_path):
+    """A pre-existing run must come out of this rung behaving EXACTLY as it did before it.
+
+    That is two separate values, and both directions are a real hazard. `max_calls` back-fills to
+    NULL because NULL is this table's "no cap" (the ceiling is opt-in, and a run that never had
+    one must not acquire one mid-flight). `calls_made` back-fills to 0 because a run's call count
+    before this rung was recorded nowhere — 0 is the only honest value, and any positive guess
+    would spend a ceiling the operator has not even set yet on calls nobody measured.
+    """
+    db = _v11_database_without_the_call_columns(tmp_path / "fleet.db")
+    assert current_version(db) == 11
+    before_columns = {row[1] for row in _query(db, "PRAGMA table_info('budget_ledger')")}
+    assert "calls_made" not in before_columns and "max_calls" not in before_columns
+
+    before, after = migrate(db, steps=_STEPS_THROUGH(12))
+
+    assert (before, after) == (11, 12)
+    assert current_version(db) == 12
+    assert _query(
+        db, "SELECT run_id, spent_usd, calls_made, max_calls FROM budget_ledger"
+    ) == [("run-a", 12.5, 0, None)], "the lifted row must be uncapped, at zero, spend intact"
+
+
+def test_a_full_ladder_replay_from_v6_gets_the_call_columns_five_rungs_early(tmp_path):
+    """The OTHER real path, and the one a bare `ADD COLUMN` would break: a database migrated from
+    before v7 with TODAY's code has both columns at v7 already, because 6 -> 7 rebuilds
+    `budget_ledger` from the live `schema.sql`. This rung's guard must recognise that and do
+    nothing rather than raise "duplicate column name"."""
+    db = _v6_database(tmp_path / "fleet.db", up_to=7)
+    assert current_version(db) == 7
+    at_v7 = {row[1] for row in _query(db, "PRAGMA table_info('budget_ledger')")}
+    assert {"calls_made", "max_calls"} <= at_v7, "the v7 rebuild no longer reads the live baseline"
+
+    before, after = migrate(db, steps=_STEPS_THROUGH(12))
+
+    assert (before, after) == (7, 12)
+    assert current_version(db) == 12
+
+
+def test_the_call_columns_a_migration_builds_match_a_fresh_one(tmp_path):
+    """Migrated-at-12 and fresh-at-12 must be the same shape (name, type, notnull, default) — the
+    same structural-identity guarantee `test_migrated_tables_match_a_freshly_created_v7_baseline`
+    proves for the whole 6 -> 7 rebuild, narrowed to this rung's two `ADD COLUMN`s.
+
+    The `ADD COLUMN` path cannot carry the baseline's `CHECK (calls_made >= 0)` — SQLite has no
+    syntax for it — which `v012_run_call_ceiling`'s docstring discloses rather than hides. That
+    divergence is in `sqlite_master`'s DDL text only; `PRAGMA table_info`, which is what a query
+    and every later rung actually read, is identical, and this asserts exactly that.
+    """
+    lifted = _v11_database_without_the_call_columns(tmp_path / "old.db")
+    migrate(lifted)
+    fresh = _fresh_baseline(tmp_path / "new.db")
+
+    assert _table_shape(lifted, "budget_ledger") == _table_shape(fresh, "budget_ledger")
+
+
+def test_migrating_a_current_database_leaves_a_set_call_ceiling_alone(tmp_path):
+    """`fleet migrate-db` run twice must not reset a ceiling or a count it already added. A rerun
+    that quietly zeroed `calls_made` would hand a run that had exhausted its ceiling a fresh
+    allowance — the same "resumed run starts from zero" defect `repo_ledger` was built to end,
+    one ledger up."""
+    db = _v6_database(tmp_path / "fleet.db", up_to=LATEST_VERSION)
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute("UPDATE budget_ledger SET calls_made = 7, max_calls = 9")
+    finally:
+        conn.close()
+
+    assert migrate(db) == (LATEST_VERSION, LATEST_VERSION)
+
+    assert _query(db, "SELECT calls_made, max_calls FROM budget_ledger") == [(7, 9)]
 
 
 # --------------------------------------------------------------------------------------

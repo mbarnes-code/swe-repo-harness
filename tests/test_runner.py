@@ -903,7 +903,7 @@ async def test_budget_exhaustion_halts_the_wave(tmp_path: Path) -> None:
 
 
 async def test_a_repo_scoped_ceiling_does_not_halt_the_fleet(tmp_path: Path) -> None:
-    """§11.2: the five ceilings differ in blast radius, and the difference is the exception's
+    """§11.2: the ceilings differ in blast radius, and the difference is the exception's
     `exit_code`. A repo ceiling sends ONE repo to a human; the fleet continues."""
     config = FleetConfig()
     async for harness in _build(tmp_path, config, max_usd=1000.0):

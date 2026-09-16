@@ -4,7 +4,7 @@ This module is the **policy layer above** `state/repository.py`'s two normative 
 (`reserve_budget` / `settle_budget`, §6 "RESERVATION"). It writes no SQL: the compare-and-swap
 that makes a ceiling un-overshootable lives in exactly one place, and re-implementing it here
 would give the harness two ledgers that disagree under concurrency. What lives here is the
-*judgement* the CAS cannot make on its own — how much to reserve, which of the five ceilings a
+*judgement* the CAS cannot make on its own — how much to reserve, which of the six ceilings a
 refusal belongs to, and whether a refusal means "wait" or "stop".
 
 Three properties are load-bearing, and each was a defect before it was code.
@@ -30,7 +30,7 @@ caller in this process *before* a backend is touched, and the SQL CAS's own `hal
 refuses every caller in every other process. In-flight calls are allowed to finish: cancelling
 them wastes what was already paid for.
 
-Five ceilings, each with the breach behaviour §11.2 assigns, each carried by its own exception
+Six ceilings, each with the breach behaviour §11.2 assigns, each carried by its own exception
 type so no caller has to parse a message to know what to do (Rule 11):
 
 | Ceiling | Exception | Breach behaviour |
@@ -40,6 +40,18 @@ type so no caller has to parse a message to know what to do (Rule 11):
 | `revalidation_max_cost_usd` | `RevalidationBudgetExhausted` | stub `ABANDONED`, repo `DEGRADED` |
 | `wave_max_cost_usd_per_repo` × members | `WaveBudgetExhausted` | wave stops admitting, exit 10 |
 | `run_max_cost_usd` | `RunBudgetExhausted` / `LedgerHalted` | ledger halted, sticky, exit 3 |
+| `run_max_llm_calls` | `RunCallBudgetExhausted` | sticky via the CAS itself, exit 3 |
+
+**On the sixth row** (ADR-0142): it exists because the fifth cannot always be enforced.
+`price: free` is a positive assertion an operator makes about a locally-served target (§9 rule 5),
+and it prices every call at `$0.00` — so `spent_usd` stays `0.00` for the life of the run and
+`run_max_cost_usd`, the one ceiling that halts a fleet, never trips. `run_max_llm_calls` counts
+**dispatches** instead of dollars, in the same durable CAS (`budget_ledger.calls_made`,
+incremented by the reservation statement itself), so it holds across processes and a crash
+exactly as the dollar ceiling does. It needs no reserve/settle pair: a dollar amount is a p95
+estimate reconciled after the call, while one dispatch is exactly 1 call known in advance. And
+unlike a dollar refusal it is never backpressure — no settlement lowers `calls_made` — so it
+bypasses the wait loop in `reserve()` entirely.
 """
 
 from __future__ import annotations
@@ -69,6 +81,7 @@ from fleet.state.repository import (
     RepoBudgetRefusedError,
     RepoLedgerRow,
     ReservationRefusedError,
+    RunCallBudgetRefusedError,
 )
 
 __all__ = [
@@ -89,6 +102,7 @@ __all__ = [
     "Reservation",
     "RevalidationBudgetExhausted",
     "RunBudgetExhausted",
+    "RunCallBudgetExhausted",
     "SpendKind",
     "SpendScope",
     "TaskTokenBudgetExhausted",
@@ -116,12 +130,19 @@ _USD_EPSILON: Final = 1e-9
 
 
 # --------------------------------------------------------------------------------------
-# breaches — five ceilings, five types; never a bool and never a message a caller must parse
+# breaches — six ceilings, six types; never a bool and never a message a caller must parse
 # --------------------------------------------------------------------------------------
 
 
 class BudgetCeiling(StrEnum):
-    """Which of §11.2's five ceilings a breach belongs to. The breach behaviours differ."""
+    """Which SCOPE a breach belongs to. The breach behaviours differ.
+
+    Five members for §11.2's six ceilings, and that is not a miscount: `run_max_cost_usd` and
+    `run_max_llm_calls` are two dimensions of the SAME run-level scope, so both are `RUN`. The
+    dimension is carried by the exception class (`RunBudgetExhausted` vs
+    `RunCallBudgetExhausted`), which is where a caller reads it — adding a sixth member would
+    claim a sixth scope that no breach behaviour distinguishes.
+    """
 
     TASK = "TASK"
     REPO = "REPO"
@@ -175,6 +196,34 @@ class WaveBudgetExhausted(LedgerBreach):
 class RunBudgetExhausted(LedgerBreach):
     """`run_max_cost_usd`: `spent_usd + estimate` breaches the ceiling on its own, so no amount
     of waiting can help. Exit 3."""
+
+    ceiling: ClassVar[BudgetCeiling] = BudgetCeiling.RUN
+    exit_code: ClassVar[int | None] = RUN_BUDGET_EXIT_CODE
+
+
+class RunCallBudgetExhausted(LedgerBreach):
+    """`run_max_llm_calls`: this run has dispatched every LLM call it was allowed. Exit 3.
+
+    A **sibling** of `RunBudgetExhausted`, not a subclass, and deliberately: subclassing would
+    make `except RunBudgetExhausted` catch a breach of a ceiling it never measured, and every
+    handler that reports "cost ceiling reached" would then say so about a run that may have spent
+    nothing at all. The shared parts are shared explicitly instead — `BudgetCeiling.RUN` because
+    it is the same scope, and `RUN_BUDGET_EXIT_CODE` because the outcome is the same one §10
+    already defines: the run cannot continue, exit 3. A new exit code would have to be
+    adjudicated into §10's table, and nothing here needs a caller to act differently.
+
+    Terminal on arrival. `calls_made` only ever increments, so unlike a dollar breach this can
+    never be backpressure that a settlement relieves.
+
+    **This does NOT set `budget_ledger.halted`, and that is deliberate** (ADR-0142). It needs no
+    halt to be sticky: the CAS predicate `calls_made + 1 <= max_calls` keeps refusing across
+    every process and every restart on its own, which is the whole property `halted` exists to
+    provide for the dollar ceiling. Setting it anyway would put the run in a state whose only
+    documented exit is `fleet resume --raise-budget <usd>` — a flag that raises the DOLLAR
+    ceiling and would not touch `max_calls`, so it would clear the halt without clearing the
+    condition. The coherent escape is to raise `budgets.run_max_llm_calls` in config, which the
+    next `open_budget_ledger` writes to the row.
+    """
 
     ceiling: ClassVar[BudgetCeiling] = BudgetCeiling.RUN
     exit_code: ClassVar[int | None] = RUN_BUDGET_EXIT_CODE
@@ -290,9 +339,15 @@ def _p95(values: list[int]) -> int:
 
 @dataclass(frozen=True, slots=True)
 class Ceilings:
-    """The five §11.2 numbers, resolved from config once and passed down."""
+    """The §11.2 numbers, resolved from config once and passed down.
+
+    `run_max_calls` is `None` when the operator set no call ceiling, which is the default and
+    what every pre-ADR-0142 profile carries — the CAS reads NULL as "no cap", so an unset value
+    changes nothing.
+    """
 
     run_max_usd: float
+    run_max_calls: int | None
     wave_max_usd_per_repo: float
     repo_max_usd: float
     repo_max_ceiling_usd: float
@@ -304,6 +359,7 @@ class Ceilings:
     def from_settings(cls, budgets: BudgetsSection, stubs: StubsSection) -> Ceilings:
         return cls(
             run_max_usd=budgets.run_max_cost_usd,
+            run_max_calls=budgets.run_max_llm_calls,
             wave_max_usd_per_repo=budgets.wave_max_cost_usd_per_repo,
             repo_max_usd=budgets.repo_max_cost_usd,
             repo_max_ceiling_usd=budgets.repo_max_cost_ceiling_usd,
@@ -464,7 +520,8 @@ class CostLedger:
 
     | Ceiling | Durable? | Where |
     |---|---|---|
-    | run | yes | `budget_ledger` CAS |
+    | run (dollars) | yes | `budget_ledger` CAS |
+    | run (call count) | yes | `budget_ledger.calls_made`, same CAS, same transaction |
     | repo | yes | `repo_ledger` CAS, nested inside the run's |
     | revalidation | yes | `repo_ledger.revalidation_usd`, settled in the same statement |
     | wave | derived | `SUM(repo_ledger.spent_usd)` over the wave's members (§6 `waves`) |
@@ -610,6 +667,21 @@ class CostLedger:
                 # No ceiling refused — the id itself was rejected. There is no headroom a wait
                 # could free, so this must not enter the backpressure loop below.
                 raise
+            except RunCallBudgetRefusedError as refusal:
+                # `run_max_llm_calls`, and it is TERMINAL — straight past the backpressure loop
+                # below. Waiting is what a caller does when the shortfall is held by in-flight
+                # reservations that will release; `calls_made` is not held by anyone and no
+                # settlement anywhere lowers it, so every wake would re-evaluate the same CAS to
+                # the same refusal and the loop could only ever end in a `BackpressureTimeout`
+                # naming a ceiling that was never the problem (ADR-0142).
+                raise RunCallBudgetExhausted(
+                    f"run {self._run_id} has dispatched every LLM call `run_max_llm_calls` "
+                    f"allows ({self._ceilings.run_max_calls}); refusing "
+                    f"${estimate.usd:.4f} for {scope.repo_id} before the backend is touched. "
+                    f"This ceiling counts dispatches, not dollars, so it holds for a "
+                    f"`price: free` target whose spend never moves — exit "
+                    f"{RUN_BUDGET_EXIT_CODE}"
+                ) from refusal
             except BudgetRefusedError as refusal:
                 # WHICH ledger refused decides what a wait could even accomplish, so the two are
                 # interpreted separately — but both may be backpressure, and the tail is shared.

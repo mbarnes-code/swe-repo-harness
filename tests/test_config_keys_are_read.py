@@ -654,7 +654,8 @@ def _inert_keys() -> frozenset[str]:
 def test_the_scan_sees_a_real_config_surface() -> None:
     """Guard the guard: a walk that silently yields nothing would pass every other test here.
 
-    The exact count (186, at time of writing — 182 before round VI task 107 added
+    The exact count (187, at time of writing — 186 before ADR-0142 added
+    `budgets.run_max_llm_calls`, the call-count run ceiling; 182 before round VI task 107 added
     `preflight.baseline_build.container_image`/`.container_memory`/`.container_cpus`/
     `.container_network`, §12.11/D116 Leg B) is a tripwire on its own: `len(keys) > 100` would
     still pass if an entire section vanished from the walk (`verify` alone is 8 keys), so the
@@ -662,8 +663,8 @@ def test_the_scan_sees_a_real_config_surface() -> None:
     count just makes any drift, section-sized or not, visible instead of silently tolerated.
     """
     keys = _config_keys()
-    assert len(keys) == 186, (
-        f"walked {len(keys)} keys, expected 186 — recount deliberately (a key was added/removed, "
+    assert len(keys) == 187, (
+        f"walked {len(keys)} keys, expected 187 — recount deliberately (a key was added/removed, "
         "or a whole section was silently dropped from the walk) and update this number"
     )
     for filename, root in ROOTS:

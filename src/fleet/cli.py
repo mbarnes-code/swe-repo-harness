@@ -2068,7 +2068,10 @@ async def _scan_impl(
                 # invisible to admission — a resume that quietly scans 249 of 250 repos.
                 await repository.reap_expired_phase_leases(run_id, now=_now())
                 await repository.open_budget_ledger(
-                    run_id, max_usd=settings.config.budgets.run_max_cost_usd, now=now
+                    run_id,
+                    max_usd=settings.config.budgets.run_max_cost_usd,
+                    now=now,
+                    max_calls=settings.config.budgets.run_max_llm_calls,
                 )
                 evidence = _ScanEvidence()
                 report, run_ctx = await _run_scan_wave(
@@ -7072,7 +7075,10 @@ async def _transform_impl(
                     )
                 await repository.reap_expired_phase_leases(run_id, now=_now())
                 await repository.open_budget_ledger(
-                    run_id, max_usd=settings.config.budgets.run_max_cost_usd, now=_now()
+                    run_id,
+                    max_usd=settings.config.budgets.run_max_cost_usd,
+                    now=_now(),
+                    max_calls=settings.config.budgets.run_max_llm_calls,
                 )
                 # D123 / ADR-0127: pre-seed EVERY wave's TRANSFORM `phases` row for this
                 # invocation's whole domain, upfront, before any wave dispatches — mirroring
@@ -12224,7 +12230,10 @@ async def _build_impl(
                 waves = await _open_phase_waves(read_conn, run_id, Phase.BUILD, wave)
                 await repository.reap_expired_phase_leases(run_id, now=_now())
                 await repository.open_budget_ledger(
-                    run_id, max_usd=settings.config.budgets.run_max_cost_usd, now=_now()
+                    run_id,
+                    max_usd=settings.config.budgets.run_max_cost_usd,
+                    now=_now(),
+                    max_calls=settings.config.budgets.run_max_llm_calls,
                 )
                 # ---- the RUN's domain, fixed here and not moved again (ADR-0055) ----------
                 #
@@ -12990,7 +12999,10 @@ async def _verify_impl(
                 waves = await _open_phase_waves(read_conn, run_id, Phase.VERIFY, wave)
                 await repository.reap_expired_phase_leases(run_id, now=_now())
                 await repository.open_budget_ledger(
-                    run_id, max_usd=settings.config.budgets.run_max_cost_usd, now=_now()
+                    run_id,
+                    max_usd=settings.config.budgets.run_max_cost_usd,
+                    now=_now(),
+                    max_calls=settings.config.budgets.run_max_llm_calls,
                 )
                 # D125 / ADR-0129: pre-seed EVERY wave's VERIFY `phases` row for this invocation's
                 # whole GATED domain, upfront, before any wave dispatches — adapting ADR-0127's

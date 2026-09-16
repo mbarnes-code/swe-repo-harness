@@ -13,7 +13,7 @@ from fleet.models.graph import CollisionFinding, ContractNode, CycleFinding, Mig
 from fleet.models.repo import RepoId
 from fleet.models.tasks import MAX_ATTEMPTS, TokenUsage
 
-SCHEMA_VERSION = 11  # == PRAGMA user_version (§6): 2 ADR-0019, 3 ADR-0021, 4 ADR-0022,
+SCHEMA_VERSION = 12  # == PRAGMA user_version (§6): 2 ADR-0019, 3 ADR-0021, 4 ADR-0022,
                      #                           5 ADR-0023 (llm_cache backend identity),
                      #                           6 ADR-0024 (mutations dropped; Git owns code state)
                      #                           7 edge_key/scc_id logical PKs, revalidation_round
@@ -31,6 +31,10 @@ SCHEMA_VERSION = 11  # == PRAGMA user_version (§6): 2 ADR-0019, 3 ADR-0021, 4 A
                      #                          11 `repos.migrated_test_count`: the durable half of
                      #                             §12.11's `(repo, baseline, migrated)` report —
                      #                             CRITERIA_PLAN.md §11 gap 2 (round VI task 47)
+                     #                          12 `budget_ledger.calls_made`/`max_calls`: the
+                     #                             call-count run ceiling, which a `price: free`
+                     #                             target cannot render inert the way it does
+                     #                             `run_max_cost_usd` (ADR-0142)
 # Every version has a forward-only `src/fleet/migrations/vNNN_<slug>.py` exposing
 # `upgrade(conn: sqlite3.Connection) -> None`; this batch ships `v007_logical_keys.py`. `fleet
 # migrate-db` (§10) — the ONLY DDL path; `fleet migrate` is the unrelated repo-migration verb —

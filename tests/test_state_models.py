@@ -531,7 +531,7 @@ def test_the_checkpoint_survives_a_crash_safe_write_and_reload(
     reloaded = MigrationState.model_validate_json(path.read_text(encoding="utf-8"))
 
     assert reloaded == sample_state
-    assert reloaded.schema_version == SCHEMA_VERSION == 11
+    assert reloaded.schema_version == SCHEMA_VERSION == 12
     assert reloaded.repos["acme-commons"].phases[Phase.TRANSFORM].transient_retries == 2
     assert reloaded.repos["acme-billing"].blocked_by == ["acme-commons"]
     assert reloaded.repos["acme-portal"].stubbed_deps == [STUB_COORD]

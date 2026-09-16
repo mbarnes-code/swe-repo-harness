@@ -262,6 +262,7 @@ class BudgetsSection(Section):
     """§11.2; all durable in `budget_ledger` / `repo_ledger`."""
 
     run_max_cost_usd: float = Field(default=400.0, ge=0.0)      # exit 3, sticky
+    run_max_llm_calls: int | None = Field(default=None, ge=1)   # exit 3, sticky; None => no cap
     wave_max_cost_usd_per_repo: float = Field(default=8.0, ge=0.0)  # × COUNT(wave_members); exit 10
     repo_max_cost_usd: float = Field(default=6.0, ge=0.0)
     repo_max_cost_ceiling_usd: float = Field(default=30.0, ge=0.0)  # cap after blast-radius scaling

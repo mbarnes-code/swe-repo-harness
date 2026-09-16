@@ -131,6 +131,7 @@ __all__ = [
     "RepositoryError",
     "ReservationRefusedError",
     "ReservationRow",
+    "RunCallBudgetRefusedError",
     "SqliteStateRepository",
     "StateRepository",
     "SymbolRow",
@@ -198,6 +199,21 @@ class RepoBudgetRefusedError(BudgetRefusedError):
     breach sends one repo to `REQUIRES_HUMAN_INTERVENTION` and the fleet continues, where a run
     breach halts the fleet (§11.2). A caller that had to parse the message to tell them apart
     would eventually get it wrong on a repo id that contains the word "run".
+    """
+
+
+class RunCallBudgetRefusedError(BudgetRefusedError):
+    """The run CAS refused on the **call-count** predicate, not the dollar one (v12, ADR-0142).
+
+    A subclass, not a sibling, so `except BudgetRefusedError` still catches every refusal — the
+    same reason `RepoBudgetRefusedError` is shaped this way. The type is what tells the caller
+    that **waiting cannot help**: in-flight reservations release dollars when they settle, so a
+    dollar refusal may be mere backpressure, but `calls_made` only ever increments and no
+    settlement anywhere can lower it. A caller that routed this into a backpressure wait would
+    only ever time out into a `BackpressureTimeout` naming the wrong ceiling.
+
+    Determined **inside the refusing transaction**, from the same snapshot the `UPDATE` tested —
+    not from a re-read afterwards, which could observe a different row than the one that refused.
     """
 
 
@@ -285,7 +301,13 @@ class PhaseRow:
 
 @dataclass(frozen=True, slots=True)
 class BudgetLedgerRow:
-    """`budget_ledger` as read. `halted = 1` means no further LLM call may be dispatched."""
+    """`budget_ledger` as read. `halted = 1` means no further LLM call may be dispatched.
+
+    `calls_made`/`max_calls` are the v12 call-count ceiling, orthogonal to the dollar one: a
+    `price: free` target holds `spent_usd` at `0.00` forever, which makes `max_usd` structurally
+    inert, and this pair is then the only ceiling such a run has (ADR-0142). `max_calls is None`
+    means no cap.
+    """
 
     run_id: str
     spent_usd: float
@@ -294,6 +316,8 @@ class BudgetLedgerRow:
     halted: bool
     reservation_expires_at: str | None
     updated_at: str
+    calls_made: int
+    max_calls: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,7 +639,9 @@ class StateRepository(ReadOnlyRepository, Protocol):
     ) -> tuple[Phase, ...]: ...
 
     # -- primitive 4: the ledger CAS ---------------------------------------------------
-    async def open_budget_ledger(self, run_id: str, *, max_usd: float, now: datetime) -> None: ...
+    async def open_budget_ledger(
+        self, run_id: str, *, max_usd: float, now: datetime, max_calls: int | None = None
+    ) -> None: ...
 
     async def reserve_budget(
         self, run_id: str, *, amount_usd: float, now: datetime, expires_at: datetime | None = None
@@ -731,12 +757,32 @@ _HELD_EXPIRY_REPO: Final = (
 
 
 def _reserve_run_sql(expiry: str) -> str:
-    """§6 RESERVATION (normative), verbatim. `rowcount == 1` grants; `rowcount == 0` refuses."""
+    """§6 RESERVATION (normative), verbatim. `rowcount == 1` grants; `rowcount == 0` refuses.
+
+    **Two ceilings, one statement, one rowcount (v12, ADR-0142).** The dollar predicate and the
+    call-count predicate are ANDed inside the same `WHERE`, so a reservation that breaches either
+    grants nothing and increments nothing — the whole point of a CAS being one statement. The
+    call-count half needs no reserve/settle pair the way dollars do: a dollar amount is a p95
+    ESTIMATE before the call and is RECONCILED after it, whereas one dispatch is exactly 1 call,
+    known atomically in advance. So `calls_made` is incremented here and never touched again —
+    settlement leaves it alone and the reaper leaves it alone, because there is no "un-call".
+
+    `max_calls IS NULL` means no cap, which is what every pre-v12 row and every run whose
+    operator set no ceiling carries, so this predicate is inert unless somebody opted in.
+
+    Neither addition binds a parameter, so the existing positional bindings are unchanged —
+    `calls_made + 1` and `max_calls` are both columns. A reader tempted to "simplify"
+    `calls_made + 1 <= max_calls` to `calls_made < max_calls` should note they are equivalent
+    only for integers and that the written form is the one that states the invariant being
+    enforced: the count AFTER this grant must still fit.
+    """
     return (
         "UPDATE budget_ledger "  # noqa: S608
         f"   SET reserved_usd = reserved_usd + ?, reservation_expires_at = {expiry}, "
+        "       calls_made = calls_made + 1, "
         "       updated_at = ? "
         " WHERE run_id = ? AND halted = 0 AND spent_usd + reserved_usd + ? <= max_usd"
+        "   AND (max_calls IS NULL OR calls_made + 1 <= max_calls)"
     )
 
 
@@ -875,13 +921,38 @@ _REAP_RESERVATIONS_SQL: Final = (
 
 
 async def _probe_run_ledger(conn: aiosqlite.Connection, run_id: str) -> tuple[object, ...] | None:
-    """Read the run ledger's numbers **inside the refusing transaction**: the refusal says why."""
+    """Read the run ledger's numbers **inside the refusing transaction**: the refusal says why.
+
+    Carries `calls_made`/`max_calls` since v12 so `_call_ceiling_refused` can tell WHICH of the
+    two run predicates rejected this reservation without a second, racy read.
+    """
     async with conn.execute(
-        "SELECT spent_usd, reserved_usd, max_usd, halted FROM budget_ledger WHERE run_id = ?",
+        "SELECT spent_usd, reserved_usd, max_usd, halted, calls_made, max_calls "
+        "  FROM budget_ledger WHERE run_id = ?",
         (run_id,),
     ) as probe:
         found = await probe.fetchone()
     return None if found is None else tuple(found)
+
+
+def _call_ceiling_refused(ledger: tuple[object, ...] | None) -> bool:
+    """Did the **call-count** predicate refuse, rather than the dollar one (v12, ADR-0142)?
+
+    Read off the probe tuple `_probe_run_ledger` took inside the refusing transaction, so this
+    answers what the `UPDATE`'s own `WHERE` saw. It re-states that `WHERE`'s call-count half
+    negated: `NOT (max_calls IS NULL OR calls_made + 1 <= max_calls)`.
+
+    Both predicates can refuse at once, and then this one wins — deliberately. A call-count
+    refusal is terminal (nothing lowers `calls_made`), so reporting it is correct whatever the
+    dollar predicate thinks; reporting the dollar one instead could route a terminal refusal into
+    a backpressure wait that can only time out.
+    """
+    if ledger is None:
+        return False
+    calls_made, max_calls = _opt_int(ledger[4]), _opt_int(ledger[5])
+    if max_calls is None or calls_made is None:
+        return False
+    return calls_made + 1 > max_calls
 
 
 async def _probe_repo_ledger(
@@ -921,14 +992,44 @@ def _settle_refused(run_id: str, reserved_usd: float, actual_usd: float) -> str:
 
 
 def _reserve_refused(run_id: str, amount_usd: float, ledger: tuple[object, ...] | None) -> str:
-    return f"budget reservation of ${amount_usd:.4f} REFUSED for run {run_id}: " + (
-        "no budget_ledger row exists"
-        if ledger is None
-        else (
-            f"spent={ledger[0]} reserved={ledger[1]} max={ledger[2]} halted={ledger[3]} "
-            "— fail-closed is a constraint, not a convention (§6)"
+    """The refusal message, naming the ceiling that ACTUALLY refused (v12, ADR-0142).
+
+    Reporting both ceilings' numbers on every refusal would hand a human reading a call-count
+    halt a "spent/max" pair that is nowhere near its ceiling and invite the conclusion that the
+    dollar ceiling broke. Each branch prints the numbers belonging to the predicate that fired.
+    """
+    if ledger is None:
+        return (
+            f"budget reservation of ${amount_usd:.4f} REFUSED for run {run_id}: "
+            "no budget_ledger row exists"
         )
+    if _call_ceiling_refused(ledger):
+        return (
+            f"LLM call REFUSED for run {run_id}: calls_made={ledger[4]} of "
+            f"max_calls={ledger[5]} — the run-scoped CALL-COUNT ceiling, which is independent of "
+            f"cost (this run has spent={ledger[0]} of max={ledger[2]}) and which no settlement "
+            "can relieve, because calls_made only ever increments (§11.2)"
+        )
+    return (
+        f"budget reservation of ${amount_usd:.4f} REFUSED for run {run_id}: "
+        f"spent={ledger[0]} reserved={ledger[1]} max={ledger[2]} halted={ledger[3]} "
+        "— fail-closed is a constraint, not a convention (§6)"
     )
+
+
+def _run_refusal(
+    run_id: str, amount_usd: float, ledger: tuple[object, ...] | None
+) -> BudgetRefusedError:
+    """The typed refusal for a zero-row run CAS: which ceiling refused decides which class.
+
+    Built here rather than at the two raise sites so the run-only primitive and the nested path
+    cannot drift into raising different types for the same refusal — the same "ONE text each"
+    discipline the ledger statements above are written under.
+    """
+    message = _reserve_refused(run_id, amount_usd, ledger)
+    if _call_ceiling_refused(ledger):
+        return RunCallBudgetRefusedError(message)
+    return BudgetRefusedError(message)
 
 
 def _repo_reserve_refused(
@@ -1143,7 +1244,7 @@ class SqliteStateRepository:
     async def get_budget(self, run_id: str) -> BudgetLedgerRow | None:
         sql = (
             "SELECT run_id, spent_usd, reserved_usd, max_usd, halted, "
-            "       reservation_expires_at, updated_at "
+            "       reservation_expires_at, updated_at, calls_made, max_calls "
             "  FROM budget_ledger WHERE run_id = ?"
         )
         async with self._read.execute(sql, (run_id,)) as cursor:
@@ -1158,6 +1259,8 @@ class SqliteStateRepository:
             halted=bool(row[4]),
             reservation_expires_at=_opt_str(row[5]),
             updated_at=str(row[6]),
+            calls_made=int(row[7]),
+            max_calls=_opt_int(row[8]),
         )
 
     # -- §11 "Query results": streamed, never folded into a list ------------------------
@@ -2416,13 +2519,24 @@ class SqliteStateRepository:
 
     # -- primitive 4 -------------------------------------------------------------------
 
-    async def open_budget_ledger(self, run_id: str, *, max_usd: float, now: datetime) -> None:
+    async def open_budget_ledger(
+        self, run_id: str, *, max_usd: float, now: datetime, max_calls: int | None = None
+    ) -> None:
+        """Open (or re-open) the run's durable ledger row, setting both run ceilings.
+
+        `max_calls` takes the value it is given, exactly as `max_usd` does — no high-water-mark
+        MAX-of-old-and-new. That behaviour belongs to the repo ledger, whose ceiling is *derived*
+        from a blast radius that only grows; this one is read straight off static config, so an
+        operator who lowers it between invocations means to lower it. `None` (the default, and
+        what every caller that set no ceiling passes) writes NULL, which the CAS reads as no cap.
+        """
         sql = (
-            "INSERT INTO budget_ledger (run_id, max_usd, updated_at) VALUES (?, ?, ?) "
+            "INSERT INTO budget_ledger (run_id, max_usd, max_calls, updated_at) "
+            "VALUES (?, ?, ?, ?) "
             "ON CONFLICT (run_id) DO UPDATE SET max_usd = excluded.max_usd, "
-            "    updated_at = excluded.updated_at"
+            "    max_calls = excluded.max_calls, updated_at = excluded.updated_at"
         )
-        params = (run_id, max_usd, _iso(now))
+        params = (run_id, max_usd, max_calls, _iso(now))
 
         async def unit(conn: aiosqlite.Connection) -> None:
             await conn.execute(sql, params)
@@ -2438,6 +2552,11 @@ class SqliteStateRepository:
         writes succeed. `rowcount == 0` is a **refusal**, so it raises `BudgetRefusedError`
         carrying the ledger's actual numbers — a caller cannot ignore an exception the way it
         can ignore a `False`.
+
+        Since v12 the shared statement guards a second, orthogonal ceiling and grants a call
+        alongside the dollars, so a refusal here may be either ceiling's: it is
+        `RunCallBudgetRefusedError` (a `BudgetRefusedError` subclass) when the call-count
+        predicate is the one that refused. See `_reserve_run_sql`.
         """
         params = (
             amount_usd,
@@ -2457,7 +2576,7 @@ class SqliteStateRepository:
 
         changed, ledger = await self._writer.submit(unit)
         if changed == 0:
-            raise BudgetRefusedError(_reserve_refused(run_id, amount_usd, ledger))
+            raise _run_refusal(run_id, amount_usd, ledger)
 
     async def settle_budget(
         self, run_id: str, *, reserved_usd: float, actual_usd: float, now: datetime
@@ -2616,7 +2735,9 @@ class SqliteStateRepository:
 
         Raises `RepoBudgetRefusedError` when the repo ceiling refuses and `BudgetRefusedError`
         when the run ceiling (or `halted = 1`) does — the type, not the message, is how the
-        caller knows whether one repo stops or the whole fleet does (§11.2).
+        caller knows whether one repo stops or the whole fleet does (§11.2). A run refusal on the
+        v12 CALL-COUNT ceiling narrows to `RunCallBudgetRefusedError`, because that one is
+        terminal where a dollar refusal may be backpressure a settlement will relieve.
         """
         expiry = None if expires_at is None else _iso(expires_at)
         stamp = _iso(now)
@@ -2659,8 +2780,8 @@ class SqliteStateRepository:
             run_cursor = await conn.execute(_RESERVE_RUN_DERIVED_SQL, run_params)
             if int(run_cursor.rowcount) == 0:
                 # The repo UPDATE above is rolled back with this raise: no phantom hold.
-                raise BudgetRefusedError(
-                    _reserve_refused(run_id, amount_usd, await _probe_run_ledger(conn, run_id))
+                raise _run_refusal(
+                    run_id, amount_usd, await _probe_run_ledger(conn, run_id)
                 )
 
         await self._writer.submit(unit)

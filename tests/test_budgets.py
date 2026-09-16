@@ -37,6 +37,7 @@ from fleet.orchestrator.budgets import (
     RUN_BUDGET_EXIT_CODE,
     WAVE_BUDGET_EXIT_CODE,
     BackpressureTimeout,
+    BudgetCeiling,
     Ceilings,
     CostEstimate,
     CostLedger,
@@ -46,6 +47,7 @@ from fleet.orchestrator.budgets import (
     ResizableLimiter,
     RevalidationBudgetExhausted,
     RunBudgetExhausted,
+    RunCallBudgetExhausted,
     SpendKind,
     SpendScope,
     TaskTokenBudgetExhausted,
@@ -110,8 +112,8 @@ class Harness:
             **kwargs,  # type: ignore[arg-type]
         )
 
-    async def open_ledger(self, max_usd: float) -> None:
-        await self.store.open_budget_ledger(RUN, max_usd=max_usd, now=NOW)
+    async def open_ledger(self, max_usd: float, *, max_calls: int | None = None) -> None:
+        await self.store.open_budget_ledger(RUN, max_usd=max_usd, now=NOW, max_calls=max_calls)
 
     async def force_halt_in_the_database(self) -> None:
         """Another process (or `fleet resume` refusing to clear it) set `halted = 1`."""
@@ -683,6 +685,110 @@ async def test_task_token_ceiling_is_measured_in_tokens_and_advances_the_ladder(
         await ledger.reserve(big, scope=scope(task_id="t-1", blast_radius=64))
     assert breach.value.exit_code is None, "a task-scoped breach never stops the fleet"
     assert ledger.task_spent_tokens("t-1") == 9_800
+
+
+async def test_a_call_count_breach_is_its_own_type_and_not_a_cost_breach(
+    harness: Harness,
+) -> None:
+    """`run_max_llm_calls` raises `RunCallBudgetExhausted`, which is NOT a `RunBudgetExhausted`.
+
+    Asserting the exit code alone could not tell these apart — exit 3 is shared by
+    `RunBudgetExhausted` and `LedgerHalted` too — so this asserts the type both ways: the class
+    that was raised, and the class that must NOT catch it. The negative half is the load-bearing
+    one. Were `RunCallBudgetExhausted` made a subclass of `RunBudgetExhausted` for convenience,
+    every `except RunBudgetExhausted` handler in the tree would start reporting "cost ceiling
+    reached" about a run that spent nothing, and no test asserting only the positive would notice.
+    """
+    await harness.open_ledger(400.0, max_calls=2)
+    ledger = harness.ledger()
+    tiny = CostEstimate(in_tokens=0, out_tokens=0, usd=0.01)
+
+    for _ in range(2):
+        held = await ledger.reserve(tiny, scope=scope(blast_radius=64))
+        await ledger.settle(held, tiny)
+
+    with pytest.raises(RunCallBudgetExhausted) as breach:
+        await ledger.reserve(tiny, scope=scope(blast_radius=64))
+
+    assert not isinstance(breach.value, RunBudgetExhausted), (
+        "a call-count breach must not be catchable as a cost breach: the two ceilings have "
+        "different remedies and only one of them is about money"
+    )
+    assert breach.value.exit_code == RUN_BUDGET_EXIT_CODE
+    assert breach.value.ceiling is BudgetCeiling.RUN, "same scope, different dimension"
+
+    row = await harness.store.get_budget(RUN)
+    assert row is not None
+    assert (row.calls_made, row.max_calls) == (2, 2)
+    assert not row.halted, (
+        "this ceiling is sticky through the CAS predicate itself and must not set `halted`: "
+        "the only documented way to clear `halted` is `--raise-budget`, which raises the DOLLAR "
+        "ceiling and would leave the call ceiling exactly where it was (ADR-0142)"
+    )
+
+
+async def test_a_call_count_breach_never_enters_the_backpressure_wait(
+    harness: Harness,
+) -> None:
+    """A call-count refusal is terminal, so it must skip the wait loop a dollar refusal enters.
+
+    Waiting is for a shortfall held by in-flight reservations that will release. `calls_made` is
+    held by nobody and no settlement lowers it, so every wake would re-evaluate the same CAS to
+    the same refusal until the loop timed out — surfacing a `BackpressureTimeout` that names
+    in-flight reservations as the problem when they never were.
+
+    The generous `wait_timeout_s=30` is the instrument: if the refusal were routed into the loop
+    this would take ~30s and raise the wrong class, so both the class and the clock are asserted.
+    """
+    await harness.open_ledger(400.0, max_calls=1)
+    ledger = harness.ledger(wait_timeout_s=30.0, wait_poll_s=0.01)
+    tiny = CostEstimate(in_tokens=0, out_tokens=0, usd=0.01)
+
+    held = await ledger.reserve(tiny, scope=scope(blast_radius=64))
+    await ledger.settle(held, tiny)
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(RunCallBudgetExhausted):
+        await ledger.reserve(tiny, scope=scope(blast_radius=64))
+    elapsed = loop.time() - started
+    assert elapsed < 1.0, (
+        f"the refusal waited {elapsed:.1f}s: a ceiling no settlement can relieve was routed "
+        "into the backpressure loop"
+    )
+
+
+async def test_a_free_target_run_halts_on_calls_though_it_never_spends(
+    harness: Harness,
+) -> None:
+    """THE motivating case, at the policy layer: `price: free` + `run_max_llm_calls` (ADR-0142).
+
+    A `price: free` target is a positive assertion about a locally-served target (§9 rule 5) and
+    prices every call at $0.00, so `spent_usd` never moves and `run_max_cost_usd` — the ceiling
+    that halts a fleet — is structurally inert however low it is set. The $0.01 ceiling here
+    makes that vivid: it is two thousand times smaller than the default and still refuses
+    nothing. The run stops at the third call regardless, on the ceiling that counts dispatches.
+    """
+    await harness.open_ledger(0.01, max_calls=3)
+    free = BackendTarget(backend="openai_compatible", model_id="local", price="free")
+    ledger = harness.ledger(ceil=ceilings(run_max_usd=0.01, run_max_calls=3))
+
+    call = estimate_cost(free, in_tokens=50_000, out_tokens=20_000)
+    assert call.usd == 0.0, "a free target that priced anything would not test this gap"
+
+    for _ in range(3):
+        held = await ledger.reserve(call, scope=scope(blast_radius=64))
+        await ledger.settle(held, call)
+
+    with pytest.raises(RunCallBudgetExhausted):
+        await ledger.reserve(call, scope=scope(blast_radius=64))
+
+    row = await harness.store.get_budget(RUN)
+    assert row is not None
+    assert row.calls_made == 3
+    assert row.spent_usd == pytest.approx(0.0), (
+        "the dollar ledger moved, so the halt above does not prove the free-target gap is closed"
+    )
 
 
 # --------------------------------------------------------------------------------------

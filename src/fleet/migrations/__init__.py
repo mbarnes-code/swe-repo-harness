@@ -62,6 +62,7 @@ from fleet.migrations import (
     v009_coordinate_version,
     v010_file_blobs,
     v011_migrated_test_count,
+    v012_run_call_ceiling,
 )
 
 __all__ = [
@@ -145,6 +146,11 @@ STEPS: Final[tuple[MigrationStep, ...]] = (
         v011_migrated_test_count.VERSION,
         v011_migrated_test_count.upgrade,
         v011_migrated_test_count.__name__,
+    ),
+    MigrationStep(
+        v012_run_call_ceiling.VERSION,
+        v012_run_call_ceiling.upgrade,
+        v012_run_call_ceiling.__name__,
     ),
 )
 

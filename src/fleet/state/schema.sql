@@ -7,14 +7,14 @@
 -- `PRAGMA user_version` at startup and REFUSE TO START if it differs from the compiled-in
 -- version; they never run this file.
 --
--- A brand-new database gets this file and lands directly at user_version = 11. The ordered
--- `src/fleet/migrations/vNNN_*.py` ladder (1→2 … 10→11) exists only for databases that already
+-- A brand-new database gets this file and lands directly at user_version = 12. The ordered
+-- `src/fleet/migrations/vNNN_*.py` ladder (1→2 … 11→12) exists only for databases that already
 -- hold data; it is never replayed against a fresh one.
 --
 -- ---------------------------------------------------------------------------------------------
 -- PRAGMAs. Only the PERSISTENT ones live here, because this file runs once:
 --   * journal_mode = WAL   — stored in the database header, survives close (§6, ADR-0004)
---   * user_version = 11    — stored in the database header (§5 SCHEMA_VERSION)
+--   * user_version = 12    — stored in the database header (§5 SCHEMA_VERSION)
 --
 -- The rest are PER-CONNECTION and reset to their defaults on every new handle. `state/db.py`
 -- MUST issue these on EVERY connection it opens (read and write alike); setting them here would
@@ -677,17 +677,34 @@ CREATE TABLE IF NOT EXISTS budget_ledger (        -- durable, fail-closed cost a
                                                   --   here — see RESERVATION ACCOUNTING below
     max_usd      REAL NOT NULL,
     halted       INTEGER NOT NULL DEFAULT 0,      -- 1 => no further LLM call may be dispatched
+    calls_made   INTEGER NOT NULL DEFAULT 0,      -- LLM calls GRANTED by the reservation CAS. Only
+                                                  --   ever increments: there is no "un-call", so a
+                                                  --   settlement and the reaper both leave it alone
+    max_calls    INTEGER,                         -- the CALL-COUNT ceiling (v12). NULL => no cap,
+                                                  --   which is the default and preserves every
+                                                  --   pre-v12 run. Orthogonal to max_usd: a
+                                                  --   `price: free` target keeps spent_usd at 0.00
+                                                  --   forever, so the dollar ceiling is
+                                                  --   structurally inert and this one is the only
+                                                  --   circuit breaker such a run has (§11.2)
     updated_at   TEXT NOT NULL,
     -- "Fail-closed" is a CONSTRAINT, not a convention. Read-then-write lets 12 workers each
     -- reserve $3 against a $497/$500 ledger and all 12 writes succeed.
     CHECK (spent_usd >= 0.0 AND reserved_usd >= 0.0),
-    CHECK (spent_usd + reserved_usd <= max_usd)
+    CHECK (spent_usd + reserved_usd <= max_usd),
+    CHECK (calls_made >= 0)
 );
 -- RESERVATION (normative). Never SELECT-then-UPDATE. The reservation is one conditional CAS:
 --     UPDATE budget_ledger SET reserved_usd = reserved_usd + :amt,
+--            calls_made = calls_made + 1,
 --            reservation_expires_at = <the derivation below>, updated_at = :now
---      WHERE run_id = :run AND halted = 0 AND spent_usd + reserved_usd + :amt <= max_usd;
--- `rowcount == 1` grants it; `rowcount == 0` is a refusal, never a warning. Settlement moves the
+--      WHERE run_id = :run AND halted = 0 AND spent_usd + reserved_usd + :amt <= max_usd
+--        AND (max_calls IS NULL OR calls_made + 1 <= max_calls);
+-- `rowcount == 1` grants it; `rowcount == 0` is a refusal, never a warning.
+-- The call-count half (v12) needs no reserve/settle pair, which is why it rides in this same
+-- statement rather than getting a mechanism of its own: a dollar amount is ESTIMATED before the
+-- call and RECONCILED after, but one dispatch is always exactly one call, known atomically in
+-- advance. One increment, one predicate, same transaction, same rowcount verdict. Settlement moves the
 -- amount from `reserved_usd` to `spent_usd` in one statement. Since v8 the CAS does not stand
 -- alone. The dispatch path is the NESTED pair (a repo dollar and the run dollar it sits inside,
 -- §11.2): both its reserve and its settle take a REQUIRED `reservation_id` and write the
@@ -1006,4 +1023,4 @@ CREATE INDEX IF NOT EXISTS ix_stubs_open      ON stubs (run_id, state)
 
 -- The baseline lands directly at 10 (§5 SCHEMA_VERSION). Workers refuse to start against any
 -- other value; the vNNN ladder is for databases that already hold data, never for this file.
-PRAGMA user_version = 11;
+PRAGMA user_version = 12;
