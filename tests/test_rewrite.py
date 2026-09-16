@@ -51,7 +51,7 @@ from fleet.rewrite.rules import (
     rule_matches_path,
 )
 from fleet.rewrite.tsmorph import TsMorphRewriter
-from fleet.settings import ConfigValidationError, UnresolvedReferenceError
+from fleet.settings import ConfigFileError, ConfigValidationError, UnresolvedReferenceError
 from fleet.util.proc import ProcResult
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
@@ -1199,6 +1199,27 @@ def test_load_rules_is_ordered_and_refuses_duplicate_ids(tmp_path: Path) -> None
         "- {id: aaa, languages: [python], rule: {pattern: z}}\n", encoding="utf-8"
     )
     with pytest.raises(ConfigValidationError, match="duplicate rule id"):
+        load_rules(tmp_path)
+
+
+def test_load_rules_refuses_a_symlinked_rule_file(tmp_path: Path) -> None:
+    """A symlinked rule file must be refused, not followed. `.is_symlink()` is checked before
+    opening, and the refusal is loud with a named exception."""
+    real_rule = tmp_path / "real.yml"
+    real_rule.write_text(
+        "rules:\n  - {id: real, languages: [python], rule: {pattern: x}}\n",
+        encoding="utf-8",
+    )
+    symlink_target = tmp_path / "outside.yml"
+    symlink_target.write_text(
+        "rules:\n  - {id: symlinked, languages: [python], rule: {pattern: y}}\n",
+        encoding="utf-8",
+    )
+    symlink = tmp_path / "link.yml"
+    symlink.symlink_to(symlink_target)
+
+    assert symlink.is_symlink(), "fixture precondition: a REAL OS-level symlink"
+    with pytest.raises(ConfigFileError, match="refusing to load a symlink"):
         load_rules(tmp_path)
 
 

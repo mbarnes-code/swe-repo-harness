@@ -736,6 +736,16 @@ def relocations(filter_repo: FakeFilterRepo) -> dict[str, str]:
 #: `java/…`, `ts/…`, `py/…` and `misc/…` below are the ADAPTERS' answers and not the fixture's.
 POLYGLOT_REPOS: dict[str, dict[str, str]] = {
     "acme-commons-java": {
+        #: Round VII task 11 (`74dfbd3`) made `_ATOM`/`_VERSION_ATOM` anchor with `fullmatch()`
+        #: instead of `match()`, so a qualifier-bearing spec like Guava's real `33.2.1-jre` no
+        #: longer silently misparses to `33.2.1` -- it fails to parse at all and, since this is
+        #: the ONLY requirement anywhere in this fixture set for `com.google.guava:guava`, that
+        #: routes `mvs_select()` through its deliberate "no spec could be parsed" ->
+        #: `VersionConflict` path (by design, SECURITY_REVIEW.md item #1) with no
+        #: `conflict_resolution` LLM wired into this harness to resolve it, which turns every
+        #: `build()` call below into `REQUIRES_HUMAN_INTERVENTION`. None of the tests below are
+        #: about qualifier-bearing version specs or conflict resolution, so the fixture uses a
+        #: plain numeric version instead of chasing that (real, separately-tested) behavior.
         "pom.xml": (
             "<project>\n"
             "  <groupId>com.acme</groupId>\n"
@@ -745,7 +755,7 @@ POLYGLOT_REPOS: dict[str, dict[str, str]] = {
             "    <dependency>\n"
             "      <groupId>com.google.guava</groupId>\n"
             "      <artifactId>guava</artifactId>\n"
-            "      <version>33.2.1-jre</version>\n"
+            "      <version>33.2.1</version>\n"
             "    </dependency>\n"
             "  </dependencies>\n"
             "</project>\n"
@@ -3698,8 +3708,10 @@ def test_module_bazel_carries_the_workspace_deps_the_adapters_declare(
     `module(name = "monorepo")` and nothing else for every fleet ever built. That file is the
     monorepo's whole external surface: an empty one is not a small inaccuracy, it is a monorepo
     in which nothing outside the tree can be depended on, and it rendered identically whether the
-    reconciliation worked or never ran. The MVS-resolved version is asserted too — `33.2.1-jre`
-    is what the pom declares and `33.2.1` is what §3.3 step 3 selects.
+    reconciliation worked or never ran. The MVS-resolved version is asserted too — `33.2.1` is
+    what the pom declares and what §3.3 step 3 selects, since it's the only requirement for that
+    coordinate in this fixture set (a plain numeric version, deliberately: see the fixture's own
+    comment on why it isn't a real-world qualifier-bearing spec like Guava's actual `-jre` builds).
 
     **The pins are READ from `BuildSection`, never restated.** They were spelled out here as
     literals and it broke the moment the config legitimately moved: `aspect_rules_js` had to go

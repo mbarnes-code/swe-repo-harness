@@ -736,7 +736,7 @@ class VerifySection(Section):
 
     container_memory: str = "8g"
     container_cpus: str = "4.0"
-    network: str = "none"
+    network: Literal["none"] = "none"
 
 
 class RateLimitEntry(Section):
@@ -1595,6 +1595,11 @@ def _check_rule_engines(config: FleetConfig, root: Path) -> None:
     if not rules_dir.is_dir():
         return
     for rule_file in sorted(p for p in rules_dir.rglob("*") if p.suffix in {".yaml", ".yml"}):
+        if rule_file.is_symlink():
+            raise ConfigFileError(
+                "refusing to load a symlink; rules must be real files",
+                file=rule_file,
+            )
         for rule_id, engine in _iter_rule_engines(rule_file):
             if engine not in config.transform.engines:
                 raise UnresolvedReferenceError(

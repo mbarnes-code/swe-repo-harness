@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 
 from fleet.llm.roles import Role
 from fleet.models.base import FleetModel
-from fleet.models.build import BAZEL_RULE_PATTERN
+from fleet.models.build import BAZEL_IDENTIFIER_PATTERN
 from fleet.models.enums import BreakStrategy, Ecosystem, FailureClass
 from fleet.util.hashing import sha256_text
 
@@ -245,11 +245,10 @@ class BuildTargetProposal(FleetModel):
     rule: str = Field(
         min_length=1,
         max_length=100,
-        pattern=BAZEL_RULE_PATTERN,
-        description="Bazel rule name, e.g. java_library, ts_project, go_test, filegroup. A "
-        "conservative identifier pattern, not a closed set: real Bazel rule names are "
-        "open-ended, but this is rendered verbatim as the head of a Starlark call, so anything "
-        "that isn't a bare identifier is a Starlark-injection primitive.",
+        pattern=BAZEL_IDENTIFIER_PATTERN,
+        description="Reject at the LLM-schema boundary (SECURITY_REVIEW.md item #6): copied "
+        "verbatim into `BuildTarget.rule`, which is rendered unescaped as the head of a "
+        "generated Starlark function call.",
     )
     srcs: tuple[str, ...] = Field(default=(), max_length=4096)
     deps: tuple[str, ...] = Field(default=(), max_length=1024)

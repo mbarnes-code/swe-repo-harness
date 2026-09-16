@@ -10938,14 +10938,20 @@ repeat-trigger reading of it**: the same test's final section re-invokes `fleet 
 on the now-`SUPERSEDED` stub and asserts zero new `tasks`/`stubs`/`attempts` rows and zero new
 commits on `migrate/<consumer>`. **The literal "already_applied event... keyed on
 revalidation_key" sub-phrase of (4b) was investigated, not merely left unasserted**:
-`_run_one_revalidation_task` (`cli.py:14432`, repointed +22, 2026-09-15, by the finding
-buildgen.py/#7-class-cli.py symlink-guard security fixes' insertions above it in `cli.py` — pure
-insertion, confirmed by exact-line-content match against the current tree; the 2026-09-11 repoint
-to `cli.py:14410` is superseded, per this file's annotate-in-place convention, not deleted;
-repointed +38, 2026-09-11, by an uncommitted bug-fix
-pass's insertions above it in `cli.py` — pure insertion, confirmed by exact-line-content match
-against the current tree; round VI task 111's own repoint (`cli.py:14372`) is superseded, per this
-file's annotate-in-place convention, not deleted; that one had itself superseded round VI task
+`_run_one_revalidation_task` (`cli.py:14464`, repointed on merge, 2026-09-16, by combining round
+VIII's `main`-side symlink-guard insertions with round VII task 13's
+`BAZEL_OVERWRITE_FINDING_KIND` writer/reader insertions — both landed in the same merge and both
+shift this citation independently; confirmed by direct `grep -n` against the merged tree). Two
+prior repoints are both now superseded by this merge, per this file's annotate-in-place
+convention, not deleted: round VIII's own repoint (`cli.py:14432`, +22, 2026-09-15, by the
+buildgen.py/#7-class-cli.py symlink-guard security fixes' insertions above it — pure insertion,
+confirmed by exact-line-content match at the time), and round VII task 14's repoint
+(`cli.py:14442`, +32, 2026-09-15, by round VII task 13's own insertions, `a2425e4` — pure
+insertion, confirmed both by diff-hunk arithmetic and exact-line-content match at the time). Both
+of those in turn superseded the same 2026-09-11 repoint (`cli.py:14410`, +38, by an uncommitted
+bug-fix pass's insertions — pure insertion, confirmed by exact-line-content match against the
+tree at the time); that one had itself superseded round VI task
+111's own repoint (`cli.py:14372`) which had itself superseded round VI task
 109's own repoint (`cli.py:14285`, itself noting the same function's non-pure-insertion history
 through tasks 103/106/107/109)) re-runs `VerifyPipelineWorker` directly against the
 already-rewritten tree — it never dispatches a phase-2/`apply_and_commit`-shaped step at all, so
@@ -11694,3 +11700,67 @@ switch" description) — filed here as a disclosed prose inaccuracy rather than 
 since no incorrect *behavior* results. A future docstring pass on `_build_impl` should correct
 "has no `--stub-blocked` flag and never will" to describe the flag's actual accepted-but-unthreaded
 status.
+
+---
+
+**Renumbered on merge (2026-09-16):** the entry below was allocated D138 on the
+`agent/security-review-fixes` branch, forked before `main`'s own D138 (`clone.py._interrupted()`
+timeout/cancellation conflation) landed. Renumbered to D142 (one past the merged tree's measured
+max, D141) to resolve the collision; every citation of the old number (`SECURITY_REVIEW.md`,
+`docs/PROGRESS.md`) was repointed in the same merge commit.
+
+## D142 — FIXED, LANDED (`ccc0016`, `199f2dd`; docs corrected in the same commit as this entry).
+`docs/SPEC.md` §11.4 and `docs/CRITERIA_PLAN.md` §12.20 asserted redaction boundaries that did not
+exist in code — wrong module attribution for the outbound-LLM-prompt and `llm_cache.response_json`
+paths, an omitted PR title, and DONE evidence that proved only a DB-mirror write, not the
+forge-posted PR body
+
+**Found by SECURITY_REVIEW.md item #4's ESCALATION (lines 500-538), whose direct `grep` against
+`workers/prwriter.py` returned one hit (a comment, not a call) before Task 7 landed. Allocated by
+the dispatching controller — form-agnostic sweep against this worktree found `D137` as the highest
+allocated number.**
+
+**The gap, as measured — two independent divergences.**
+
+1. `docs/SPEC.md:7175`'s §11.4 redaction-boundary list attributed the outbound-LLM-prompt
+   redaction and the `llm_cache.response_json` redaction to `llm/client.py`. `git grep -n redact
+   src/fleet/llm/client.py` returns zero hits — `llm/client.py` is the `ModelClient`
+   protocol/registry (ADR-0023) and calls neither `redact_text` nor `redact_mapping` anywhere. The
+   outbound-prompt redaction is actually `llm/calls.py::render_prompt()` (`redact_mapping(evidence)`
+   before `json.dumps`, landed `ccc0016`); the `response_json` redaction is actually
+   `llm/cache.py`'s write path (`self._redact(...)`, constructor-injected `redact_text` default,
+   pre-existing and unaffected by this task). The same list also described `workers/prwriter.py` as
+   redacting "the assembled PR body **and** re-scans it after the LLM prose slot" and never
+   mentioned the PR title at all — before Task 7 (`199f2dd`), neither claim was true:
+   `workers/prwriter.py` had zero redaction calls anywhere in the file (per SECURITY_REVIEW.md item
+   #4's own `grep`).
+
+2. `docs/CRITERIA_PLAN.md`'s §12.20 entry declared "Criterion DONE" (round V, 2026-09-01) citing
+   `tests/test_pr_body_redaction.py` as proof of SPEC.md §12 item 20's clause "the generated PR
+   body contains the `«redacted:…»` placeholder rather than the value" — but that test drives only
+   `render_body()` → `PullRequestDraft.body` → `cli.py::_write_pr_record`'s DB-mirror INSERT, which
+   `workers/prwriter.py::_compose()`'s own docstring (post-fix) confirms is "a separate, correct
+   layer" from the body actually posted to the forge. The literal "generated PR body" the
+   criterion's own text names is `_compose()`'s return value (written to `body_path` and
+   `gh.create_pr`), which round V's cited evidence never touched. At round V's own commit,
+   `workers/prwriter.py::_compose()` and `cli.py::_regenerate_pr_body()` had zero redaction calls —
+   the DONE verdict's outcome (criterion satisfied) was not yet proven true for the clause it
+   claimed to close, only for a same-shaped DB-mirror proxy.
+
+**Fix.** Task 6 (`ccc0016`) wires `redact_mapping()` into `llm/calls.py::render_prompt()`. Task 7
+(`199f2dd`) wires `redact_text()` into `workers/prwriter.py::_compose()`'s title+body return
+(title redacted before the `[:120]` truncation, so a secret spanning the cut can't be sliced in
+half unredacted) and `cli.py::_regenerate_pr_body()`'s return — the two real egress points into
+`gh.create_pr`/`body_path.write_text`, proven by
+`tests/test_workers_build.py::test_prwriter_redacts_a_secret_shaped_model_title_and_body` (plus its
+over-redaction control, `test_prwriter_leaves_innocuous_model_prose_unredacted`) and
+`tests/test_cli.py::test_regenerate_pr_body_redacts_a_secret_shaped_value_in_weak_edges`. This
+entry's own commit corrects `docs/SPEC.md:7175`'s §11.4 list to name the real modules and
+mechanism, and adds a dated annotation to `docs/CRITERIA_PLAN.md`'s §12.20 entry citing the actual
+forge-egress tests alongside the pre-existing DB-mirror test.
+
+**Not a Rule 14 event.** Neither `docs/SPEC.md`'s §12 item 20 criterion text nor
+`docs/CRITERIA_PLAN.md`'s DONE verdict changed substance — the verdict's outcome is correct now
+that Tasks 6/7 landed (both the DB mirror and the real posted body/title are genuinely redacted,
+satisfying item 20's literal text). Only the cited evidence (§12.20's DONE paragraph) and the
+§11.4 boundary-list prose (a mechanism description, not §12 criterion text) were corrected.

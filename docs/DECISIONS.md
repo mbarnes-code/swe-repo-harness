@@ -15910,3 +15910,44 @@ names exists anywhere in `src/`, so adding a new profile name is config-only —
 
 **Open** until the Spark is selected and provisioned and the `base_url` (and any needed
 `capabilities_override`) is filled in with real, verified values.
+
+---
+
+**Renumbered on merge (2026-09-16):** the two ADRs below were allocated ADR-0137/ADR-0138 on the
+`agent/security-review-fixes` branch, forked before the two ADRs above (also ADR-0137/ADR-0138,
+independently allocated on `main`) existed. Renumbered to ADR-0139/ADR-0140 to resolve the
+collision; every citation of the old numbers (`SECURITY_REVIEW.md`, `docs/PROGRESS.md`) was
+repointed in the same merge commit.
+
+## ADR-0139 — §12.29 D76 / item #5 Finding B: Cargo repository vendoring requires network access during `--network=none` verification; disclosed as a known limitation
+
+**Decision (2026-09-15, round VII controller, security-review fixes task 5).** `SECURITY_REVIEW.md` item #5 Finding B (empirically confirmed via direct `--network=none` Docker runs against a throwaway Rust crate with committed lockfile) reveals that `crate_universe`'s `LockGenerator::generate` invokes `cargo fetch` **without the `--locked` flag, on every Phase 3/Phase 4 Cargo build**, and a committed `Cargo.lock` does not prevent this network requirement — `cargo fetch` still needs to reach the registry to download the actual crate archives, lockfile or not (table at `SECURITY_REVIEW.md` lines 304-308 documents three scenarios: no lock, real committed lock with `--locked`, real committed lock without the flag, all three failing with `Could not resolve host: index.crates.io` exit 101 under `--network=none`).
+
+This affects **all ~33 Cargo-touching repos** in the local Gitea corpus (not a lock/no-lock subset), a wider blast radius than §12.29's original scope. **This is a real, reproducible build-time failure mode currently invisible to the harness's own error handling** — no dedicated `FailureClass` distinguishes a Cargo-registry DNS failure from any other `bazel build` exit code, because `classify_build_failure()` deliberately classifies from mechanical evidence only (Global Constraints' note on `classify_build_failure()`'s docstring, which forbids the "add a network-shaped `FailureClass`" remediation Finding B originally offered). Currently-affected Cargo repos surface as ordinary `BUILD_ERROR` retries that exhaust the repair ladder without a distinguishing signal.
+
+**Rationale.** Cargo's offline-vendoring story is architecturally different from Go/NPM/JVM, whose resolvers produce genuine lockfiles pre-build or (Gazelle) run zero-network by explicit design (`ecosystems/go.py:386-392`). Fixing this requires a **structural** solution: a `cargo vendor`-based full-source vendoring approach analogous to this project's own documented pattern for other sovereign-build efforts (`CLAUDE.md` Sovereign vendoring section), or a Cargo-specific offline-registry cache mirroring `ecosystems/go.py`'s zero-network approach. Both are genuine engineering work, not a quick-fix classifier or `FailureClass` addition, so they are out of scope for this round's remediation plan. **The decision is to disclose this as a known, documented limitation of the current `crate_universe` integration, not to silence it further.**
+
+**What's Resolved.** Finding A (the `verify.network` field was an unvalidated `str` instead of `Literal["none"]`, allowing an env-var override to bypass the sandbox's network guarantee) was fixed in Task 4 by constraining `VerifySection.network` to `Literal["none"]`, ensuring the type system enforces the design intent that verification is always hermetic.
+
+**What Remains Open and Disclosed.** Finding B: Cargo's own network needs during `cargo fetch`. A future round (not this one) will either:
+1. Implement the structural fix (Cargo offline vendoring), rendering this ADR a historical note, or
+2. Implement a narrower mitigation (e.g., a dedicated `CARGO_REGISTRY_NETWORK_ERROR` `FailureClass` and retry budget) and amend this entry to record the decision to live with the architectural constraint, or
+3. Keep the limitation disclosed here and document it in deployment guidance.
+
+**Alternative rejected.** "Add a `CARGO_REGISTRY_NETWORK_ERROR` `FailureClass` this round to at least surface the error legibly" — rejected per scope: the finding would be legible, but the underlying repo would remain un-buildable under `--network=none`, so surfacing the error without fixing the cause merely converts an invisible timeout into a visible one. The _reason_ for the network requirement is Cargo-internal, not a harness misconfiguration, so a classifier cannot close the gap — only a vendoring/cache fix can.
+
+---
+
+## ADR-0140 — SECURITY_REVIEW.md item #4 Question 5: every `_api_key()` backend bypasses `SecretRegistry`, not just `anthropic.py`; disclosed as a defense-in-depth gap, not fixed
+
+**Decision (2026-09-16, final-review fix wave, Important 5).** Round VII task 9 (`d856626`) redescoped the controller's original framing of `SECURITY_REVIEW.md` item #4 Question 5. The original framing named `src/fleet/llm/backends/anthropic.py::_api_key()` alone as the site bypassing `SecretRegistry` (`settings.py:963`, which wraps API keys in `SecretStr` so a settings object caught in a traceback/log/`model_dump()` cannot carry a live key). Task 9's verification (grep across all five `src/fleet/llm/backends/*.py` implementations) found the measured scope is wider: **every backend with an `_api_key()` method** — `anthropic.py::_api_key()` (line 258) and `openai_compatible.py::_api_key()` (line 339) — resolves its key via plain `os.environ.get()`, bypassing `SecretRegistry` identically. `bedrock.py` and `vertex.py` ship no `_api_key()` method at all (no `api_key_env` field by design), so they are not part of this gap.
+
+**Rationale for disclose-not-fix.** `SecretRegistry` has **zero call sites** in any backend today. Wrapping only `anthropic.py` this round would make it the *sole inconsistent backend* — the opposite of the stated goal of defense-in-depth uniformity, and arguably worse than the status quo (an operator auditing "does this backend use `SecretRegistry`?" would get a different answer per backend for no principled reason). A proper fix requires threading `FleetConfig.secrets: SecretRegistry` through the backend registry at construction time, a cross-cutting change across all five backend files — out of scope for this round's remediation plan. This is also, structurally, the same shape of decision as ADR-0139 (Task 5, Cargo network): a real, measured gap, not obviously improved by a partial fix, deferred to a future round with the scope recorded rather than lost.
+
+**What's Resolved.** Nothing — this ADR files the durable tracking record Important 5 (final whole-branch review, 2026-09-16) found missing. Task 9 itself made no code change; `SECURITY_REVIEW.md`'s Question 5 prose and `docs/PROGRESS.md`'s round VII entry already described the decision, but neither is a SPEC/ADR/D-number artifact, so the deferral risked being lost the way "routed to a future cross-cutting ADR" phrasing without an actual ADR number always does.
+
+**What Remains Open and Disclosed.** The `SecretRegistry` threading fix, cross-cutting across `anthropic.py`, `openai_compatible.py`, and the backend registry's construction path. This is **not a demonstrated leak** on its own: `obs/redact.py::redact_text()`'s `_iter_env_secrets()` independently re-scans `os.environ` for secret-shaped variable names at every egress boundary (§11.4), so the un-wrapped plain-`str` key still gets boundary-scanning coverage even without `SecretRegistry`'s type-level protection. A future round will either implement the cross-cutting threading fix, rendering this ADR a historical note, or accept the current defense-in-depth inconsistency and amend this entry to record that decision.
+
+**Alternative rejected.** Wrapping `anthropic.py::_api_key()` alone in `SecretRegistry` this round — rejected because it does not close the gap, it relocates it: the inconsistency between backends remains, only the specific backend holding the weaker protection changes from "none" to "one of two." Since Question 5 was never a demonstrated leak (no path was found where the bare-string value reaches a log/error unredacted at call time), a partial fix buys no measurable safety improvement over disclosing the full scope and deferring the real cross-cutting fix.
+
+---

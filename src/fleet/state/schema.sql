@@ -449,6 +449,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- | 'OperatorAbort' | 'StubAbandoned'
                                                   -- | 'WaveBudgetRaised' | 'RunBudgetRaised'
                                                   --     -- cli.py, one dedicated writer each
+                                                  -- | 'BazelFileOverwritten' -- written by cli.py
+                                                  --     BAZEL_OVERWRITE_FINDING_KIND via
+                                                  --     _BuildSink.__call__, round VII task 12/13:
+                                                  --     one row per pre-existing hand-written
+                                                  --     BUILD.bazel/MODULE.bazel buildgen replaced
                                                   -- | 'AnchoringGuardOff' -- cli.py's
                                                   --     _TransformSink.__call__, the
                                                   --     --no-anchoring-guard repeat-applied case

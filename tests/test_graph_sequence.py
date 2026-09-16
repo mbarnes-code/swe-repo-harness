@@ -861,6 +861,30 @@ def test_a_bare_major_only_tilde_widens_the_major_not_the_minor() -> None:
     assert report.collisions[0].severity == "warn"
 
 
+def test_a_prerelease_suffix_is_unparseable_not_silently_truncated() -> None:
+    """SECURITY_REVIEW.md item #1's new finding, cross-referenced from item #3: `_VERSION_ATOM`
+    was matched with `.match()`, which anchors only at the string's start, so `1.2.3-beta.1`
+    matched just the numeric prefix `1.2.3` and silently dropped `-beta.1` — `_intersects` then
+    treated it as an exact match for a plain `==1.2.3` spec it does NOT actually satisfy. With
+    `.fullmatch()`, `1.2.3-beta.1` is unparseable-by-this-grammar and is dropped instead
+    (deliberately-tested design, unchanged): a real conflict against a spec the misparsed prefix
+    would have satisfied must now surface."""
+    report = audit_collisions(
+        CollisionInput(
+            versions=[
+                VersionRequirement(coord_key=LIB, repo_id="acme-a", version_spec="==1.2.3-beta.1"),
+                VersionRequirement(coord_key=LIB, repo_id="acme-b", version_spec="<1.0"),
+            ]
+        )
+    )
+    # Under the old `.match()` bug, `==1.2.3-beta.1` misparsed as the bound [1.2.3, 1.2.3] and
+    # correctly conflicted with `<1.0` — so that pairing alone cannot discriminate the fix.
+    # `_intersects` drops the unparseable spec entirely now, leaving only `<1.0` as a bound,
+    # which is trivially satisfiable (no other constraint) — so no conflict is reported.
+    assert report.ok
+    assert report.collisions[0].severity == "warn"
+
+
 def test_a_coordinate_published_by_two_repos_is_recorded_with_its_owner() -> None:
     """§3.1 step 8 `COORDINATE`: two repos publishing one `coord_key`, resolved by step 3's
     ownership rules — the same `owns:` hint mechanism the `CONTRACT` detector uses."""

@@ -357,6 +357,9 @@ def test_render_prompt_returns_an_immutable_turn_sequence() -> None:
     assert isinstance(messages, tuple)
 
 
+_PAT = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+
+
 def test_render_prompt_redacts_a_secret_shaped_string_in_evidence() -> None:
     """SECURITY_REVIEW.md finding #4: `render_prompt` builds every outbound LLM request by
     `json.dumps`-serializing the caller's evidence directly, with no call anywhere to
@@ -367,14 +370,13 @@ def test_render_prompt_redacts_a_secret_shaped_string_in_evidence() -> None:
     verbatim. Same PAT-shaped fixture `tests/test_pr_body_redaction.py` uses for the sibling
     PR-body/title egress boundary.
     """
-    pat = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
     evidence = {
         "repo_id": "acme-widget",
-        "current_content": f'API_TOKEN = "{pat}"\nprint("hello world")\n',
+        "current_content": f'API_TOKEN = "{_PAT}"\nprint("hello world")\n',
     }
     messages = render_prompt(Role.TRANSFORM_REPAIR, evidence)
     rendered = "\n".join(message.content for message in messages)
-    assert pat not in rendered, f"a live PAT reached the outbound LLM message: {rendered!r}"
+    assert _PAT not in rendered, f"a live PAT reached the outbound LLM message: {rendered!r}"
     assert "github_pat_" not in rendered
     # `render_prompt` serializes with `ensure_ascii=True` (its own docstring: "a locale cannot
     # change the bytes"), so the `«»` placeholder delimiters are the `\uXXXX`-escaped form here.
@@ -383,3 +385,17 @@ def test_render_prompt_redacts_a_secret_shaped_string_in_evidence() -> None:
     # escaped, like the rest of the rendered evidence).
     assert 'print(\\"hello world\\")' in rendered
     assert "acme-widget" in rendered
+
+
+def test_render_prompt_redaction_is_still_deterministic_and_feeds_the_hash() -> None:
+    """The redaction step must not break the byte-identical-for-identical-inputs contract that
+    `prompt_sha256` (the cache key, §11.6) depends on: two evidence dicts differing only in key
+    order, both containing the same secret, must still redact to the same placeholder (same
+    fingerprint) and hash identically — and the raw secret must never appear in what gets hashed."""
+    evidence_a = {"current_content": _PAT, "repo_id": "acme"}
+    evidence_b = {"repo_id": "acme", "current_content": _PAT}
+    first = render_prompt(Role.TRANSFORM_REPAIR, evidence_a)
+    second = render_prompt(Role.TRANSFORM_REPAIR, evidence_b)
+    assert prompt_sha256(first) == prompt_sha256(second)
+    for message in (*first, *second):
+        assert _PAT not in message.content

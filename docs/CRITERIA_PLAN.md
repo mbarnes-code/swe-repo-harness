@@ -1468,6 +1468,30 @@ restore). `human_intervention_notes`/`weak_edges` share the identical redaction 
 columns plus the PR-body placeholder are now covered — this criterion's full stated text passes.
 Criterion DONE.**
 
+**Dated annotation, 2026-09-15 (D142, renumbered on merge from D138 — see docs/INTEGRATION_HONESTY.md;
+citation correction — not a Rule 14 event: the DONE verdict
+and SPEC.md item 20's criterion text are both unchanged; only this entry's evidence citation was
+incomplete).** The round-V paragraph above cites `tests/test_pr_body_redaction.py` as closing the
+"PR-body placeholder" clause, but that test drives only `render_body()` → `PullRequestDraft.body`
+→ `cli.py::_write_pr_record`'s DB-mirror INSERT — `workers/prwriter.py::_compose()`'s own
+docstring (post-fix) confirms the DB mirror is "a separate, correct layer" from the body actually
+posted to the forge. SPEC.md item 20's literal clause — "the generated PR body contains the
+`«redacted:…»` placeholder rather than the value" — names the body `gh.create_pr`/
+`body_path.write_text` actually receive, i.e. `_compose()`'s return, which round V's cited
+evidence never touched. At round V's own commit, `workers/prwriter.py::_compose()` and
+`cli.py::_regenerate_pr_body()` had zero redaction calls (SECURITY_REVIEW.md item #4's
+ESCALATION, D142) — the DONE verdict's outcome was not yet proven true for the clause it claimed
+to close, only for a same-shaped DB-mirror proxy. Since fixed for real: Task 6 (`ccc0016`) redacts
+the outbound LLM-prompt evidence in `llm/calls.py::render_prompt()`; Task 7 (`199f2dd`) redacts
+`_compose()`'s title+body return and `_regenerate_pr_body()`'s return, proven by
+`tests/test_workers_build.py::test_prwriter_redacts_a_secret_shaped_model_title_and_body` (plus
+its over-redaction control, `test_prwriter_leaves_innocuous_model_prose_unredacted`) and
+`tests/test_cli.py::test_regenerate_pr_body_redacts_a_secret_shaped_value_in_weak_edges`. The
+DONE verdict's outcome stands — both the DB mirror and the real posted body are now genuinely
+redacted, so SPEC.md item 20's literal text is satisfied — but until this correction, its cited
+evidence for the PR-body clause was the DB-mirror proxy, not the forge-egress path it actually
+names.
+
 ## 21. Determinism — clean re-run, byte-identical digest
 **DONE (all three clauses landed, round O `daf2a24` + round Q task 2).** SPEC.md item 21 has
 three clauses: (1) clean re-run under `--llm-cache read-only` produces a byte-identical digest —
@@ -3158,14 +3182,20 @@ trigger reading; the literal "already_applied event" sub-phrase — investigated
 vacuous, disclosed rather than silently dropped.** The same test asserts `COUNT(*) = 1` on the
 minted `REVALIDATE` task, then re-invokes `fleet stubs resolve` on the now-`SUPERSEDED` stub and
 asserts zero new `tasks`/`stubs`/`attempts` rows and zero new `migrate/<consumer>` commits.
-`_run_one_revalidation_task` (`cli.py:14432`, repointed +22, 2026-09-15, by the finding
-buildgen.py/#7-class-cli.py symlink-guard security fixes' insertions above it in `cli.py` — pure
-insertion, confirmed by exact-line-content match against the current tree; the 2026-09-11 repoint
-to `cli.py:14410` is superseded, per this file's annotate-in-place convention, not deleted;
-repointed +38, 2026-09-11, by an uncommitted bug-fix
-pass's insertions above it in `cli.py` — pure insertion, confirmed by exact-line-content match
-against the current tree; round VI task 111's own repoint (`cli.py:14372`) is superseded, per this
-file's annotate-in-place convention, not deleted; that one had itself superseded round VI
+`_run_one_revalidation_task` (`cli.py:14464`, repointed on merge, 2026-09-16, by combining round
+VIII's `main`-side symlink-guard insertions with round VII task 13's
+`BAZEL_OVERWRITE_FINDING_KIND` writer/reader insertions — both landed in the same merge and both
+shift this citation independently; confirmed by direct `grep -n` against the merged tree). Two
+prior repoints are both now superseded by this merge, per this file's annotate-in-place
+convention, not deleted: round VIII's own repoint (`cli.py:14432`, +22, 2026-09-15, by the
+buildgen.py/#7-class-cli.py symlink-guard security fixes' insertions above it — pure insertion,
+confirmed by exact-line-content match at the time), and round VII task 14's repoint
+(`cli.py:14442`, +32, 2026-09-15, by round VII task 13's own insertions, `a2425e4` — pure
+insertion, confirmed both by diff-hunk arithmetic and exact-line-content match at the time). Both
+of those in turn superseded the same 2026-09-11 repoint (`cli.py:14410`, +38, by an uncommitted
+bug-fix pass's insertions — pure insertion, confirmed by exact-line-content match against the
+tree at the time); that one had itself superseded round VI
+task 111's own repoint (`cli.py:14372`) which had itself superseded round VI
 task 109's own repoint (`cli.py:14285`, itself noting the same function's non-pure-insertion
 history through tasks 103/106/107/109)) was read directly: it re-runs
 `VerifyPipelineWorker`
@@ -4121,7 +4151,9 @@ marking assumed closed were not actually driven by any test.** A whole-branch re
 `tests/` ever seeded an RHI-status row, so nothing had actually exercised the reaper's own SQL
 guard against it (the "reaper's RHI leg" language in Task 3 above describes `complete_phase`'s
 legality check, a different sweep); and (b) §12.46(i)'s population clause — `InternalDep`
-(`src/fleet/models/build.py:21`) was not re-exported through `fleet.models.__all__` at all, so the
+(`src/fleet/models/build.py:24`, repointed +3 on merge 2026-09-16 by
+`BAZEL_IDENTIFIER_PATTERN`'s insertion above it — pure insertion, confirmed by exact-line-content
+match against the current tree) was not re-exported through `fleet.models.__all__` at all, so the
 existing parametrized round-trip test never ran against it. Both closed for real in the same fix
 wave: `tests/test_repository.py::test_the_reaper_never_reclaims_a_requires_human_intervention_row`
 (Rule-12 mutation-proven — dropping the reaper SQL's `status = 'RUNNING'` guard reddens it) and
@@ -4132,7 +4164,9 @@ covers it automatically). The DONE marking stands, now for real.
 the *reported* site but not the *class* — an independent re-derivation (a runtime walk of
 `fleet.models`'s submodules plus a textual `grep '^class \w*(.*FleetModel'` sweep, both agreeing on
 36 `FleetModel` subclasses total) found one more model absent from `__all__`: `Resolution`
-(`src/fleet/models/build.py:202`). `Resolution` had a round-trip assertion
+(`src/fleet/models/build.py:204`, repointed +2 on merge 2026-09-16 by
+`BAZEL_IDENTIFIER_PATTERN`'s insertion above it — pure insertion, confirmed by exact-line-content
+match against the current tree). `Resolution` had a round-trip assertion
 (`tests/test_ecosystems.py:1187`) but only via object `==`, the exact form §12.46(i)'s literal text
 rules out ("compared via `model_fields`... NOT via object equality"). Closed identically to (b):
 `Resolution` added to `fleet.models.__all__` + a non-degenerate `SAMPLES["Resolution"]` (populated

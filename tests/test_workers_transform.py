@@ -756,6 +756,12 @@ def test_targets_are_present_treats_a_symlinked_unit_as_absent(tmp_path: Path) -
 
     assert asyncio.run(worker.preconditions_hold(make_ctx(repo), payload)) is False
 
+    link_path.unlink()
+    (repo / unit).write_text("alpha\n", encoding="utf-8")
+    assert asyncio.run(worker.preconditions_hold(make_ctx(repo), payload)) is True, (
+        "control: a real file at the same path IS reported present"
+    )
+
 
 # =======================================================================================
 # 5b. D49 — the dead patch cap enforced, and the LLM branch gated the same way

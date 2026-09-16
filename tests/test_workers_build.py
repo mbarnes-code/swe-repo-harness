@@ -694,6 +694,168 @@ async def test_buildgen_expired_before_dispatch_reports_status_timeout_and_charg
     assert result.error.failure_class is FailureClass.TIMEOUT
 
 
+async def test_a_pre_existing_hand_written_bazel_file_with_different_content_is_collected(
+    tmp_path,
+) -> None:
+    """SECURITY_REVIEW.md item #2: `_write()` still overwrites unconditionally (that part is
+    accepted, disclosed behavior) — but a pre-existing `BUILD.bazel`/`MODULE.bazel` whose content
+    DIFFERS from what's about to be rendered must be named in `output.overwritten_bazel_files`
+    before the overwrite happens, so Task 13 has something to disclose.
+    """
+    dest_dir = tmp_path / "java/com/acme/widget"
+    dest_dir.mkdir(parents=True)
+    (dest_dir / "BUILD.bazel").write_text("# hand-written, not what buildgen renders\n")
+    (tmp_path / "MODULE.bazel").write_text("# hand-written module file\n")
+
+    ctx = make_ctx(tmp_path)
+    result = await BuildgenWorker().run(
+        ctx,
+        BuildgenInput(
+            unit=_unit(),
+            targets=[
+                BuildTarget(
+                    package="java/com/acme/widget",
+                    name="widget",
+                    rule="java_library",
+                    srcs=["Widget.java"],
+                )
+            ],
+            workspace_deps=[_dep()],
+            requirements=[
+                ExternalRequirement(
+                    coord_key="maven:com.acme:commons", repo_id="acme-a", version_spec=">=1.2"
+                ),
+            ],
+            ruleset_versions={"rules_jvm_external": "6.0"},
+        ),
+    )
+    assert result.status == "ok"
+    out = result.output
+    assert out is not None
+    assert len(out.overwritten_bazel_files) == 2, out.overwritten_bazel_files
+    assert any(out.build_bazel_path in note for note in out.overwritten_bazel_files)
+    assert any(out.module_bazel_path in note for note in out.overwritten_bazel_files)
+    # the overwrite itself still happened — detection does not change `_write()`'s behavior
+    assert "java_library(" in read(out.build_bazel_path)
+    assert 'bazel_dep(name = "rules_jvm_external"' in read(out.module_bazel_path)
+
+
+async def test_no_pre_existing_file_or_an_identical_one_collects_nothing(tmp_path) -> None:
+    """The second half of item #2's detection: no entry when there is nothing to silently lose.
+
+    Two sub-cases in one test, per the brief: no pre-existing file at all (the ordinary first-run
+    case), and a pre-existing file whose content is already byte-identical to what would be
+    rendered (not a loss, so not reported, per the finding's own framing).
+    """
+    ctx = make_ctx(tmp_path)
+    payload = BuildgenInput(
+        unit=_unit(),
+        targets=[
+            BuildTarget(
+                package="java/com/acme/widget",
+                name="widget",
+                rule="java_library",
+                srcs=["Widget.java"],
+            )
+        ],
+        workspace_deps=[_dep()],
+        requirements=[
+            ExternalRequirement(
+                coord_key="maven:com.acme:commons", repo_id="acme-a", version_spec=">=1.2"
+            ),
+        ],
+        ruleset_versions={"rules_jvm_external": "6.0"},
+    )
+
+    result = await BuildgenWorker().run(ctx, payload)
+    assert result.status == "ok"
+    out = result.output
+    assert out is not None
+    assert out.overwritten_bazel_files == [], "nothing pre-existing on a first run"
+
+    # Re-running against the now-generated (identical) files must not report them either.
+    ctx2 = make_ctx(tmp_path)
+    result2 = await BuildgenWorker().run(ctx2, payload)
+    assert result2.status == "ok"
+    out2 = result2.output
+    assert out2 is not None
+    assert out2.overwritten_bazel_files == [], "identical content is not a silent loss"
+
+
+async def test_re_entry_with_a_different_render_from_the_same_harness_collects_nothing(
+    tmp_path,
+) -> None:
+    """Final-review Important 3: a re-entry whose render DIFFERS from a prior attempt's own
+    generated output must still collect nothing — only a real, hand-written pre-existing file is
+    a silent loss.
+
+    `test_no_pre_existing_file_or_an_identical_one_collects_nothing` only covers the *identical*
+    re-render case, which is why the false positive this test pins was not caught: `_write()` is
+    always called, so any re-entry whose render legitimately differs (a changed dep, a different
+    MVS selection, a different `build_authoring` LLM answer) used to be misreported as replacing a
+    "pre-existing hand-written Bazel file" it in fact generated itself. Here the second attempt's
+    `requirements` select a different version (`>=1.5` vs `>=1.2`), which changes the pinned
+    version in `MODULE.bazel` between the two attempts — a genuine content difference, both sides
+    harness-generated.
+    """
+    ctx = make_ctx(tmp_path)
+    targets = [
+        BuildTarget(
+            package="java/com/acme/widget",
+            name="widget",
+            rule="java_library",
+            srcs=["Widget.java"],
+        )
+    ]
+
+    result1 = await BuildgenWorker().run(
+        ctx,
+        BuildgenInput(
+            unit=_unit(),
+            targets=targets,
+            workspace_deps=[_dep()],
+            requirements=[
+                ExternalRequirement(
+                    coord_key="maven:com.acme:commons", repo_id="acme-a", version_spec=">=1.2"
+                ),
+            ],
+            ruleset_versions={"rules_jvm_external": "6.0"},
+        ),
+    )
+    assert result1.status == "ok"
+    out1 = result1.output
+    assert out1 is not None
+    assert out1.overwritten_bazel_files == [], "nothing pre-existing on a first run"
+    module_text_1 = read(out1.module_bazel_path)
+
+    ctx2 = make_ctx(tmp_path)
+    result2 = await BuildgenWorker().run(
+        ctx2,
+        BuildgenInput(
+            unit=_unit(),
+            targets=targets,
+            workspace_deps=[_dep()],
+            requirements=[
+                ExternalRequirement(
+                    coord_key="maven:com.acme:commons", repo_id="acme-a", version_spec=">=1.5"
+                ),
+            ],
+            ruleset_versions={"rules_jvm_external": "6.0"},
+        ),
+    )
+    assert result2.status == "ok"
+    out2 = result2.output
+    assert out2 is not None
+    module_text_2 = read(out2.module_bazel_path)
+    assert module_text_1 != module_text_2, (
+        "fixture precondition: the re-render must actually differ"
+    )
+    assert out2.overwritten_bazel_files == [], (
+        "a re-entry overwriting the harness's OWN prior output, even with different bytes, is not "
+        "a hand-written-file loss"
+    )
+
+
 async def test_a_model_pin_that_hides_a_violated_spec_is_rejected_before_it_is_written(
     tmp_path,
 ) -> None:
@@ -3895,23 +4057,26 @@ async def test_prwriter_prose_is_optional_and_the_verdict_never_comes_from_the_m
     assert bare.output.pr.title.startswith("[fleet wave 2]")
 
 
-async def test_prwriter_redacts_a_secret_shaped_title_and_body_from_the_model(tmp_path) -> None:
-    """SECURITY_REVIEW.md finding #4's ESCALATION: `write_pr_title`/`write_pr_body` prose is the
-    ONE thing a model may contribute to a PR (the test above: "the verdict never comes from the
-    model"), and it is posted PUBLICLY to GitHub/Gitea on every `fleet pr` create. A model that
-    echoes a secret-shaped string — evidence it was handed, or a value it hallucinates verbatim
-    from training data — must never reach the opened PR's title or body, mirroring
-    `tests/test_pr_body_redaction.py`'s coverage of the `relocation_summary` channel but for the
-    LLM prose channel `_compose` itself renders.
+_PRWRITER_PAT = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+
+
+async def test_prwriter_redacts_a_secret_shaped_model_title_and_body(tmp_path) -> None:
+    """SECURITY_REVIEW.md item #4's ESCALATION: `_compose`'s `title = proposed.value.title` and
+    `notes = prose.value.body` (folded into `render_body`'s returned string) both used to carry
+    raw LLM-generated prose straight into a real, public GitHub/Gitea PR — `prwriter.py` had zero
+    `from fleet.obs.redact import` anywhere in the file. A secret-shaped value that reached the
+    model (via item #4's original evidence-redaction gap, or one the model's own prose happens to
+    echo) must not survive into the posted title, the posted body, the `body_path` file handed to
+    `gh create --body-file`, or the `--title` argv itself — every surface a reviewer or the forge
+    can see.
     """
-    pat = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
     gh = gh_runner()
     model = FakeModelClient(
         {
             "pr_body": PrBody(
-                body=f"Copied config from https://oauth2:{pat}@gitea.local/x.git", highlights=()
+                body=f"Vendored the widget service. Leaked: {_PRWRITER_PAT}", highlights=()
             ),
-            "pr_title": PrTitle(title=f"migrate acme-widget {pat}"),
+            "pr_title": PrTitle(title=f"migrate acme-widget {_PRWRITER_PAT}"),
         }
     )
     result = await PrwriterWorker(runner=gh).run(
@@ -3919,11 +4084,36 @@ async def test_prwriter_redacts_a_secret_shaped_title_and_body_from_the_model(tm
     )
     out = result.output
     assert out is not None and out.pr is not None
-    assert pat not in out.pr.title, f"a live PAT reached the PR title: {out.pr.title!r}"
-    assert pat not in out.pr.body, f"a live PAT reached the PR body: {out.pr.body!r}"
-    assert "github_pat_" not in out.pr.title and "github_pat_" not in out.pr.body
+
+    for surface in (out.pr.title, out.pr.body, read(out.body_path)):
+        assert _PRWRITER_PAT not in surface, f"a live PAT reached a PR surface: {surface!r}"
+        assert "github_pat_" not in surface
     assert "«redacted:" in out.pr.title
     assert "«redacted:" in out.pr.body
+
+    create = gh.argv_for("create")
+    assert create is not None
+    assert not any(_PRWRITER_PAT in arg for arg in create), "the PAT reached the gh create argv"
+
+
+async def test_prwriter_leaves_innocuous_model_prose_unredacted(tmp_path) -> None:
+    """Control for the test above: the fix is not free to over-redact ordinary prose."""
+    gh = gh_runner()
+    model = FakeModelClient(
+        {
+            "pr_body": PrBody(body="Vendored the widget service.", highlights=()),
+            "pr_title": PrTitle(title="migrate acme-widget"),
+        }
+    )
+    result = await PrwriterWorker(runner=gh).run(
+        make_ctx(tmp_path, model=model), a_pr_payload(log_dir=str(tmp_path / "logs"))
+    )
+    out = result.output
+    assert out is not None and out.pr is not None
+    assert out.pr.title == "migrate acme-widget"
+    assert "Vendored the widget service." in out.pr.body
+    assert "«redacted:" not in out.pr.title
+    assert "«redacted:" not in out.pr.body
 
 
 async def test_prwriter_refuses_a_failed_verification_and_a_foreign_report(tmp_path) -> None:

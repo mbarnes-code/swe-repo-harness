@@ -11,11 +11,14 @@ from fleet.models.enums import ContractKind, Ecosystem  # noqa: F401  (ContractK
 from fleet.models.graph import ContractId
 from fleet.models.repo import Coordinate, RepoId
 
-BAZEL_RULE_PATTERN: Final = r"^[a-zA-Z_][a-zA-Z0-9_]*$"
-"""A conservative identifier pattern for a Bazel rule keyword. Shared by `BuildTarget.rule`
-(this module) and `BuildTargetProposal.rule` (`llm/schemas.py`) so the two can never drift apart:
-both are rendered verbatim as the head of a Starlark call (`bazel/generators.py::render_target()`),
-so anything that isn't a bare identifier is a Starlark-injection primitive at either boundary."""
+BAZEL_IDENTIFIER_PATTERN: Final = r"^[a-zA-Z_][a-zA-Z0-9_]*$"
+"""The closed shape for any bare, unescaped identifier position in generated BUILD.bazel /
+MODULE.bazel Starlark text -- currently the rule keyword head (`BuildTarget.rule`,
+`BuildTargetProposal.rule` in `llm/schemas.py`), and reused for `render_target()`'s attribute
+names / `_split_extension()`'s var+tag per SECURITY_REVIEW.md item #6. Every real Bazel rule name
+this codebase's ecosystem adapters emit already satisfies it (`java_library`, `ts_project`,
+`go_test`, `filegroup`, ...); it exists to close a Starlark-injection primitive at the schema
+boundary, not to restrict which real rules can be emitted."""
 
 
 class InternalDep(FleetModel):
@@ -78,11 +81,10 @@ class BuildTarget(FleetModel):
     name: str = Field(min_length=1)
     rule: str = Field(
         min_length=1,
-        pattern=BAZEL_RULE_PATTERN,
-        description="e.g. java_library, ts_project, go_test, filegroup. A conservative "
-        "identifier pattern, not a closed set: real Bazel rule names are open-ended, but "
-        "rendered verbatim as the head of a Starlark call (render_target()), so anything that "
-        "isn't a bare identifier is a Starlark-injection primitive.",
+        pattern=BAZEL_IDENTIFIER_PATTERN,
+        description="e.g. java_library, ts_project, go_test, filegroup. Pattern-constrained "
+        "(SECURITY_REVIEW.md item #6): rendered verbatim as the head of a Starlark function call "
+        "in generated BUILD.bazel, which `bazel build` evaluates.",
     )
     load_from: str | None = Field(
         default=None, description="bzl label for the load() stmt; None for native rules"

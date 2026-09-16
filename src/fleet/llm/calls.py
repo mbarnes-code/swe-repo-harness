@@ -258,11 +258,22 @@ if set(PROMPTS) != set(Role):  # pragma: no cover - import-time totality gate
 def render_prompt(role: Role, evidence: Evidence) -> tuple[Message, ...]:
     """Template + evidence → the exact turns the backend will see.
 
-    Byte-identical for identical inputs, in any process, under any `PYTHONHASHSEED`: the evidence
-    is serialised with `sort_keys=True` (so nested mapping order cannot leak), `ensure_ascii=True`
-    (so a locale cannot change the bytes) and `allow_nan=False` (so a `NaN` fails loudly here
-    instead of producing JSON no parser accepts). Returns a tuple, because the messages are an
-    input to a hash and a caller that could append to them would change what was hashed.
+    Byte-identical for identical inputs and identical environment, in any process, under any
+    `PYTHONHASHSEED`: the evidence is redacted (SPEC §11.4 — a repo file's raw content can carry a
+    hardcoded credential, and nothing upstream of this call guarantees it has been scrubbed)
+    BEFORE it is serialised, so the redacted mapping is what both the backend and
+    `prompt_sha256`'s hash ever see; then it is serialised with `sort_keys=True` (so nested mapping
+    order cannot leak), `ensure_ascii=True` (so a locale cannot change the bytes) and
+    `allow_nan=False` (so a `NaN` fails loudly here instead of producing JSON no parser accepts).
+    Returns a tuple, because the messages are an input to a hash and a caller that could append to
+    them would change what was hashed.
+
+    "Identical environment" is a real qualifier, not boilerplate: `redact_mapping()`'s
+    `_iter_env_secrets()` reads live `os.environ` on every call, so two processes with different
+    environments CAN render different bytes for the same `evidence`. This is a cache-key-
+    divergence effect only, never a wrong answer served — the differing bytes just hash to a
+    different `prompt_sha256` — but it means this function is no longer pure in the process's own
+    environment, only in `evidence`.
     """
     template = PROMPTS[role]
     body = json.dumps(

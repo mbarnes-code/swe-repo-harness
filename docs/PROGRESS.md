@@ -11184,3 +11184,107 @@ provisioning a Spark, installing/serving `nvidia/nemotron-3-super-120b-a12b` wit
 and standing up the isolated pilot environment (virtual env + repo-sample snapshot). These three
 checklist items — and the pilot run itself once they're done — need the human partner's direct
 action; flagged here rather than attempted.
+
+## Round VII — 14-task security-remediation plan closed (2026-09-15); §12 count unchanged at
+48 of 48 — this round is a disclosed hardening round against `SECURITY_REVIEW.md`, not a
+criteria-closing one (Rule 13)
+
+Commit range `b58f43f..a2425e4` (16 commits: the 14-task plan doc `b798cc1` plus 15 task
+commits — Tasks 3 and 5 each landed as two commits, an implementation plus a lint or content
+fix). Source: `SECURITY_REVIEW.md`'s open items #1, #2, #4, #5, #6, #7 (item #3 was already
+CLOSED/rescoped within that document before this round started and was not re-touched here).
+Sequential dispatch order per the plan: 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 8, 14.
+
+**Fixed this round:**
+- **Item #7 (CRITICAL — symlink dereference in the rewrite worker → LLM egress), Task 1
+  (`e5be438`).** `RewriteWorker.run()` now checks `.is_symlink()` before reading a rewrite
+  target and refuses with `FailureClass.PREFLIGHT` rather than dereferencing;
+  `_targets_are_present()` no longer counts a symlinked unit as present. RED/GREEN verified
+  against a real OS-level symlink in a real git repo.
+- **Item #6 (CRITICAL — Starlark injection via `BuildTarget.rule`), Tasks 2/3 (`72e4959`,
+  `9790a90`, `2e32967`).** A shared `BAZEL_IDENTIFIER_PATTERN` now constrains both
+  `BuildTarget.rule` (internal model) and `BuildTargetProposal.rule` (the LLM-facing schema
+  class this document itself once mis-named `ProposedBuildTarget`). The two latent,
+  not-currently-LLM-reachable siblings (`render_target()`'s attribute names,
+  `_split_extension()`'s var/tag) were also hardened defensively — not live exploits, so this
+  is hardening rather than a second closed sink.
+- **Item #5 Finding A (`--network=none` guarantee resting on an unconstrained string), Task 4
+  (`6a4a473`).** `VerifySection.network` (formerly plain `str`) is now `Literal["none"]`,
+  rejecting any `FLEET_VERIFY__NETWORK` override at the type level.
+- **Item #4 core gap + PR-egress escalation, Tasks 6/7/8 (`ccc0016`, `199f2dd`, `08d2aa9`).**
+  `llm/calls.py::render_prompt()` now redacts evidence before JSON-serializing it into the
+  outbound prompt (preserving `prompt_sha256`'s byte-identical-for-identical-inputs cache-key
+  contract). `workers/prwriter.py::_compose()`'s PR title and `cli.py::_regenerate_pr_body()`'s
+  PR body are both now redacted before reaching the forge — closing the escalation this item
+  found, where a real secret could reach a **publicly posted** PR on every create and every
+  promotion round. Task 8 corrected `docs/SPEC.md` §11.4's wrong-module attribution and
+  `docs/CRITERIA_PLAN.md`'s §12.20 evidence citation (which cited only the DB-mirror test, not
+  the forge-egress path) to match what Tasks 6/7 actually shipped, and filed **D142** (renumbered
+  on merge from D138, which collided with `main`'s own independent D138) in
+  `docs/INTEGRATION_HONESTY.md` (status FIXED, LANDED against `ccc0016`/`199f2dd`) recording the
+  divergence itself.
+- **Item #4 Question 4b (symlink guard missing in two harness-config walks), Task 10
+  (`e7adfd2`).** `rewrite/rules.py::load_rules` and `settings.py::_check_rule_engines` now both
+  refuse a symlinked rule file with a loud `ConfigFileError`, matching Task 1's no-silent-skip
+  convention.
+- **Item #1 (unparseable version spec — the misparse sub-finding), Task 11 (`74dfbd3`).** Both
+  `_ATOM` (`bazel/generators.py`) and `_VERSION_ATOM` (`graph/collisions.py`) switched from
+  `.match()` to `.fullmatch()`, so a spec like `1.2.3-beta.1` is routed through the existing
+  tested "unparseable → dropped" path instead of being silently misparsed to `1.2.3`. The
+  original deliberate "dropped, tested" behavior this item was first CLOSED for is unchanged.
+- **Item #2 (silent `BUILD.bazel`/`MODULE.bazel` overwrite, no disclosure), Tasks 12/13
+  (`f0773ae`, `a2425e4`).** Task 12 added overwrite detection at both `buildgen.py::_write()`
+  call sites (`BuildgenOutput.overwritten_bazel_files`). Task 13 wired that list through to PR
+  disclosure — via a new `BAZEL_OVERWRITE_FINDING_KIND` finding (the real propagation path
+  differs from the originally-traced one: `fleet pr` reads only the `findings` table, not the
+  Phase 3 checkpoint record), reusing the previously-dead `PrwriterInput.relocation_summary`
+  field this item's own investigation had found unwired. The underlying overwrite behavior
+  itself is unchanged by design — this closes the disclosure gap, not the overwrite.
+
+**Deliberately disclosed, not fixed, this round:**
+- **Item #5 Finding B (Cargo needs network under `--network=none`), Task 5 (`c06a298`,
+  `3f7d9b2`).** A real, accepted architectural limitation, not a gap in this round's scope —
+  documented via **ADR-0139** (renumbered on merge from ADR-0137, which collided with `main`'s
+  own independent ADR-0137) in `docs/DECISIONS.md`. (Task 5's first commit fabricated
+  placeholder `SECURITY_REVIEW.md` content because the file was untracked in this worktree at
+  the time; Task 5's second commit replaced it with the real 899-line file from the primary
+  checkout, verified byte-identical, before appending the status note — corrected within the
+  same task, not carried forward.)
+- **Item #4 Question 5 (SecretRegistry bypass), Task 9 (`d856626`).** Redescoped mid-round: the
+  controller's original framing named `anthropic.py` alone, but Task 9 found **all** backends
+  with an `_api_key()` method (`anthropic.py`, `openai_compatible.py`) bypass `SecretRegistry`
+  identically via plain `os.environ.get()`. Wrapping only one would make it the sole
+  inconsistent backend — the opposite of the goal. Disclosed as a defense-in-depth gap (not a
+  demonstrated leak; `redact_text()` already re-scans `os.environ` for secret-shaped names at
+  call time), properly routed to a future cross-cutting ADR rather than fixed as a code change
+  here.
+
+**What was verified:** every commit's actual diff and message were read directly (`git show
+<sha> --stat`) against this round's own plan brief before this checkpoint was written; the
+`SECURITY_REVIEW.md` status notes added alongside this entry (items #1, #2, #4, #6, #7 — item
+#5 already carried Task 5's own dated note, item #3 untouched as above) quote the landed
+commits, not the plan's summary of them.
+
+**Next:** none dispatched — this is the round's closing task. The plan's own "Final Review
+Scope" calls for a whole-suite `pytest` run (green = `xfail: 0`, every xfail disclosed by
+D-number) and a re-check of Task 8's corrected claims against the code Tasks 6/7 shipped, to be
+done as a separate whole-branch review before this branch integrates.
+
+**Decision (2026-09-16, final-review Important 6): `SECURITY_REVIEW.md` stays tracked, deliberately.**
+The plan's own authority note describes this file as "repo root, untracked, 899 lines... explicitly
+NOT a SPEC/ADR/D-number artifact." It entered the tree in `c06a298` as a side effect of Task 5
+recovering it from an earlier fabricated-placeholder mistake, not by any recorded decision, and was
+985 lines and fully tracked at the point the final whole-branch review measured it (before this
+fix wave's own status-line and note edits below grew it further). The review flagged this as an
+implicit state that
+should be made explicit rather than inherited. The decision: **keep it tracked going forward.** Its
+per-item line-anchored source citations are historical record of what was found and where, not
+live/instrument-checked citations — no test currently sweeps them (`tests/test_findings_kinds.py`
+and `tests/test_integration_honesty_citations.py` do not read it), and that is accepted rather than
+treated as a gap to close this round.
+
+**Correction (2026-09-16, final-review fix wave).** This entry's own "Next" line above, written by
+Task 14's first commit (`ea99f75`), was already stale by the time it landed: the citation-drift fix
+(`71bf371`) and this final-review fix wave (Critical 1, Important 2-6, Minor 7-11) both landed after
+it, closing the whole-branch review's findings list rather than leaving it for a "separate
+whole-branch review" — the review happened, and this is its fix-up.

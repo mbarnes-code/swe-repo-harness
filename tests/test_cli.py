@@ -9030,6 +9030,346 @@ async def test_a_never_measured_migrated_test_count_writes_nothing_to_repos(
     assert row == (None,), "an unmeasured count must never be written as a real 0"
 
 
+async def test_build_sink_persists_overwritten_bazel_files_as_a_finding(tmp_path: Path) -> None:
+    """Task 13's write hop: `_BuildSink` must turn Task 12's `BuildOutput.
+    overwritten_bazel_files` into a durable `BAZEL_OVERWRITE_FINDING_KIND` finding row — the
+    ONLY way this fact can survive from Phase 3 (BUILD) into `fleet pr`, a later, separate
+    process that reads `findings` and never the phase's own `checkpoints` slot (see
+    `PR_RECORD_KIND`'s docstring). Drives the REAL `_BuildSink.__call__` onto a real `findings`
+    row, the same shape `test_migrated_test_count_reaches_repos_after_a_measured_run` uses for
+    its own `_BuildSink` write.
+    """
+    from fleet.cli import BAZEL_OVERWRITE_FINDING_KIND
+    from fleet.state.db import initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    db_path = tmp_path / "state" / "fleet.db"
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-t13-build-sink") as writer:
+        from fleet.state.db import connect_ro
+
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            now = datetime(2026, 9, 15, tzinfo=UTC)
+            await repo.upsert_run(
+                "run-t13-sink", started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            await repo.upsert_repo(
+                "acme-commons",
+                name="acme-commons",
+                url="https://example.invalid/acme-commons.git",
+                now=now,
+            )
+            attempts = _AttemptWriter(
+                writer=writer,
+                repository=repo,
+                read_conn=read_conn,
+                run_id="run-t13-sink",
+                clock=lambda: now,
+            )
+            sink = _BuildSink(
+                attempts=attempts,
+                writer=writer,
+                run_id="run-t13-sink",
+                evidence=_BuildEvidence(),
+                clock=lambda: now,
+            )
+            await sink(
+                repo_id="acme-commons",
+                phase=Phase.BUILD,
+                fence=1,
+                result=WorkerResult[BuildOutput](
+                    status="ok",
+                    output=BuildOutput(
+                        repo_id="acme-commons",
+                        overwritten_bazel_files=[
+                            "libs/widget/BUILD.bazel: replaced a pre-existing hand-written "
+                            "Bazel file"
+                        ],
+                    ),
+                ),
+            )
+        finally:
+            await read_conn.close()
+
+    plain = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        row = plain.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? AND kind = ?",
+            ("run-t13-sink", "acme-commons", BAZEL_OVERWRITE_FINDING_KIND),
+        ).fetchone()
+    finally:
+        plain.close()
+    assert row is not None, "no BazelFileOverwritten finding was written"
+    assert json.loads(row[0]) == {
+        "paths": [
+            "libs/widget/BUILD.bazel: replaced a pre-existing hand-written Bazel file"
+        ]
+    }
+
+
+async def test_build_sink_writes_no_overwrite_finding_when_nothing_was_overwritten(
+    tmp_path: Path,
+) -> None:
+    """The other half: an empty `overwritten_bazel_files` (the overwhelmingly common case) must
+    write no finding at all, not an empty-payload one — mirroring `migrated_test_count`'s own
+    `None`-writes-nothing convention just above."""
+    from fleet.cli import BAZEL_OVERWRITE_FINDING_KIND
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    db_path = tmp_path / "state" / "fleet.db"
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-t13-build-sink-empty") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            now = datetime(2026, 9, 15, tzinfo=UTC)
+            await repo.upsert_run(
+                "run-t13-empty", started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            await repo.upsert_repo(
+                "acme-commons",
+                name="acme-commons",
+                url="https://example.invalid/acme-commons.git",
+                now=now,
+            )
+            attempts = _AttemptWriter(
+                writer=writer,
+                repository=repo,
+                read_conn=read_conn,
+                run_id="run-t13-empty",
+                clock=lambda: now,
+            )
+            sink = _BuildSink(
+                attempts=attempts,
+                writer=writer,
+                run_id="run-t13-empty",
+                evidence=_BuildEvidence(),
+                clock=lambda: now,
+            )
+            await sink(
+                repo_id="acme-commons",
+                phase=Phase.BUILD,
+                fence=1,
+                result=WorkerResult[BuildOutput](
+                    status="ok",
+                    output=BuildOutput(repo_id="acme-commons", build_ok=True),
+                ),
+            )
+        finally:
+            await read_conn.close()
+
+    plain = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        row = plain.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND kind = ?",
+            ("run-t13-empty", BAZEL_OVERWRITE_FINDING_KIND),
+        ).fetchone()
+    finally:
+        plain.close()
+    assert row is None
+
+
+async def test_pr_candidates_carries_overwrite_notes_from_a_real_build_sink_finding(
+    tmp_path: Path,
+) -> None:
+    """Task 13's full write→read hop: `_BuildSink` persists Task 12's `overwritten_bazel_files`
+    (proven above) and `_pr_candidates` — a LATER, separate `fleet pr` invocation's own read —
+    must carry it back onto `_PrCandidate.overwritten_bazel_files`, the field `_emit_one_pr` and
+    `_regenerate_pr_body` fold into `PrwriterInput.relocation_summary`. Drives the REAL
+    `_BuildSink.__call__` and the REAL `_pr_candidates`, never a hand-asserted finding row.
+    """
+    import aiosqlite
+
+    from fleet.cli import _pr_candidates, _record_verification
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    now = datetime(2026, 9, 15, tzinfo=UTC)
+    write_config(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+
+    db_path = tmp_path / "state" / "fleet.db"
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-t13-pr-candidates") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            await repo.upsert_repo(
+                "acme-commons",
+                name="acme-commons",
+                url="https://example.invalid/acme-commons.git",
+                now=now,
+            )
+            attempts = _AttemptWriter(
+                writer=writer,
+                repository=repo,
+                read_conn=read_conn,
+                run_id=RUN_ID,
+                clock=lambda: now,
+            )
+            sink = _BuildSink(
+                attempts=attempts,
+                writer=writer,
+                run_id=RUN_ID,
+                evidence=_BuildEvidence(),
+                clock=lambda: now,
+            )
+            await sink(
+                repo_id="acme-commons",
+                phase=Phase.BUILD,
+                fence=1,
+                result=WorkerResult[BuildOutput](
+                    status="ok",
+                    output=BuildOutput(
+                        repo_id="acme-commons",
+                        overwritten_bazel_files=[
+                            "libs/widget/BUILD.bazel: replaced a pre-existing hand-written "
+                            "Bazel file"
+                        ],
+                    ),
+                ),
+            )
+
+            async def unit(conn: aiosqlite.Connection) -> None:
+                await conn.execute(
+                    "INSERT INTO waves (run_id, wave_index, computed_at) VALUES (?, ?, ?)",
+                    (RUN_ID, 1, now.isoformat()),
+                )
+                await conn.execute(
+                    "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (RUN_ID, "acme-commons", int(Phase.VERIFY), "SUCCEEDED", now.isoformat()),
+                )
+                await conn.execute(
+                    "INSERT INTO wave_members (run_id, wave_index, node_kind, node_id) "
+                    "VALUES (?, 1, 'REPO', ?)",
+                    (RUN_ID, "acme-commons"),
+                )
+                await conn.execute(
+                    "UPDATE repos SET head_sha = ? WHERE repo_id = ?",
+                    ("a" * 40, "acme-commons"),
+                )
+
+            await writer.submit(unit)
+
+            report = VerificationReport(
+                run_id=uuid.UUID(RUN_ID),
+                repo_id="acme-commons",
+                build_ok=True,
+                test_ok=True,
+                verdict="PASS",
+            )
+            await _record_verification(writer, RUN_ID, "acme-commons", report, seed="", now=now)
+        finally:
+            await read_conn.close()
+
+    read_conn = await connect_ro(db_path)
+    try:
+        candidates, unverified = await _pr_candidates(read_conn, settings, RUN_ID, None, None)
+    finally:
+        await read_conn.close()
+
+    assert unverified == (), unverified
+    by_repo = {c.repo_id: c for c in candidates}
+    assert by_repo["acme-commons"].overwritten_bazel_files == (
+        "libs/widget/BUILD.bazel: replaced a pre-existing hand-written Bazel file",
+    )
+
+
+async def test_emit_one_pr_threads_overwrite_notes_into_relocation_summary(
+    tmp_path: Path,
+) -> None:
+    """Task 13's OTHER real `PrwriterInput(...)` construction site (`_emit_one_pr`, the
+    initial-creation path — `_regenerate_pr_body`, the revalidation path, is covered separately
+    below) must also carry a candidate's `overwritten_bazel_files` into `relocation_summary`.
+    Proven by intercepting the payload a fake worker receives from the REAL `_emit_one_pr`, not
+    by re-testing `PrwriterInput` construction in isolation: the two call sites are separate code
+    and one behaving correctly says nothing about the other (this repo's own CLAUDE.md: "the
+    reason is the unmeasured sentence" / re-derive rather than assume a sibling site matches).
+    """
+    from fleet.cli import _emit_one_pr
+    from fleet.llm.roles import LlmRouter
+    from fleet.orchestrator.budgets import Ceilings, CostLedger, Limits
+    from fleet.orchestrator.context import RunContext, default_logger
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+    from fleet.workers.prwriter import PrwriterOutput
+
+    write_config(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+
+    note = "libs/widget/BUILD.bazel: replaced a pre-existing hand-written Bazel file"
+    candidate = replace(_pr_candidate(stubbed=False), overwritten_bazel_files=(note,))
+
+    captured: list[PrwriterInput] = []
+
+    class _FakeWorker:
+        async def preconditions_hold(self, ctx: WorkerContext, payload: PrwriterInput) -> bool:
+            return True
+
+        async def run(
+            self, ctx: WorkerContext, payload: PrwriterInput
+        ) -> WorkerResult[PrwriterOutput]:
+            captured.append(payload)
+            return WorkerResult[PrwriterOutput](status="ok", output=PrwriterOutput(held=True))
+
+    db_path = tmp_path / "state" / "fleet.db"
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-t13-emit-one-pr") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            ledger = CostLedger(
+                repository,
+                run_id=RUN_ID,
+                ceilings=Ceilings.from_settings(settings.config.budgets, settings.config.stubs),
+            )
+            ctx = RunContext(
+                run_id=uuid.UUID(RUN_ID),
+                config=settings.config,
+                writer=writer,
+                repository=repository,
+                read_conn=read_conn,
+                ledger=ledger,
+                limits=Limits(
+                    git_net=asyncio.Semaphore(1),
+                    subprocess=asyncio.Semaphore(1),
+                    docker=asyncio.Semaphore(1),
+                    llm={},
+                    cpu_pool=cast(Any, None),
+                    ledger=ledger,
+                ),
+                llm=LlmRouter.from_models_config(settings.models, profile=settings.profile),
+                log=default_logger("test.t13-emit-one-pr"),
+                work_dir=tmp_path / "work",
+                harness_version="0.1.0",
+            )
+            result = await _emit_one_pr(
+                ctx,
+                cast(Any, _FakeWorker()),
+                settings,
+                (candidate,),
+                records={},
+                monorepo_path=tmp_path / "monorepo",
+                pr_root=tmp_path / "pr",
+                ready=False,
+            )
+        finally:
+            await read_conn.close()
+
+    assert not isinstance(result, str), f"_emit_one_pr refused the fixture: {result!r}"
+    assert captured, "the fake worker's run() was never reached"
+    assert captured[0].relocation_summary == [note]
+
+
 # --------------------------------------------------------------------------------------
 # Round VIII batch 43 (§15.1 item 3, Wave 7.5 G6a) — build/verify plan & evidence dataclasses
 # --------------------------------------------------------------------------------------
@@ -10423,6 +10763,96 @@ def test_regenerate_pr_body_preserves_the_original_migration_notes_verbatim() ->
         notes=notes,
     )
     assert regenerated == expected
+
+
+def test_regenerate_pr_body_redacts_a_secret_shaped_value_in_weak_edges() -> None:
+    """SECURITY_REVIEW.md item #4's ESCALATION named `_regenerate_pr_body` the SECOND unredacted
+    call site (Task 7's brief), alongside `workers/prwriter.py::_compose` (fixed there): its
+    `render_body()` call — on every PR-promotion/revalidation round — renders `record.weak_edges`
+    verbatim from data a worker plan can legitimately populate with a URL or log excerpt.
+
+    On merge with `main`'s own independent fix for the same finding, `render_body()` itself now
+    also wraps its return in `redact_text()` (`workers/prwriter.py:604`) — a more centralized
+    design than this branch's per-caller wrapping. `_regenerate_pr_body`'s own `redact_text()`
+    wrap (kept below) is now redundant defense-in-depth rather than the sole layer, which is why
+    the fixture value is confirmed redacted at BOTH the raw `render_body()` call and the full
+    `_regenerate_pr_body()` call, instead of asserting the raw call stays unredacted.
+    """
+    pat = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+    tainted = f"hoisted via https://oauth2:{pat}@gitea.local:3001/acme/widgets.git"
+    record = _held_pr_record(contract_id=tainted)
+    unit = (_pr_candidate(stubbed=False),)
+
+    # render_body() itself now redacts too (main's own independent fix for this finding) — a
+    # stronger property than this branch originally required, confirmed rather than assumed away.
+    tainted_payload = _stub_payload(stubbed=False, revalidation_round=1).model_copy(
+        update={"contract_id": tainted}
+    )
+    raw = render_body(tainted_payload, repo_id="acme-lib-py", draft=False)
+    assert pat not in raw, f"render_body() leaked the PAT into its own return: {raw!r}"
+
+    regenerated = _regenerate_pr_body(unit, record, {}, draft=False)
+    assert pat not in regenerated, f"a live PAT reached the regenerated PR body: {regenerated!r}"
+    assert "github_pat_" not in regenerated
+    assert "«redacted:" in regenerated, "the placeholder must survive, or debugging is blind"
+    assert "gitea.local" in regenerated, "over-redaction destroyed the debuggable part too"
+
+
+def test_regenerate_pr_body_includes_the_relocation_map_from_overwritten_bazel_files() -> None:
+    """Task 13: the REAL `_regenerate_pr_body` `PrwriterInput(...)` construction site must carry
+    a candidate's `overwritten_bazel_files` (Task 12's per-file overwrite disclosure) into
+    `relocation_summary`, so `render_body`'s existing `if payload.relocation_summary:` guard
+    (`workers/prwriter.py:586`) renders the "### Relocation map" section naming the file —
+    `PrwriterInput.relocation_summary` had zero real call sites before this task
+    (SECURITY_REVIEW.md item #2's follow-up).
+    """
+    note = "libs/widget/BUILD.bazel: replaced a pre-existing hand-written Bazel file"
+    record = _held_pr_record(
+        body=render_body(_stub_payload(stubbed=True), repo_id="acme-lib-py", draft=True)
+    )
+    unit = (replace(_pr_candidate(stubbed=False), overwritten_bazel_files=(note,)),)
+    regenerated = _regenerate_pr_body(unit, record, {}, draft=False)
+    assert "### Relocation map" in regenerated
+    assert f"- {note}" in regenerated
+
+
+def test_regenerate_pr_body_omits_the_relocation_map_when_nothing_was_overwritten() -> None:
+    """The guard's other half, confirmed rather than assumed (per this task's brief): a candidate
+    with no overwrite notes — the overwhelmingly common case, `_pr_candidate`'s own default —
+    must render no "### Relocation map" section at all, not an empty one."""
+    record = _held_pr_record(
+        body=render_body(_stub_payload(stubbed=True), repo_id="acme-lib-py", draft=True)
+    )
+    unit = (_pr_candidate(stubbed=False),)
+    assert unit[0].overwritten_bazel_files == (), "fixture default must be empty to test anything"
+    regenerated = _regenerate_pr_body(unit, record, {}, draft=False)
+    assert "### Relocation map" not in regenerated
+
+
+def test_regenerate_pr_body_unions_relocation_notes_across_an_atomic_wave_scc() -> None:
+    """A shared ATOMIC_WAVE-SCC PR must not silently drop a NON-primary member's overwrite
+    disclosure the way it would if `relocation_summary` followed `report`/`stub_states`'s
+    primary-only convention (SECURITY_REVIEW.md item #2 is a disclosure obligation, not a
+    rendering convenience) — every member's notes must reach the body, deduplicated and sorted,
+    same as `dependencies` just above it in `_regenerate_pr_body`.
+    """
+    note_a = "libs/a/BUILD.bazel: replaced a pre-existing hand-written Bazel file"
+    note_b = "libs/b/MODULE.bazel: replaced a pre-existing hand-written Bazel file"
+    record = _held_pr_record(
+        body=render_body(_stub_payload(stubbed=True), repo_id="acme-lib-py", draft=True)
+    )
+    primary = replace(
+        _pr_candidate(stubbed=False), repo_id="acme-lib-py", overwritten_bazel_files=(note_a,)
+    )
+    other = replace(
+        _pr_candidate(stubbed=False), repo_id="acme-lib-zz", overwritten_bazel_files=(note_b,)
+    )
+    unit = (primary, other)
+    regenerated = _regenerate_pr_body(unit, record, {}, draft=False)
+    assert f"- {note_a}" in regenerated
+    assert f"- {note_b}" in regenerated
+    # deterministic order: sorted, exactly like `dependencies`
+    assert regenerated.index(note_a) < regenerated.index(note_b)
 
 
 def test_report_with_stubs_clears_a_stale_stub_limited_verdict_once_the_stub_resolves() -> None:

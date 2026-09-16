@@ -7861,6 +7861,14 @@ class BuildOutput(WorkerOutput):
     integration_ref: str = ""
     build_bazel_path: str = ""
     module_bazel_path: str = ""
+    overwritten_bazel_files: list[str] = Field(
+        default_factory=list,
+        description="Task 13: copied straight from `BuildgenOutput.overwritten_bazel_files` "
+        "(Task 12, SECURITY_REVIEW.md item #2) at the same copy point as `build_bazel_path`/"
+        "`module_bazel_path` just above, so `_BuildSink` can read it off THIS `WorkerResult` and "
+        "persist it as a `BAZEL_OVERWRITE_FINDING_KIND` finding for `fleet pr` (a later, separate "
+        "process) to fold into `PrwriterInput.relocation_summary`.",
+    )
     steps: list[StepRecord] = Field(default_factory=list)
     build_ok: bool = False
     test_ok: bool = False
@@ -8061,6 +8069,7 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
             if generated is not None:
                 output.build_bazel_path = generated.build_bazel_path
                 output.module_bazel_path = generated.module_bazel_path
+                output.overwritten_bazel_files = list(generated.overwritten_bazel_files)
             if result.status != "ok":
                 return self._handoff(result, units, landed, output)
             landed.append(GENERATE_UNIT)
@@ -9114,6 +9123,13 @@ class _AttemptWriter:
         return int(rows[0][0])
 
 
+BAZEL_OVERWRITE_FINDING_KIND: Final = "BazelFileOverwritten"
+"""Task 13: one `findings` row per repo, upserted (idempotent on the `_note_finding` default
+fingerprint `(run_id, repo_id, kind)`), carrying Task 12's `BuildgenOutput.
+overwritten_bazel_files` notes — written by `_BuildSink` below, read by `_bazel_overwrite_notes`
+and threaded into `PrwriterInput.relocation_summary` (SECURITY_REVIEW.md item #2 follow-up)."""
+
+
 class _BuildSink:
     """Persists one Phase 3 dispatch's evidence under the fence that produced it (§11.5).
 
@@ -9226,6 +9242,22 @@ class _BuildSink:
                     "matched_line": output.hoist_broke_matched_line,
                 },
                 severity="error",
+                now=self._clock(),
+            )
+        if output.overwritten_bazel_files:
+            # Task 13 (SECURITY_REVIEW.md item #2 follow-up): the ONLY durable route from Phase
+            # 3's `BuildgenOutput.overwritten_bazel_files` (Task 12) to `fleet pr` — a later,
+            # separate process that reads `findings` only, never `checkpoints` (see
+            # `PR_RECORD_KIND`'s docstring: the `(run_id, repo_id, phase)` checkpoint slot this
+            # phase owns is clobbered by the next re-entry of THIS phase, and is not even queried
+            # by the PR path). `_pr_candidates`' `_bazel_overwrite_notes` reads this back.
+            await _note_finding(
+                self._writer,
+                self._run_id,
+                repo_id,
+                kind=BAZEL_OVERWRITE_FINDING_KIND,
+                payload={"paths": list(output.overwritten_bazel_files)},
+                severity="warn",
                 now=self._clock(),
             )
         if not output.published_sha:
@@ -15277,6 +15309,11 @@ class _PrCandidate:
     """Set iff this repo is a member of an ATOMIC_WAVE SCC (§12.19's remaining leg): the whole
     group ships as ONE `PullRequestDraft`, not one per member. `None` for every other repo — the
     overwhelmingly common singleton case — which is unaffected by any of this."""
+    overwritten_bazel_files: tuple[str, ...] = ()
+    """Task 13: this repo's `BAZEL_OVERWRITE_FINDING_KIND` notes (Task 12's per-file
+    overwrite-disclosure), threaded straight into `PrwriterInput.relocation_summary`. Empty for
+    the overwhelmingly common case where Phase 3 buildgen wrote no `BUILD.bazel`/`MODULE.bazel`
+    over pre-existing, different content."""
 
 
 async def _atomic_wave_findings(conn: aiosqlite.Connection, run_id: str) -> dict[str, CycleFinding]:
@@ -15299,6 +15336,26 @@ async def _atomic_wave_findings(conn: aiosqlite.Connection, run_id: str) -> dict
             continue
         for member in finding.members:
             out[member] = finding
+    return out
+
+
+async def _bazel_overwrite_notes(conn: aiosqlite.Connection, run_id: str) -> dict[str, list[str]]:
+    """repo_id -> Task 12's per-file overwrite-disclosure notes, one row per repo.
+
+    Read from `BAZEL_OVERWRITE_FINDING_KIND`, which `_BuildSink` writes only when Phase 3
+    buildgen actually replaced a pre-existing `BUILD.bazel`/`MODULE.bazel` whose content differed
+    from what it generated (SECURITY_REVIEW.md item #2). A repo absent from the result had
+    nothing to disclose — the overwhelmingly common case.
+    """
+    rows = await _rows(
+        conn,
+        "SELECT repo_id, payload FROM findings WHERE run_id = ? AND kind = ?",
+        (run_id, BAZEL_OVERWRITE_FINDING_KIND),
+    )
+    out: dict[str, list[str]] = {}
+    for row in rows:
+        envelope = json.loads(str(row[1]))
+        out[str(row[0])] = [str(item) for item in envelope.get("paths", [])]
     return out
 
 
@@ -15354,6 +15411,7 @@ async def _pr_candidates(
         stub_tier.setdefault(str(row[0]), {})[str(row[1])] = StubFidelity(str(row[3]))
 
     scc_by_repo = await _atomic_wave_findings(conn, run_id)
+    overwrite_notes = await _bazel_overwrite_notes(conn, run_id)
 
     dependencies: dict[str, set[str]] = {}
     for dependency, dependent in await _ordering_pairs(conn, settings, run_id):
@@ -15393,6 +15451,7 @@ async def _pr_candidates(
                 stub_fidelity=stub_tier.get(repo_id, {}),
                 dependencies=tuple(sorted(dependencies.get(repo_id, set()))),
                 scc=scc_by_repo.get(repo_id),
+                overwritten_bazel_files=tuple(overwrite_notes.get(repo_id, [])),
             )
         )
     return tuple(candidates), tuple(unverified)
@@ -15797,6 +15856,15 @@ async def _emit_one_pr(
     dependencies = sorted(
         {dep for candidate in unit for dep in candidate.dependencies} - member_ids
     )
+    # Task 13: every member's own disclosure, not just the primary's — an ATOMIC_WAVE SCC's
+    # shared PR must not silently drop a non-primary member's overwrite notice the way it would
+    # if this followed `report`/`stub_states`/etc.'s primary-only convention (SECURITY_REVIEW.md
+    # item #2 is a disclosure obligation, not a rendering convenience). `sorted(set(...))` matches
+    # `dependencies` just above: dedupe, deterministic order, no per-member grouping needed since
+    # each note already names its own path.
+    relocation_summary = sorted(
+        {note for candidate in unit for note in candidate.overwritten_bazel_files}
+    )
 
     try:
         payload = PrwriterInput(
@@ -15822,6 +15890,7 @@ async def _emit_one_pr(
             rdeps_sample_seed=primary.seed,
             scc_id=scc.scc_id if scc is not None else None,
             member_repo_ids=sorted(member_ids) if scc is not None else [],
+            relocation_summary=relocation_summary,
             ready=ready,
             log_dir=str(pr_root / "bodies"),
             # §3.4 through whichever forge `pr.forge` names. The token is NOT here and cannot be:
@@ -15915,11 +15984,29 @@ def _regenerate_pr_body(
     The one exception, per this task's brief: model-authored prose is carried through UNCHANGED
     from `record.body`'s own `### Migration notes` section (`_extract_migration_notes`), never
     regenerated — that would mean a fresh LLM call this mechanism has no business making.
+
+    SECURITY_REVIEW.md item #4 ESCALATION named this function's `render_body()` call as the
+    second unredacted call site alongside `workers/prwriter.py::_compose` (§7's fix for the
+    first): `render_body()` renders `record.weak_edges`/`relocation_summary`/etc. verbatim from
+    data a worker plan can legitimately populate with a URL or log excerpt, and this function is
+    the ONLY other place in the tree that calls it on a body ultimately posted to the forge
+    (`_promote_one_pr` writes this return value straight to the forge, not through
+    `cli.py::_write_pr_record`'s DB-mirror redaction). `redact_text()` wraps the return here
+    rather than living inside `render_body()` itself, matching `workers/prwriter.py::_compose`'s
+    choice and for the same reason: `render_body()`'s own direct-call contract
+    (`tests/test_pr_body_redaction.py` and this module's own
+    `test_regenerate_pr_body_matches_a_fresh_render_once_the_stub_is_gone` and its neighbours)
+    depends on an unredacted return.
     """
     primary = min(unit, key=lambda candidate: candidate.repo_id)
     member_ids = frozenset(candidate.repo_id for candidate in unit)
     dependencies = sorted(
         {dep for candidate in unit for dep in candidate.dependencies} - member_ids
+    )
+    # Task 13: recomputed fresh from `unit`, same reasoning as `dependencies` just above — this
+    # is a revalidation against the CURRENT `_pr_candidates` read, not `record`'s stale snapshot.
+    relocation_summary = sorted(
+        {note for candidate in unit for note in candidate.overwritten_bazel_files}
     )
     payload = PrwriterInput(
         report=primary.report,
@@ -15945,13 +16032,16 @@ def _regenerate_pr_body(
         scc_id=record.scc_id,
         member_repo_ids=list(record.member_repo_ids),
         weak_edges=list(record.weak_edges),
+        relocation_summary=relocation_summary,
         revalidation_round=record.revalidation_round + 1,
     )
-    return render_body(
-        payload,
-        repo_id=record.repo_id,
-        draft=draft,
-        notes=_extract_migration_notes(record.body),
+    return redact_text(
+        render_body(
+            payload,
+            repo_id=record.repo_id,
+            draft=draft,
+            notes=_extract_migration_notes(record.body),
+        )
     )
 
 

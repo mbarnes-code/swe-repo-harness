@@ -50,11 +50,13 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 import fleet
 from fleet import cli
 from fleet.bazel.generators import (
     VersionConflict,
+    _split_extension,
     coarse_build_targets,
     mvs_select,
     parse_range,
@@ -62,6 +64,7 @@ from fleet.bazel.generators import (
     render_build_bazel,
     render_gazelle_build,
     render_module_bazel,
+    render_target,
     resolve_workspace_deps,
     stub_alias_target,
     stub_failing_target,
@@ -443,6 +446,20 @@ def test_an_unparseable_spec_never_produces_a_conflict_it_cannot_prove() -> None
     assert resolution.ok and resolution.selected == {"maven:com.acme:widget": "31"}
 
 
+def test_a_prerelease_suffix_is_unparseable_not_silently_truncated() -> None:
+    """SECURITY_REVIEW.md item #1's new finding: `_ATOM` was matched with `.match()`, which
+    anchors only at the string's start, so `1.2.3-beta.1` matched just the numeric prefix `1.2.3`
+    and silently dropped `-beta.1` — producing a WRONG constraint, not a dropped one, that MVS
+    then trusted. `.fullmatch()` makes the trailing `-beta.1` fail the match entirely, routing it
+    through the existing, deliberately-tested "unparseable → dropped" path instead of misparsing
+    it as a bare release version."""
+    assert parse_range("1.2.3-beta.1") is None
+    assert parse_range(">=1.2.3-beta.1") is None
+    with pytest.raises(VersionConflict) as excinfo:
+        mvs_select("maven:com.acme:widget", reqs({">=1.2.3-beta.1": 1}))
+    assert "no spec could be parsed" in excinfo.value.reason
+
+
 # =======================================================================================
 # §3.3 step 2 — BUILD generation
 # =======================================================================================
@@ -469,6 +486,71 @@ def targets_fixture() -> list[BuildTarget]:
             testonly=True,
         ),
     ]
+
+
+def test_build_target_rule_rejects_a_starlark_injection_payload() -> None:
+    """SECURITY_REVIEW.md item #6: `render_target()` (`bazel/generators.py`) does
+    `lines = [f"{target.rule}("]` -- `target.rule` is written verbatim, unescaped, as the head of
+    a generated Starlark function call in a real `BUILD.bazel` that `bazel build` evaluates.
+    `BuildTarget.rule` (`models/build.py:73`) now carries
+    `pattern=BAZEL_IDENTIFIER_PATTERN` (`^[a-zA-Z_][a-zA-Z0-9_]*$`), closing the injection
+    primitive at the model boundary. This is the exact payload from the finding's write-up: a
+    string shaped to close the intended `<rule>(` call head and inject a second top-level
+    Starlark statement."""
+    with pytest.raises(ValidationError, match="rule"):
+        BuildTarget(
+            package="jvm-root/com/acme/widget",
+            name="widget",
+            rule='filegroup(name = "x", srcs = [])\nload("@evil//:x.bzl", "y")\n#',
+        )
+
+
+def test_build_target_rule_still_accepts_a_real_bazel_rule_name() -> None:
+    """Control half of the pattern-constraint pair above: an ordinary rule name must still
+    validate, proving the pattern rejects the injection shape specifically and does not exclude
+    any legitimate Bazel rule keyword (every rule name this codebase's ecosystem adapters emit --
+    `java_library`, `ts_project`, `go_test`, `filegroup`, etc. -- is a plain identifier)."""
+    target = BuildTarget(package="jvm-root/com/acme/widget", name="widget", rule="java_library")
+    assert target.rule == "java_library"
+
+
+def test_render_target_rejects_a_malformed_attribute_name() -> None:
+    """SECURITY_REVIEW.md item #6's "Two latent siblings" block: `render_target()` renders
+    attribute names from `target.attrs` verbatim, unescaped, as identifiers in generated Starlark.
+    An attribute name like 'evil"name' or 'x; load(...)' should be rejected at render time rather
+    than silently passed through into the generated BUILD.bazel."""
+    target = BuildTarget(
+        package="jvm-root/com/acme/widget",
+        name="widget",
+        rule="java_library",
+        attrs={'evil"attr': "value"},  # Contains a quote, not a valid identifier
+    )
+    with pytest.raises(ValueError, match=r"attribute name.*not a valid Bazel identifier"):
+        render_target(target)
+
+    # Another injection shape
+    target2 = BuildTarget(
+        package="jvm-root/com/acme/widget",
+        name="widget",
+        rule="java_library",
+        attrs={'x; load("@evil//:x.bzl", "y")': "value"},  # Injection attempt
+    )
+    with pytest.raises(ValueError, match=r"attribute name.*not a valid Bazel identifier"):
+        render_target(target2)
+
+
+def test_render_target_accepts_valid_attribute_names() -> None:
+    """Control half of the attribute name validation: ordinary attribute names should still work."""
+    target = BuildTarget(
+        package="jvm-root/com/acme/widget",
+        name="widget",
+        rule="java_library",
+        attrs={"custom_attr": "value", "another_attr": ["list", "value"]},
+    )
+    text = render_target(target)
+    assert "custom_attr = " in text
+    assert "another_attr = " in text
+    assert 'value' in text
 
 
 def test_generated_build_text_is_deterministic_and_sorted() -> None:
@@ -582,6 +664,42 @@ def test_coarsening_without_a_rule_for_the_ecosystem_fails_loud() -> None:
 # =======================================================================================
 # §3.3 step 3 — MODULE.bazel
 # =======================================================================================
+
+
+def test_split_extension_rejects_a_malformed_proxy_variable() -> None:
+    """SECURITY_REVIEW.md item #6's "Two latent siblings" block: `_split_extension()` parses
+    extension IDs like "maven.install" into a proxy variable and tag class, which are rendered
+    verbatim, unescaped, as identifiers in generated MODULE.bazel Starlark.
+    A malformed proxy variable like 'evil"var' should be rejected at parse time."""
+    with pytest.raises(ValueError, match=r"extension proxy variable.*not a valid Bazel identifier"):
+        _split_extension('evil"var.install')
+
+
+def test_split_extension_rejects_a_malformed_tag_class() -> None:
+    """Similar to the proxy variable test, the tag class name must be validated."""
+    with pytest.raises(ValueError, match=r"extension tag class.*not a valid Bazel identifier"):
+        _split_extension('maven.install; load("@evil//:x.bzl", "y")')
+
+
+def test_split_extension_rejects_a_trailing_newline_embedded_in_the_proxy_variable() -> None:
+    """Final-review Minor 7: `re.match` admits one trailing `\\n` because `$` matches just before
+    it, so `_split_extension('maven\\n.install')` used to silently return `('maven\\n', 'install')`
+    instead of being rejected — the embedded newline survived past the identifier guard. Switching
+    the guard to `re.fullmatch` (which has no such exception for a trailing newline) closes it.
+    Not Pydantic-validated input, unlike `BuildTarget.rule`, so this is the one live site the
+    `.match()`/`.fullmatch()` class actually reaches.
+    """
+    with pytest.raises(ValueError, match=r"extension proxy variable.*not a valid Bazel identifier"):
+        _split_extension("maven\n.install")
+
+
+def test_split_extension_accepts_valid_extension_ids() -> None:
+    """Control half of the validation: ordinary extension IDs should still work."""
+    var, tag = _split_extension("maven.install")
+    assert var == "maven" and tag == "install"
+
+    var, tag = _split_extension("python.toolchain")
+    assert var == "python" and tag == "toolchain"
 
 
 def widget_dep(version: str | None = "31") -> WorkspaceDep:
