@@ -1439,8 +1439,10 @@ asserts on `EdgeRow` in memory passes.
 **FIXED, 2026-09-03 (round VI task 31, commit `d4cfc3e`, merge `31357cd`).** The brief this task
 was dispatched against assumed `EdgeRow` already carried `retargeted_from_repo_id` — investigation
 found that was false: that field belongs to `DependencyEdge` (`models/graph.py:141`), a
-structurally distinct in-memory inference class; `EdgeRow` (`state/repository.py:360-382`,
-repointed +1, 2026-09-11, by an uncommitted bug-fix pass's `PhaseRow.transient_retries` field
+structurally distinct in-memory inference class; `EdgeRow` (`state/repository.py:384-406`,
+repointed +24, 2026-09-16, by ADR-0142's `RunCallBudgetRefusedError` class and `BudgetLedgerRow`
+field/docstring additions above it in the same file — pure insertion, confirmed by the citation
+instrument's resolved span and independently by `grep -n`; superseding the repoint +1, 2026-09-11, by an uncommitted bug-fix pass's `PhaseRow.transient_retries` field
 addition above it in the same file — pure insertion, confirmed by exact-line-content match
 against the current tree) had no such
 field at all. The real fix touched three things, not one: (1) added the field to `EdgeRow`
@@ -7508,7 +7510,8 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2757-2825`, repointed +2, 2026-09-11, by an uncommitted
+2. `record_attempt` (`state/repository.py:2878-2946`, repointed +121, 2026-09-16, by ADR-0142's
+   call-count-ceiling insertions earlier in the same file, superseding the repoint +2, 2026-09-11, by an uncommitted
    bug-fix pass's `PhaseRow.transient_retries` field addition earlier in the same file — pure
    insertion, confirmed by exact-line-content match against the current tree; round VI task 83's
    own repoint (`state/repository.py:2755-2823`) is superseded, per this file's annotate-in-place
@@ -7710,7 +7713,8 @@ wire through (`record_task_anchor` is REWRITE/RELOCATE-specific, called only fro
 scenario is specifically the `git apply`/`git commit` REWRITE mutation flow), so this scope
 boundary does not block the criteria this defect names.
 
-`_TransformClaimHook` (`cli.py:5928`, repointed +27, 2026-09-11, by an uncommitted bug-fix pass's
+`_TransformClaimHook` (`cli.py:5930`, repointed +2, 2026-09-16, by ADR-0142's `max_calls=`
+argument added to `_scan_impl`'s `open_budget_ledger` call above it, superseding the repoint +27, 2026-09-11, by an uncommitted bug-fix pass's
 insertions above it in `cli.py` — pure insertion, confirmed by exact-line-content match against
 the current tree; round VI task 111's own repoint (`cli.py:5901`) is superseded, per this file's
 annotate-in-place convention, not deleted; that one had itself superseded round VI tasks 109 and
@@ -9263,7 +9267,8 @@ the premise it was quoting from ADR-0119 has moved. See ADR-0119's own matching 
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2794-2829`, repointed +27, 2026-09-11, by an uncommitted bug-fix pass's insertions above
+(`cli.py:2796-2833`, repointed +2, 2026-09-16, by ADR-0142's `max_calls=` argument added to
+`_scan_impl`'s `open_budget_ledger` call above it, superseding the repoint +27, 2026-09-11, by an uncommitted bug-fix pass's insertions above
 it in `cli.py` — pure insertion, confirmed by exact-line-content match against the current tree;
 round VI task 111's own repoint (`cli.py:2767-2802`) is superseded, per this file's
 annotate-in-place convention, not deleted; that one had itself superseded round VI tasks 109 and
@@ -10938,7 +10943,8 @@ repeat-trigger reading of it**: the same test's final section re-invokes `fleet 
 on the now-`SUPERSEDED` stub and asserts zero new `tasks`/`stubs`/`attempts` rows and zero new
 commits on `migrate/<consumer>`. **The literal "already_applied event... keyed on
 revalidation_key" sub-phrase of (4b) was investigated, not merely left unasserted**:
-`_run_one_revalidation_task` (`cli.py:14464`, repointed on merge, 2026-09-16, by combining round
+`_run_one_revalidation_task` (`cli.py:14477`, repointed +13, 2026-09-16, by ADR-0142's four
+`max_calls=` arguments added to the `open_budget_ledger` calls above it, superseding the repoint on merge, 2026-09-16, by combining round
 VIII's `main`-side symlink-guard insertions with round VII task 13's
 `BAZEL_OVERWRITE_FINDING_KIND` writer/reader insertions — both landed in the same merge and both
 shift this citation independently; confirmed by direct `grep -n` against the merged tree). Two

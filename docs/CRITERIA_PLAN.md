@@ -1573,7 +1573,8 @@ runtime RSS-sampling (still blocked, unchanged), the startup-refusal arithmetic,
 `state/repository.py` no-`list`-return check neither this entry nor an earlier audit had named.
 
 **Task 24 — startup-refusal wiring.** `FleetSettings.memory_commitment_mb`/
-`validate_memory_budget` (`settings.py:1386-1398`, repointed +7, 2026-09-11, by an uncommitted
+`validate_memory_budget` (`settings.py:1387-1399`, repointed +1, 2026-09-16, by ADR-0142's
+`run_max_llm_calls` field added to `BudgetsSection` earlier in the same file, superseding the repoint +7, 2026-09-11, by an uncommitted
 bug-fix pass's `canonical_json`/`_digest` docstring and body growth earlier in the same file —
 pure insertion, confirmed by exact-line-content match against the current tree; round VI task
 116's own repoint (`settings.py:1379-1391`) is superseded, per this file's annotate-in-place
@@ -3182,7 +3183,8 @@ trigger reading; the literal "already_applied event" sub-phrase — investigated
 vacuous, disclosed rather than silently dropped.** The same test asserts `COUNT(*) = 1` on the
 minted `REVALIDATE` task, then re-invokes `fleet stubs resolve` on the now-`SUPERSEDED` stub and
 asserts zero new `tasks`/`stubs`/`attempts` rows and zero new `migrate/<consumer>` commits.
-`_run_one_revalidation_task` (`cli.py:14465`, repointed 2026-09-16, +1, by
+`_run_one_revalidation_task` (`cli.py:14477`, repointed +12, 2026-09-16, by ADR-0142's four
+`max_calls=` arguments added to the `open_budget_ledger` calls above it, superseding the repoint 2026-09-16, +1, by
 `src/fleet/cli.py`'s typer-import fix — `typer._click.exceptions.Abort`/`Exit` stopped existing
 under the already-pinned `typer==0.27.2`, fixed by importing `Abort`/`Exit` from `typer` and
 `ClickException` from `click.exceptions` instead, a net +1 line in the import block above this

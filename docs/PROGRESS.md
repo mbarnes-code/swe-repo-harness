@@ -11288,3 +11288,64 @@ Task 14's first commit (`ea99f75`), was already stale by the time it landed: the
 (`71bf371`) and this final-review fix wave (Critical 1, Important 2-6, Minor 7-11) both landed after
 it, closing the whole-branch review's findings list rather than leaving it for a "separate
 whole-branch review" — the review happened, and this is its fix-up.
+
+---
+
+## Checkpoint — 2026-09-16: `run_max_llm_calls`, a call-count run ceiling (ADR-0142)
+
+**Rule 13 declaration, stated explicitly rather than by omission: this round closes NO §12
+criterion, and is not a hardening round either.** It is new feature work that sits *beyond* the
+acceptance bar — §12 does not mention a call-count ceiling and its wording is untouched, so
+Rule 14 is not engaged. **§12 count: 48 of 48**, re-measured directly against `docs/SPEC.md` §12
+at this commit (48 numbered criteria, counted by `sed -n '/^## 12\./,/^## 13\./p' | grep -cE
+'^[0-9]+\.'`) and not carried forward from the previous checkpoint.
+
+**What was completed.** A sixth §11.2 ceiling, `budgets.run_max_llm_calls`, capping the number of
+LLM calls a run may dispatch regardless of their price. It extends the existing durable
+`budget_ledger` CAS rather than adding a competing in-process counter: `calls_made = calls_made +
+1` and `AND (max_calls IS NULL OR calls_made + 1 <= max_calls)` ride inside `_reserve_run_sql`,
+the single statement both the run-only primitive and the nested `reserve_repo_budget` path already
+share. Schema `user_version` 11 → 12 (`v012_run_call_ceiling`, both `ADD COLUMN`s guarded by
+`_support.column_names`); `RunCallBudgetRefusedError` (a `BudgetRefusedError` subclass, decided
+inside the refusing transaction) at the repository layer; `RunCallBudgetExhausted` (a
+`LedgerBreach` **sibling** of `RunBudgetExhausted`, exit 3) at the policy layer, routed past
+`CostLedger.reserve`'s backpressure wait because no settlement can lower `calls_made`. Default is
+`None` = no cap, so no existing profile changes behaviour. ADR-0142 records the decisions,
+including why it deliberately does **not** set `budget_ledger.halted`.
+
+**What was verified.**
+
+* **The motivating gap is actually closed, not just the SQL correct in isolation.** A `price:
+  free` target reserving `$0.00` nine times against a `$1 000` ceiling ends with `spent_usd` and
+  `reserved_usd` both `0.0` and the run stopped at exactly four calls — so nothing the dollar
+  predicate could have done produced that halt (`test_a_zero_priced_target_still_hits_the_call_
+  ceiling`, and its policy-layer twin against a `$0.01` run ceiling that still refuses nothing).
+* **Rule 12 mutation proof, gate read before every result** (`git diff --numstat --no-index`
+  against a backup, never HEAD-relative; module import and wall-clock read beside it). On
+  `_reserve_run_sql`: the brief's named off-by-one (`calls_made + 1 <= max_calls` →
+  `calls_made <=`) gave gate `1 1`, **pre-existing budget CAS tests 4 of 4 PASS** while two of the
+  three new cases went RED — old-passes/new-fails on the same input. Three further mutations
+  (drop the predicate; invert the `IS NULL` branch; drop the increment) and a per-case matrix are
+  recorded in `tests/test_repository.py` beside the tests, including the honest disclosure that
+  the no-ceiling case is the unique discriminator of none of them. A cosmetic reflow of the same
+  predicate kept all three green, so these assert meaning and not layout.
+* **Policy-layer mutations, correct node ids** (a first attempt used a node id that does not
+  exist, so pytest exited 4 and was misread as a failing test — re-run rather than reported):
+  making `RunCallBudgetExhausted` a *subclass* of `RunBudgetExhausted` reddens
+  `test_a_call_count_breach_is_its_own_type_and_not_a_cost_breach` and **only** that test, with
+  the pre-existing tests green — it is that mutation's unique discriminator. Removing the
+  terminal-route branch sends the refusal into the backpressure loop, where
+  `test_a_call_count_breach_never_enters_the_backpressure_wait` fails in **31.9 s** against a
+  <1 s bound; the pre-existing tests stay green.
+* `--raise-budget` was **checked, not assumed**, against the claim ADR-0142 makes about it:
+  `_raise_run_ceiling` issues a targeted `UPDATE budget_ledger SET max_usd = ?, halted = 0` and
+  does not touch `max_calls`, so it cannot silently clear this ceiling.
+* `python -m mypy` with **no path arguments** (manifest sets the scope, `strict` +
+  `packages = ["fleet"]`): clean, 133 source files. `ruff check .` whole repo: clean. `ruff
+  format --check`: the new `v012_run_call_ceiling.py` is format-clean and every other file
+  touched was already in the pinned dirty baseline at `HEAD`, so this round adds **0** to that
+  count.
+
+**Next:** none dispatched. Choosing an actual `run_max_llm_calls` value for `config/models.yaml`'s
+`pilot`/`local` profiles is left as the operational decision ADR-0142 scopes out, for whoever runs
+the §15.2 pilot. A wall-clock run ceiling remains unbuilt and is a separate circuit breaker.
