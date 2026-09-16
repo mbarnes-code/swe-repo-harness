@@ -467,13 +467,14 @@ def test_a_named_but_unset_api_key_env_fails_loud_naming_the_variable() -> None:
 
 
 def test_the_shipped_config_still_defaults_to_the_hosted_profile() -> None:
-    """WHY: adding `profiles.local` must not re-point anybody's run. `default_profile` is the only
-    thing that decides which models a `fleet run` with no flags actually bills."""
+    """WHY: adding `profiles.local`/`profiles.pilot` must not re-point anybody's run.
+    `default_profile` is the only thing that decides which models a `fleet run` with no flags
+    actually bills."""
     settings = FleetSettings.load(SHIPPED_CONFIG, env={})
 
     assert settings.models.default_profile == "default"
     assert settings.profile == "default"
-    assert sorted(settings.models.profiles) == ["default", "local"]
+    assert sorted(settings.models.profiles) == ["default", "local", "pilot"]
 
 
 def test_the_local_profile_loads_and_resolves_every_role() -> None:
