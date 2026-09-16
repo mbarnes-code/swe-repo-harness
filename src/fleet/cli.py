@@ -53,10 +53,11 @@ from uuid import UUID, uuid4
 
 import aiosqlite
 import typer
+from click.exceptions import ClickException
 from pydantic import Field, ValidationError
+from typer import Abort
+from typer import Exit as ClickExit
 from typer._click.core import Command as ClickCommand
-from typer._click.exceptions import Abort, ClickException
-from typer._click.exceptions import Exit as ClickExit
 from typer.core import TyperGroup
 
 from fleet import ecosystems

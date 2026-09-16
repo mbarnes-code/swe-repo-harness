@@ -3182,12 +3182,17 @@ trigger reading; the literal "already_applied event" sub-phrase — investigated
 vacuous, disclosed rather than silently dropped.** The same test asserts `COUNT(*) = 1` on the
 minted `REVALIDATE` task, then re-invokes `fleet stubs resolve` on the now-`SUPERSEDED` stub and
 asserts zero new `tasks`/`stubs`/`attempts` rows and zero new `migrate/<consumer>` commits.
-`_run_one_revalidation_task` (`cli.py:14464`, repointed on merge, 2026-09-16, by combining round
-VIII's `main`-side symlink-guard insertions with round VII task 13's
-`BAZEL_OVERWRITE_FINDING_KIND` writer/reader insertions — both landed in the same merge and both
-shift this citation independently; confirmed by direct `grep -n` against the merged tree). Two
-prior repoints are both now superseded by this merge, per this file's annotate-in-place
-convention, not deleted: round VIII's own repoint (`cli.py:14432`, +22, 2026-09-15, by the
+`_run_one_revalidation_task` (`cli.py:14465`, repointed 2026-09-16, +1, by
+`src/fleet/cli.py`'s typer-import fix — `typer._click.exceptions.Abort`/`Exit` stopped existing
+under the already-pinned `typer==0.27.2`, fixed by importing `Abort`/`Exit` from `typer` and
+`ClickException` from `click.exceptions` instead, a net +1 line in the import block above this
+function — confirmed by `grep -n '^async def _run_one_revalidation_task' src/fleet/cli.py`).
+This supersedes, not deletes, the same-day merge repoint immediately below: `cli.py:14464`,
+repointed on merge, 2026-09-16, by combining round VIII's `main`-side symlink-guard insertions
+with round VII task 13's `BAZEL_OVERWRITE_FINDING_KIND` writer/reader insertions — both landed in
+the same merge and both shift this citation independently; confirmed by direct `grep -n` against
+the merged tree. Two prior repoints are both now superseded by that merge, per this file's
+annotate-in-place convention, not deleted: round VIII's own repoint (`cli.py:14432`, +22, 2026-09-15, by the
 buildgen.py/#7-class-cli.py symlink-guard security fixes' insertions above it — pure insertion,
 confirmed by exact-line-content match at the time), and round VII task 14's repoint
 (`cli.py:14442`, +32, 2026-09-15, by round VII task 13's own insertions, `a2425e4` — pure

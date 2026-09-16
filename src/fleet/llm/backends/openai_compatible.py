@@ -40,7 +40,7 @@ import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, ClassVar, Final, Protocol, cast
 
-import httpx
+import httpx2
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -190,7 +190,7 @@ class _SdkTransport:
 
     Both constructor arguments default, so `OpenAICompatibleBackend()` — and therefore
     `register_backend`'s `cls()` — still builds this with no arguments and no HTTP client. They
-    exist so a test can hand the SDK an `httpx.MockTransport` and drive this class for real: the
+    exist so a test can hand the SDK an `httpx2.MockTransport` and drive this class for real: the
     request that leaves here is otherwise the one piece of the module nothing exercises, and it is
     where a wrong wire shape (a `strict` flag over a schema we do not control, a misplaced
     `extra_body`) hides from a fake-transport suite.
@@ -198,7 +198,7 @@ class _SdkTransport:
 
     def __init__(
         self,
-        http_client: httpx.AsyncClient | None = None,
+        http_client: httpx2.AsyncClient | None = None,
         max_retries: int = _SDK_TRANSIENT_RETRIES,
     ) -> None:
         self._http_client = http_client
