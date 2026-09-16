@@ -302,7 +302,7 @@ explicit design); JVM has no Gradle-daemon bridge — Gradle manifests route thr
 `maven.install` path as Maven, which has no lockfile-floor concept at all.
 
 **Status:** FIXED (Finding A, 2026-09-15, round VII task 5, `6a4a473`); PLAUSIBLE, unresolved and
-disclosed rather than fixed, per ADR-0137 (Finding B) — answers and extends item #3's
+disclosed rather than fixed, per ADR-0139 (renumbered on merge from ADR-0137, Finding B) — answers and extends item #3's
 open question about Cargo/sandbox network interaction, but needs an actual sandboxed run against a
 real Cargo repo to confirm empirically rather than from static reading alone.
 
@@ -359,7 +359,7 @@ blast radius than item #5 originally scoped.
 
 **Status:** FIXED for Finding A (2026-09-15, round VII task 5, `6a4a473` — `verify.network` is now
 type-constrained to `Literal["none"]`); Finding B remains OPEN, disclosed rather than fixed, per
-ADR-0137. Both were originally confirmed (B empirically). This is a real, reproducible
+ADR-0139 (renumbered on merge from ADR-0137). Both were originally confirmed (B empirically). This is a real, reproducible
 build-time failure mode for a meaningful fraction (~12%) of the local Gitea corpus, currently
 invisible to the harness's own error handling (no dedicated `FailureClass`, per the earlier
 investigation).
@@ -376,7 +376,8 @@ structurally close this, untested here.
 > **Status update (2026-09-15, round VII task 5).** Finding A resolved by Task 4: `verify.network`
 > is now constrained to `Literal["none"]`, enforcing the design intent at the type level. Finding B
 > disclosed not fixed: Cargo's `cargo fetch` network requirement during `crate_universe` builds is
-> a documented architectural limitation, disclosed via ADR-0137 as a known constraint of the
+> a documented architectural limitation, disclosed via ADR-0139 (renumbered on merge from ADR-0137)
+> as a known constraint of the
 > current integration, pending a structural vendoring/cache fix (out of scope this round).
 
 ---
@@ -608,7 +609,7 @@ create and every promotion — while the project's own tracking documents assert
 > silently narrowed by redacting inside it. The documentation drift this item flagged (§11.4's
 > wrong-module attribution, the PR-title omission, and `CRITERIA_PLAN.md`'s §12.20 DONE verdict
 > citing only the DB-mirror test) is corrected in `docs/SPEC.md`/`docs/CRITERIA_PLAN.md`, and
-> `docs/INTEGRATION_HONESTY.md` D138 (`08d2aa9`) records the divergence itself, status FIXED,
+> `docs/INTEGRATION_HONESTY.md` D142 (renumbered on merge from D138; `08d2aa9`) records the divergence itself, status FIXED,
 > LANDED against `ccc0016`/`199f2dd`. Question 5 (SecretRegistry bypass) remains a disclosed
 > defense-in-depth gap, not fixed as code — see the round VII task 9 note on Question 5 above.
 > **Status: FIXED** (core gap and both PR-egress sites); Question 5's defense-in-depth gap remains
