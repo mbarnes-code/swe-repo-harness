@@ -23,12 +23,14 @@ provision_worktree() {
   wt=$2
 
   # tools/bin: the four wrapper SCRIPTS (cargo, gazelle, go, rustc) are tracked and arrive with
-  # the checkout already. The three real binaries are ignored by `tools/bin/*` in .gitignore and
-  # symlinked here -- they are large (ast-grep 53MB, gh 41MB, bazel 7MB), read-only, and safe to
-  # share read-only across every worktree. `tools/bin/*` (no trailing slash) ignores the symlinks
-  # too, so `git status` stays clean.
+  # the checkout already. The real binaries are ignored by `tools/bin/*` in .gitignore and
+  # symlinked here -- they are large (ast-grep 53MB, gh 41MB, bazel 7MB, gitleaks 22MB),
+  # read-only, and safe to share read-only across every worktree. `tools/bin/*` (no trailing
+  # slash) ignores the symlinks too, so `git status` stays clean. gitleaks (ADR-0141) is built
+  # once into the primary via `tools/bin/go install github.com/zricethezav/gitleaks/v8@v8.30.1`
+  # (pinned, not @latest) and shared read-only from here like the other three.
   mkdir -p "$wt/tools/bin"
-  for b in bazel ast-grep gh; do
+  for b in bazel ast-grep gh gitleaks; do
     if [ -e "$primary/tools/bin/$b" ]; then
       ln -sf "$primary/tools/bin/$b" "$wt/tools/bin/$b"
       say "link tools/bin/$b"

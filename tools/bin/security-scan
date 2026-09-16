@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Runs this project's four-tool security-scanning toolchain (ADR-0141) and writes full reports
+# to a scratch directory. On-demand / periodic use (e.g. before the SPEC §15.2 pilot), NOT wired
+# into the lint gate: unlike ruff's `S` rules (enforced on every commit, pyproject.toml `select`),
+# bandit/semgrep do not share ruff's `# noqa: S...` suppression syntax, so a raw run re-surfaces
+# findings this project already reviewed and accepted under ruff's own gate (see the 2026-09-16
+# security-scan report referenced from ADR-0141 for that triage). Making these hard-fail like
+# `tests/test_lint_gate.py`'s pinned-baseline pattern would need bandit's own `# nosec` markers
+# retrofitted across those sites first -- a separate, bigger piece of work this script does not
+# attempt. Read the reports; nothing here fails your build.
+#
+# Tools (all pinned -- see pyproject.toml's `dev` group and this repo's tools/bin/gitleaks):
+#   bandit, pip-audit  -- installed into .venv (pyproject.toml `dev` dependency group)
+#   semgrep            -- installed into .venv; ITS RULESETS (`p/security-audit`, `p/python`,
+#                          `p/secrets`) are fetched fresh from the semgrep registry every run and
+#                          are NOT pinned by the tool-version pin above -- a clean run today can
+#                          start flagging something tomorrow with no local code change to explain
+#                          it. Re-baseline by re-reading the report, same as any un-pinned scan.
+#   gitleaks            -- tools/bin/gitleaks, pinned build (v8.30.1), shared across worktrees by
+#                          tools/worktree/lib-provision.sh like bazel/ast-grep/gh.
+#
+# Usage: tools/bin/security-scan [output-dir]   (default: a fresh dir under mktemp -d)
+set -euo pipefail
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$script_dir"
+
+out=${1:-$(mktemp -d /tmp/fleet-security-scan.XXXXXX)}
+mkdir -p "$out"
+
+echo "writing reports to $out"
+
+echo "--- pip-audit (dependency CVEs) ---"
+.venv/bin/pip freeze --exclude-editable >"$out/installed-requirements.txt"
+.venv/bin/pip-audit -r "$out/installed-requirements.txt" -f json -o "$out/pip-audit.json" || true
+.venv/bin/pip-audit -r "$out/installed-requirements.txt" | tee "$out/pip-audit.txt"
+
+echo "--- bandit (src/ static analysis) ---"
+.venv/bin/bandit -r src/ -f json -o "$out/bandit.json" || true
+.venv/bin/bandit -r src/ -f txt -o "$out/bandit.txt" || true
+echo "$(python3 -c "import json; print(len(json.load(open('$out/bandit.json'))['results']))") raw finding(s) -- see $out/bandit.txt (many are pre-reviewed under ruff's S-rule gate; read before acting)"
+
+echo "--- semgrep (community security rulesets) ---"
+.venv/bin/semgrep --config p/security-audit --config p/python --config p/secrets --json \
+  --output "$out/semgrep.json" src/ >"$out/semgrep.stdout" 2>"$out/semgrep.stderr" || true
+echo "$(python3 -c "import json; print(len(json.load(open('$out/semgrep.json'))['results']))") finding(s) -- see $out/semgrep.json"
+
+echo "--- gitleaks (full git history) ---"
+tools/bin/gitleaks detect --source . -v --report-format json --report-path "$out/gitleaks.json" \
+  --redact >"$out/gitleaks.stdout" 2>"$out/gitleaks.stderr" || true
+echo "$(python3 -c "import json; print(len(json.load(open('$out/gitleaks.json'))))") finding(s) -- see $out/gitleaks.json"
+
+echo
+echo "all reports: $out"

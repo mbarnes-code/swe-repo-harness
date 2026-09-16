@@ -51,6 +51,13 @@ dev = [
   # a rule reddens an untouched tree. `tests/test_lint_gate.py` gates and explains it.
   "ruff==0.16.2",
   "mypy>=1.13",
+  # ADR-0141 security-scanning toolchain. Exact pins, same reasoning as ruff above — each of
+  # these ships its own growing rule/advisory set, so a floor pin would let a future release
+  # redden (or quiet) an untouched tree with no local change to explain it. `tools/bin/security-
+  # scan` runs all three (plus gitleaks, a separate Go binary — see that script and ADR-0141).
+  "bandit==1.9.4",
+  "semgrep==1.177.0",
+  "pip-audit==2.10.1",
 ]
 
 [project.optional-dependencies]
@@ -66,6 +73,10 @@ dev = [
   # a rule reddens an untouched tree. `tests/test_lint_gate.py` gates and explains it.
   "ruff==0.16.2",
   "mypy>=1.13",
+  # ADR-0141 security-scanning toolchain — same exact-pin reasoning as ruff above.
+  "bandit==1.9.4",
+  "semgrep==1.177.0",
+  "pip-audit==2.10.1",
 ]
 
 [tool.hatch.build.targets.wheel]

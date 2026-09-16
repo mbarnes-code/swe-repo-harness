@@ -62,6 +62,7 @@ tools/bin/*
 !tools/bin/gazelle
 !tools/bin/go
 !tools/bin/rustc
+!tools/bin/security-scan
 
 # ---- Live write paths (settings.py: cache_dir, work_dir) ----
 # These are the two highest-volume targets in the system: the Bazel disk and
