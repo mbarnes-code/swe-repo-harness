@@ -772,7 +772,9 @@ async def test_re_entry_with_a_different_render_from_the_same_harness_collects_n
     out2 = result2.output
     assert out2 is not None
     module_text_2 = read(out2.module_bazel_path)
-    assert module_text_1 != module_text_2, "fixture precondition: the re-render must actually differ"
+    assert module_text_1 != module_text_2, (
+        "fixture precondition: the re-render must actually differ"
+    )
     assert out2.overwritten_bazel_files == [], (
         "a re-entry overwriting the harness's OWN prior output, even with different bytes, is not "
         "a hand-written-file loss"
