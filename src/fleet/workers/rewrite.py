@@ -459,7 +459,10 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                     return self._failed(
                         FailureClass.PREFLIGHT,
                         retryable=False,
-                        detail=f"{unit}: refusing to read a symlink; the repo's own shape",
+                        detail=(
+                            f"{unit}: refusing to read a symlink; the repo's own shape does not "
+                            "change between retries, so this is not retryable"
+                        ),
                         landed=landed,
                         remaining=owed[index:],
                         output=output,

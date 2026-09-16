@@ -11110,3 +11110,22 @@ commits, not the plan's summary of them.
 Scope" calls for a whole-suite `pytest` run (green = `xfail: 0`, every xfail disclosed by
 D-number) and a re-check of Task 8's corrected claims against the code Tasks 6/7 shipped, to be
 done as a separate whole-branch review before this branch integrates.
+
+**Decision (2026-09-16, final-review Important 6): `SECURITY_REVIEW.md` stays tracked, deliberately.**
+The plan's own authority note describes this file as "repo root, untracked, 899 lines... explicitly
+NOT a SPEC/ADR/D-number artifact." It entered the tree in `c06a298` as a side effect of Task 5
+recovering it from an earlier fabricated-placeholder mistake, not by any recorded decision, and was
+985 lines and fully tracked at the point the final whole-branch review measured it (before this
+fix wave's own status-line and note edits below grew it further). The review flagged this as an
+implicit state that
+should be made explicit rather than inherited. The decision: **keep it tracked going forward.** Its
+per-item line-anchored source citations are historical record of what was found and where, not
+live/instrument-checked citations — no test currently sweeps them (`tests/test_findings_kinds.py`
+and `tests/test_integration_honesty_citations.py` do not read it), and that is accepted rather than
+treated as a gap to close this round.
+
+**Correction (2026-09-16, final-review fix wave).** This entry's own "Next" line above, written by
+Task 14's first commit (`ea99f75`), was already stale by the time it landed: the citation-drift fix
+(`71bf371`) and this final-review fix wave (Critical 1, Important 2-6, Minor 7-11) both landed after
+it, closing the whole-branch review's findings list rather than leaving it for a "separate
+whole-branch review" — the review happened, and this is its fix-up.

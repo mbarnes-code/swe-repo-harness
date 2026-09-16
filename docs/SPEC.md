@@ -4408,6 +4408,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- | 'OperatorAbort' | 'StubAbandoned'
                                                   -- | 'WaveBudgetRaised' | 'RunBudgetRaised'
                                                   --     -- cli.py, one dedicated writer each
+                                                  -- | 'BazelFileOverwritten' -- written by cli.py
+                                                  --     BAZEL_OVERWRITE_FINDING_KIND via
+                                                  --     _BuildSink.__call__, round VII task 12/13:
+                                                  --     one row per pre-existing hand-written
+                                                  --     BUILD.bazel/MODULE.bazel buildgen replaced
                                                   -- | 'AnchoringGuardOff' -- cli.py's
                                                   --     _TransformSink.__call__, the
                                                   --     --no-anchoring-guard repeat-applied case
@@ -7187,7 +7192,13 @@ and it is applied **at every egress boundary, unconditionally**:
   `llm/client.py`'s registry (ADR-0023) — `llm/client.py` itself calls neither, so a new backend
   cannot bypass either and a locally-served target is redacted exactly like a hosted one
   (**corrected 2026-09-15, D138** — this read `llm/client.py` for both; `client.py` calls no
-  redaction function anywhere).
+  redaction function anywhere). **This closes the named provider-token/API-key shapes below, not
+  arbitrary secret material in repo file content** — the `private_key` pattern matches only the
+  PEM `-----BEGIN … PRIVATE KEY-----` header, not the key body that follows it, and the generic
+  high-entropy rule (≥20 chars, ≥4.0 bits/char) does not fire on an ordinary low-entropy
+  credential (e.g. `db_password = "correct-horse-battery"`); this is pre-existing, deliberate
+  anti-over-redaction behavior in `obs/redact.py`, disclosed here rather than fixed (final-review
+  Important 4).
 
 Detection is layered and configured in `config/fleet.yaml#redaction`: high-precision provider
 patterns (`github_pat_[A-Za-z0-9_]{20,}`, `ghp_…`, `gho_…`, `xox[baprs]-…`, `AKIA[0-9A-Z]{16}`,

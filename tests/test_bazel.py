@@ -681,6 +681,18 @@ def test_split_extension_rejects_a_malformed_tag_class() -> None:
         _split_extension('maven.install; load("@evil//:x.bzl", "y")')
 
 
+def test_split_extension_rejects_a_trailing_newline_embedded_in_the_proxy_variable() -> None:
+    """Final-review Minor 7: `re.match` admits one trailing `\\n` because `$` matches just before
+    it, so `_split_extension('maven\\n.install')` used to silently return `('maven\\n', 'install')`
+    instead of being rejected — the embedded newline survived past the identifier guard. Switching
+    the guard to `re.fullmatch` (which has no such exception for a trailing newline) closes it.
+    Not Pydantic-validated input, unlike `BuildTarget.rule`, so this is the one live site the
+    `.match()`/`.fullmatch()` class actually reaches.
+    """
+    with pytest.raises(ValueError, match=r"extension proxy variable.*not a valid Bazel identifier"):
+        _split_extension("maven\n.install")
+
+
 def test_split_extension_accepts_valid_extension_ids() -> None:
     """Control half of the validation: ordinary extension IDs should still work."""
     var, tag = _split_extension("maven.install")

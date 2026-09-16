@@ -707,6 +707,78 @@ async def test_no_pre_existing_file_or_an_identical_one_collects_nothing(tmp_pat
     assert out2.overwritten_bazel_files == [], "identical content is not a silent loss"
 
 
+async def test_re_entry_with_a_different_render_from_the_same_harness_collects_nothing(
+    tmp_path,
+) -> None:
+    """Final-review Important 3: a re-entry whose render DIFFERS from a prior attempt's own
+    generated output must still collect nothing — only a real, hand-written pre-existing file is
+    a silent loss.
+
+    `test_no_pre_existing_file_or_an_identical_one_collects_nothing` only covers the *identical*
+    re-render case, which is why the false positive this test pins was not caught: `_write()` is
+    always called, so any re-entry whose render legitimately differs (a changed dep, a different
+    MVS selection, a different `build_authoring` LLM answer) used to be misreported as replacing a
+    "pre-existing hand-written Bazel file" it in fact generated itself. Here the second attempt's
+    `requirements` select a different version (`>=1.5` vs `>=1.2`), which changes the pinned
+    version in `MODULE.bazel` between the two attempts — a genuine content difference, both sides
+    harness-generated.
+    """
+    ctx = make_ctx(tmp_path)
+    targets = [
+        BuildTarget(
+            package="java/com/acme/widget",
+            name="widget",
+            rule="java_library",
+            srcs=["Widget.java"],
+        )
+    ]
+
+    result1 = await BuildgenWorker().run(
+        ctx,
+        BuildgenInput(
+            unit=_unit(),
+            targets=targets,
+            workspace_deps=[_dep()],
+            requirements=[
+                ExternalRequirement(
+                    coord_key="maven:com.acme:commons", repo_id="acme-a", version_spec=">=1.2"
+                ),
+            ],
+            ruleset_versions={"rules_jvm_external": "6.0"},
+        ),
+    )
+    assert result1.status == "ok"
+    out1 = result1.output
+    assert out1 is not None
+    assert out1.overwritten_bazel_files == [], "nothing pre-existing on a first run"
+    module_text_1 = read(out1.module_bazel_path)
+
+    ctx2 = make_ctx(tmp_path)
+    result2 = await BuildgenWorker().run(
+        ctx2,
+        BuildgenInput(
+            unit=_unit(),
+            targets=targets,
+            workspace_deps=[_dep()],
+            requirements=[
+                ExternalRequirement(
+                    coord_key="maven:com.acme:commons", repo_id="acme-a", version_spec=">=1.5"
+                ),
+            ],
+            ruleset_versions={"rules_jvm_external": "6.0"},
+        ),
+    )
+    assert result2.status == "ok"
+    out2 = result2.output
+    assert out2 is not None
+    module_text_2 = read(out2.module_bazel_path)
+    assert module_text_1 != module_text_2, "fixture precondition: the re-render must actually differ"
+    assert out2.overwritten_bazel_files == [], (
+        "a re-entry overwriting the harness's OWN prior output, even with different bytes, is not "
+        "a hand-written-file loss"
+    )
+
+
 async def test_a_model_pin_that_hides_a_violated_spec_is_rejected_before_it_is_written(
     tmp_path,
 ) -> None:

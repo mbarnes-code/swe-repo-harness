@@ -113,7 +113,7 @@ def render_target(target: BuildTarget) -> str:
     if target.deps:
         lines += _render_attr("deps", sorted(set(target.deps)))
     for key in sorted(target.attrs):
-        if not re.match(BAZEL_IDENTIFIER_PATTERN, key):
+        if not re.fullmatch(BAZEL_IDENTIFIER_PATTERN, key):
             raise ValueError(
                 f"attribute name {key!r} is not a valid Bazel identifier (must match "
                 f"{BAZEL_IDENTIFIER_PATTERN}); rendered verbatim as an unescaped Starlark "
@@ -716,13 +716,13 @@ def _split_extension(extension: str) -> tuple[str, str]:
         raise ValueError(
             f"extension id {extension!r} must be '<extension>.<tag_class>' (e.g. maven.install)"
         )
-    if not re.match(BAZEL_IDENTIFIER_PATTERN, var):
+    if not re.fullmatch(BAZEL_IDENTIFIER_PATTERN, var):
         raise ValueError(
             f"extension proxy variable {var!r} is not a valid Bazel identifier (must match "
             f"{BAZEL_IDENTIFIER_PATTERN}); rendered verbatim as an unescaped Starlark "
             f"identifier in MODULE.bazel (SECURITY_REVIEW.md item #6)"
         )
-    if not re.match(BAZEL_IDENTIFIER_PATTERN, tag):
+    if not re.fullmatch(BAZEL_IDENTIFIER_PATTERN, tag):
         raise ValueError(
             f"extension tag class {tag!r} is not a valid Bazel identifier (must match "
             f"{BAZEL_IDENTIFIER_PATTERN}); rendered verbatim as an unescaped Starlark "

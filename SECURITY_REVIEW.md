@@ -61,7 +61,8 @@ item #4's already-confirmed gap — ships it **unredacted** to whichever third-p
 configured. **This requires no compromised or steered LLM at all** — unlike item #6, the exploit is
 entirely on the input side; the LLM is just the exfiltration channel.
 
-**Status:** OPEN. This is the most severe confirmed finding in this document: it does not depend on
+**Status:** FIXED (2026-09-15, round VII task 1, `e5be438` — see the dated status update below).
+This is the most severe confirmed finding in this document: it does not depend on
 a hypothetical prompt-injection-steered model response (item #6) or a downstream disclosure gap
 (item #4/PR-body) alone — it's a complete, self-contained arbitrary-host-file-read-and-egress
 primitive triggerable purely by the content of a repo being migrated.
@@ -168,7 +169,8 @@ var/tag are similarly unescaped, but every current call site across all five eco
 uses hardcoded literal attribute names — not LLM- or repo-controlled — so this is a latent pattern
 weakness, not a live sink today.
 
-**Status:** OPEN — confirmed oversight (not deliberate), and confirmed to be the SOLE live instance
+**Status:** FIXED (2026-09-15, round VII tasks 2/3, `72e4959` — see the dated status update below)
+— confirmed oversight (not deliberate), and confirmed to be the SOLE live instance
 of this bug class after a full sweep. Investigated by a dispatched subagent, citations personally
 re-verified.
 
@@ -299,7 +301,8 @@ pinned `-external=static` (`ecosystems/go.py:386-392` — zero network, zero sub
 explicit design); JVM has no Gradle-daemon bridge — Gradle manifests route through the same
 `maven.install` path as Maven, which has no lockfile-floor concept at all.
 
-**Status:** OPEN (Finding A); PLAUSIBLE, unresolved (Finding B) — answers and extends item #3's
+**Status:** FIXED (Finding A, 2026-09-15, round VII task 5, `6a4a473`); PLAUSIBLE, unresolved and
+disclosed rather than fixed, per ADR-0137 (Finding B) — answers and extends item #3's
 open question about Cargo/sandbox network interaction, but needs an actual sandboxed run against a
 real Cargo repo to confirm empirically rather than from static reading alone.
 
@@ -354,7 +357,9 @@ empirical test. **This is, as far as this review can determine, the first actual
 this affects **all ~33 Cargo-touching repos** found there, not a lock/no-lock subset — a wider
 blast radius than item #5 originally scoped.
 
-**Status:** OPEN, Finding A and B both confirmed (B empirically). This is a real, reproducible
+**Status:** FIXED for Finding A (2026-09-15, round VII task 5, `6a4a473` — `verify.network` is now
+type-constrained to `Literal["none"]`); Finding B remains OPEN, disclosed rather than fixed, per
+ADR-0137. Both were originally confirmed (B empirically). This is a real, reproducible
 build-time failure mode for a meaningful fraction (~12%) of the local Gitea corpus, currently
 invisible to the harness's own error handling (no dedicated `FailureClass`, per the earlier
 investigation).
@@ -450,7 +455,9 @@ question isn't "is any gap here surprising," it's whether *our* harness disclose
 way that one does. It currently does not appear to (no `SECURITY.md` or equivalent found in this
 repo).
 
-**Status:** OPEN, with the core claim now upgraded from "presumed" to fully traced — and a second,
+**Status:** FIXED (2026-09-15, round VII tasks 6/7/8, `ccc0016`/`199f2dd` — see the dated status
+update below; Question 5's SecretRegistry gap remains open, disclosed), with the core claim now
+upgraded from "presumed" to fully traced — and a second,
 arguably more severe instance of the same gap found and confirmed, in the **public PR body** rather
 than only the private LLM egress. Investigated by a dispatched subagent, citations personally
 re-verified.
@@ -572,7 +579,8 @@ table) found and I personally re-verified:
   prose → write-only, never persisted/posted anywhere (no exposure); structured logs → redacted
   correctly at the sink; commit messages → no LLM text present at all, not applicable.
 
-**Status:** OPEN, now the highest-confidence and most consequential finding in this document: a
+**Status:** FIXED (2026-09-15, round VII tasks 6/7/8, `ccc0016`/`199f2dd` — see the dated status
+update below), now the highest-confidence and most consequential finding in this document: a
 real secret reaching LLM evidence (this item's original finding) has **two** confirmed, live,
 publicly-visible ways to surface further downstream — the PR body and the PR title, on every
 create and every promotion — while the project's own tracking documents assert this is fixed.
@@ -605,6 +613,15 @@ create and every promotion — while the project's own tracking documents assert
 > defense-in-depth gap, not fixed as code — see the round VII task 9 note on Question 5 above.
 > **Status: FIXED** (core gap and both PR-egress sites); Question 5's defense-in-depth gap remains
 > open, disclosed.
+
+> **Status update (2026-09-16, final-review Important 4).** "FIXED" above closes the *wiring* gap
+> (redaction now runs at every egress boundary this item names). It does not mean the redaction
+> itself is comprehensive: `obs/redact.py`'s `private_key` detector matches only the PEM header,
+> not the key body, and the generic high-entropy rule (≥20 chars, ≥4.0 bits/char) does not fire on
+> an ordinary low-entropy credential such as `db_password = "correct-horse-battery"`. This is
+> pre-existing, deliberate anti-over-redaction behavior in `redact.py`, not a regression from this
+> round — but this round is what makes the LLM-egress boundary depend on it, so the limit is
+> recorded here and in `docs/SPEC.md` §11.4 rather than left implicit.
 
 ---
 
@@ -791,8 +808,9 @@ live Python shell against this repo's actual `.venv` before being logged):**
 - **Confirmed no test covers this shape** in `test_bazel.py`, `test_graph_sequence.py`, or
   `test_collisions_wiring.py`.
 
-**Status:** OPEN (was CLOSED for the original "deliberate, tested, dropped" behavior; the misparse
-sub-finding is a live, untested, confirmed-real defect, independently reproduced).
+**Status:** FIXED (2026-09-15, round VII task 11, `74dfbd3` — see the dated status update below)
+(was CLOSED for the original "deliberate, tested, dropped" behavior; the misparse
+sub-finding was a live, untested, confirmed-real defect, independently reproduced).
 
 **On remediation (not applied):** switching both regexes from `.match()` to `.fullmatch()` was
 verified by the subagent to preserve every currently-supported spec while converting a misparse
