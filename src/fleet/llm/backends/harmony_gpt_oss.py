@@ -39,9 +39,10 @@ of `invoke()`.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
-from typing import ClassVar, Final, cast
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import ClassVar, Final, Protocol, cast
 
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
 from openai_harmony import (
     Conversation,
     DeveloperContent,
@@ -62,14 +63,14 @@ from fleet.llm.client import (
     LlmError,
     Message,
     ModelBackend,
-    TransportError,  # noqa: F401  (unused until Task 6 wires the completions transport)
+    TransportError,
     register_backend,
 )
 from fleet.models.enums import StructuredOutputMode
 from fleet.models.tasks import (
     BackendTarget,
     ModelCapabilities,
-    TokenUsage,  # noqa: F401  (unused until Task 6 wires the completions transport)
+    TokenUsage,
 )
 from fleet.vcs.apply_patch import (
     DiffError,
@@ -462,6 +463,84 @@ class MalformedHarmonyStream(LlmError):
     matching `openai_compatible.py::UnmappedFinishReason`'s identical reasoning)."""
 
 
+class TokenCompletionTransport(Protocol):
+    """One round trip to vLLM's completions endpoint, token ids in and out. The seam exists so
+    the encode/decode logic above is exercised without a socket, matching
+    `openai_compatible.py::ChatTransport`'s identical reasoning — the ONLY difference from that
+    Protocol is that this one speaks token ids, never a chat-completions JSON body."""
+
+    async def __call__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model_id: str,
+        prompt_token_ids: Sequence[int],
+        stop_token_ids: Sequence[int],
+        max_tokens: int,
+        timeout_s: float,
+    ) -> Mapping[str, object]: ...
+
+
+_PLACEHOLDER_API_KEY: Final[str] = "not-required"
+
+
+class _VllmCompletionsTransport:
+    """The ONLY object in this module that imports `openai` for the completions call. Reuses the
+    `openai` SDK's LEGACY `client.completions` resource — NOT `client.chat.completions`, which
+    speaks chat-message JSON — because that resource's `prompt` accepts a list of integers. See
+    this task's module-level design note for exactly what is verified vs. assumed about vLLM's
+    own wire contract."""
+
+    async def __call__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model_id: str,
+        prompt_token_ids: Sequence[int],
+        stop_token_ids: Sequence[int],
+        max_tokens: int,
+        timeout_s: float,
+    ) -> Mapping[str, object]:
+        client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout_s, max_retries=2)
+        create = cast(
+            Callable[..., Awaitable[object]],
+            client.completions.create,
+        )
+        try:
+            response = await create(
+                model=model_id,
+                prompt=list(prompt_token_ids),
+                max_tokens=max_tokens,
+                extra_body={"stop_token_ids": list(stop_token_ids), "skip_special_tokens": False},
+            )
+        except APITimeoutError as exc:
+            raise TransportError(f"{base_url}: {exc}", trigger="CONNECTION") from exc
+        except APIConnectionError as exc:
+            raise TransportError(f"{base_url}: {exc}", trigger="CONNECTION") from exc
+        except RateLimitError as exc:
+            raise TransportError(f"{base_url}: {exc}", trigger="RATE_LIMIT") from exc
+        except APIStatusError as exc:
+            if exc.status_code >= 500:
+                raise TransportError(
+                    f"{base_url}: HTTP {exc.status_code}: {exc}", trigger="SERVER_ERROR",
+                ) from exc
+            raise LlmError(f"{base_url}: HTTP {exc.status_code}: {exc}") from exc
+        finally:
+            await client.close()
+
+        choice = response.choices[0]  # type: ignore[attr-defined]
+        text = choice.text or ""
+        encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+        token_ids = encoding.encode(text, allowed_special="all")
+        finish_reason = "length" if choice.finish_reason == "length" else "stop"
+        return {"token_ids": token_ids, "finish_reason": finish_reason, "stop_reason": None}
+
+
+_DEFAULT_TRANSPORT: Final[TokenCompletionTransport] = _VllmCompletionsTransport()
+
+
 @register_backend
 class HarmonyGptOssBackend:
     """`ModelBackend` for GPT-OSS over Harmony. Stateless per call: the endpoint comes off the
@@ -469,6 +548,13 @@ class HarmonyGptOssBackend:
 
     name: ClassVar[str] = "harmony_gpt_oss"
     version: ClassVar[int] = 1
+
+    def __init__(self, transport: TokenCompletionTransport | None = None) -> None:
+        """`register_backend` constructs this with `cls()`, so the collaborator is NOT stored on
+        `self` in the registered case (`vars(inst) == {}`, SPEC §12 item 47) — `invoke` resolves
+        the shared default lazily instead, matching `vertex.py.__init__`'s identical pattern."""
+        if transport is not None:
+            self._transport = transport
 
     def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
         """Declared, never probed. Validates the target's own required field FIRST (§13 row 36),
@@ -479,14 +565,64 @@ class HarmonyGptOssBackend:
     async def invoke(
         self,
         target: BackendTarget,
-        messages: object,
+        messages: Sequence[Message],
         schema: dict[str, object] | None,
         mode: StructuredOutputMode,
         *,
         max_output_tokens: int,
         timeout_s: float,
     ) -> BackendReply:
-        raise NotImplementedError("wired in Task 4/5/6")
+        """One turn out, one turn back. See `ModelBackend.invoke`: no validation, no retry on a
+        schema failure, no decision taken from `finish_reason`."""
+        base_url = _require_base_url(target)
+        conversation = build_conversation(target, messages, schema)
+        prompt_token_ids = render_for_completion(conversation)
+        encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+        transport = getattr(self, "_transport", _DEFAULT_TRANSPORT)
+        raw = await transport(
+            base_url=base_url,
+            api_key=_PLACEHOLDER_API_KEY,
+            model_id=target.model_id,
+            prompt_token_ids=prompt_token_ids,
+            stop_token_ids=encoding.stop_tokens(),
+            max_tokens=max_output_tokens,
+            timeout_s=timeout_s,
+        )
+        token_ids = raw.get("token_ids")
+        if not isinstance(token_ids, Sequence):
+            raise TransportError(
+                f"{base_url}: harmony_gpt_oss transport returned no token_ids",
+                trigger="SERVER_ERROR",
+            )
+        pre_images = _extract_pre_images(messages)
+        text, tool_arguments, decoded_finish_reason = parse_completion(
+            list(token_ids), schema, pre_images=pre_images,
+        )
+        finish_reason: FinishReason = (
+            "length" if raw.get("finish_reason") == "length" else decoded_finish_reason
+        )
+        return BackendReply(
+            text=text,
+            tool_arguments=tool_arguments,
+            usage=TokenUsage(backend=HarmonyGptOssBackend.name, model_id=target.model_id),
+            finish_reason=finish_reason,
+        )
+
+
+def _extract_pre_images(messages: Sequence[Message]) -> dict[str, str]:
+    """Pull `` ```path:<path>\\n<content>\\n``` `` fenced blocks out of every message's content —
+    see this task's design note on where `apply_patch` pre-images come from. This is a Fleet-side
+    convention this plan introduces (no existing worker emits it yet); confirm or replace it in a
+    follow-up review before wiring a real diff-bearing role at this backend (CLAUDE.md's
+    directive-authority rule: this is an Agent Recommendation, not a directive)."""
+    import re
+
+    pattern = re.compile(r"```path:(?P<path>[^\n]+)\n(?P<content>.*?)```", re.DOTALL)
+    images: dict[str, str] = {}
+    for message in messages:
+        for match in pattern.finditer(message.content):
+            images[match.group("path")] = match.group("content")
+    return images
 
 
 def _require_base_url(target: BackendTarget) -> str:

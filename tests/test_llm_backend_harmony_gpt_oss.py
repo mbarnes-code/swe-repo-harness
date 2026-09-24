@@ -11,6 +11,7 @@ Coroutines are driven with `asyncio.run`, matching every other backend test file
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import subprocess
 import sys
@@ -398,3 +399,141 @@ def test_parse_completion_reads_the_final_channel_as_plain_text_when_no_tool_cal
     assert text == "Hello, human."
     assert tool_arguments is None
     assert finish_reason == "stop"
+
+
+class _FakeTransport:
+    """Records what it was called with; returns a canned RawCompletion-shaped mapping."""
+
+    def __init__(self, response: dict[str, object]) -> None:
+        self.response = response
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model_id: str,
+        prompt_token_ids,
+        stop_token_ids,
+        max_tokens: int,
+        timeout_s: float,
+    ) -> dict[str, object]:
+        self.calls.append(
+            {
+                "base_url": base_url,
+                "api_key": api_key,
+                "model_id": model_id,
+                "prompt_token_ids": list(prompt_token_ids),
+                "stop_token_ids": list(stop_token_ids),
+                "max_tokens": max_tokens,
+                "timeout_s": timeout_s,
+            },
+        )
+        return self.response
+
+
+def _fixture_completion_tokens(assistant_messages) -> list[int]:
+    """Deviation from the brief's literal body (documented here, matching the same-shaped
+    deviations recorded in task-4-5-report.md): the brief's literal
+    `encoding.render_conversation(Conversation.from_messages(assistant_messages))` reproduces the
+    exact leading-`<|start|>assistant`-header bug this file's own `_encode_assistant_reply`
+    docstring already diagnoses and fixes above — measured directly: it raised
+    `MalformedHarmonyStream` (`unexpected tokens remaining in message header:
+    Some("<|start|>assistant")`) rather than round-tripping. Delegates to the already-fixed
+    `_encode_assistant_reply` instead of re-introducing the bug a second time in this file."""
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    return _encode_assistant_reply(assistant_messages, encoding)
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_invoke_round_trips_through_a_fake_transport() -> None:
+    from openai_harmony import Message as HMessage
+    from openai_harmony import Role
+
+    from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
+    from fleet.llm.client import Message
+    from fleet.models.enums import StructuredOutputMode
+
+    reply_json = (
+        '{"ecosystem": "python", "is_library": false, "confidence": 0.9, "rationale": "obvious"}'
+    )
+    reply = (
+        HMessage.from_role_and_content(Role.ASSISTANT, reply_json)
+        .with_channel("commentary")
+        .with_recipient("functions.emit_response")
+    )
+    token_ids = _fixture_completion_tokens([reply])
+    transport = _FakeTransport(
+        {"token_ids": token_ids, "finish_reason": "stop", "stop_reason": 200012},
+    )
+
+    backend = HarmonyGptOssBackend(transport=transport)
+    result = asyncio.run(
+        backend.invoke(
+            target(),
+            (Message(role="user", content="Classify this repo."),),
+            REPO_CLASSIFICATION_SCHEMA,
+            StructuredOutputMode.TOOL_CALL,
+            max_output_tokens=512,
+            timeout_s=30.0,
+        ),
+    )
+    assert result.tool_arguments == {
+        "ecosystem": "python",
+        "is_library": False,
+        "confidence": 0.9,
+        "rationale": "obvious",
+    }
+    assert result.finish_reason == "tool_call"
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["model_id"] == target().model_id
+    assert transport.calls[0]["max_tokens"] == 512
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_invoke_maps_a_length_finish_reason() -> None:
+    """Deviation from the brief's literal hardcoded `token_ids: [200006, 173781]` (documented
+    here, same class of deviation as `_fixture_completion_tokens` above): those two raw ints do
+    not form even a truncated-but-valid Harmony message — measured directly, they raise
+    `MalformedHarmonyStream` ("Unexpected EOS while waiting for message header to complete"), not
+    a parseable partial reply. A real vLLM `length` truncation cuts a token stream off before its
+    terminal `<|end|>`/`<|return|>` token while everything before that is well-formed, so the
+    fixture here builds a real one-message stream via the SDK and drops exactly its trailing stop
+    token — confirmed to still parse correctly under `strict=False`."""
+    from openai_harmony import Message as HMessage
+    from openai_harmony import Role
+
+    from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
+    from fleet.llm.client import Message
+    from fleet.models.enums import StructuredOutputMode
+
+    reply = HMessage.from_role_and_content(Role.ASSISTANT, "hello world").with_channel("final")
+    full_tokens = _fixture_completion_tokens([reply])
+    truncated_tokens = full_tokens[:-1]  # drop the trailing stop token: a "length" cutoff
+
+    transport = _FakeTransport(
+        {"token_ids": truncated_tokens, "finish_reason": "length", "stop_reason": None},
+    )
+    backend = HarmonyGptOssBackend(transport=transport)
+    result = asyncio.run(
+        backend.invoke(
+            target(),
+            (Message(role="user", content="hi"),),
+            None,
+            StructuredOutputMode.PROMPTED,
+            max_output_tokens=8,
+            timeout_s=30.0,
+        ),
+    )
+    assert result.finish_reason == "length"
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_default_constructed_backend_leaves_no_instance_state() -> None:
+    """SPEC §12 item 47: `register_backend`'s `cls()` call must leave `vars(inst) == {}`."""
+    from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
+
+    assert vars(HarmonyGptOssBackend()) == {}
