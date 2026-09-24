@@ -639,6 +639,25 @@ def test_an_uninstalled_backend_extra_is_named_in_the_message(tmp_path: Path) ->
     assert "not installed" in message
 
 
+def test_an_uninstalled_harmony_extra_is_named_in_the_message(tmp_path: Path) -> None:
+    """Mirrors `test_an_uninstalled_backend_extra_is_named_in_the_message` for the new backend."""
+    models = MODELS_YAML.replace(
+        CHEAP_TARGET,
+        "    CHEAP:\n"
+        "      - { backend: harmony_gpt_oss, model_id: gpt-oss-120b, price: free,\n"
+        "          base_url: 'http://pilot-spark.internal:8000/v1' }\n",
+    )
+    with pytest.raises(UnresolvedReferenceError) as excinfo:
+        load(
+            write_config(tmp_path, models=models),
+            known_backends=("anthropic", "openai_compatible"),
+        )
+
+    message = str(excinfo.value)
+    assert "fleet[harmony]" in message
+    assert "not installed" in message
+
+
 def test_a_typod_backend_is_not_reported_as_a_missing_extra(tmp_path: Path) -> None:
     """The other half: `anthropik` is a typo, not an uninstalled SDK. Telling the operator to
     `pip install` it would send them after a package that does not exist.

@@ -104,7 +104,13 @@ MODELS_SECTION: Final = "models_profile"
 #: error until the active profile names it). `FleetSettings.load(known_backends=...)` injects the
 #: live registry's keys when there is one; this tuple is the default so the loader can still refuse
 #: a typo'd `backend` on a host with no SDKs installed.
-SHIPPED_BACKENDS: Final[tuple[str, ...]] = ("anthropic", "openai_compatible", "bedrock", "vertex")
+SHIPPED_BACKENDS: Final[tuple[str, ...]] = (
+    "anthropic",
+    "openai_compatible",
+    "bedrock",
+    "vertex",
+    "harmony_gpt_oss",
+)
 
 #: Backends that ship behind a `[project.optional-dependencies]` extra (pyproject.toml), mapped to
 #: the extra's name. Such a backend failing to register is an uninstalled SDK, NOT a typo — the
@@ -112,7 +118,11 @@ SHIPPED_BACKENDS: Final[tuple[str, ...]] = ("anthropic", "openai_compatible", "b
 #: A `SHIPPED_BACKENDS` name ABSENT here ships on a core dependency rather than an extra, which
 #: the gate reports differently again. Both halves are bound to pyproject by
 #: `test_backend_extras_matches_pyproject` -- edit the manifest and this table together.
-_BACKEND_EXTRAS: Final[Mapping[str, str]] = {"bedrock": "bedrock", "vertex": "vertex"}
+_BACKEND_EXTRAS: Final[Mapping[str, str]] = {
+    "bedrock": "bedrock",
+    "vertex": "vertex",
+    "harmony_gpt_oss": "harmony",
+}
 
 #: §9 rule 2 / §13 row 36: each backend validates its own target fields.
 _REQUIRED_TARGET_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
