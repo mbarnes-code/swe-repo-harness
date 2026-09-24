@@ -260,8 +260,11 @@ def _writer_imports(source: str) -> list[str]:
     hits: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == _MODULE:
-            hits += [f"{node.lineno}: from {_MODULE} import {a.name}"
-                     for a in node.names if a.name in _WRITERS or a.name == "*"]
+            hits += [
+                f"{node.lineno}: from {_MODULE} import {a.name}"
+                for a in node.names
+                if a.name in _WRITERS or a.name == "*"
+            ]
         elif isinstance(node, ast.ImportFrom) and node.module == "fleet.vcs":
             module_aliases |= {a.asname or a.name for a in node.names if a.name == "apply_patch"}
         elif isinstance(node, ast.Import):
