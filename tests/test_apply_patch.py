@@ -242,3 +242,72 @@ def test_commit_to_file_edits_round_trips_through_a_real_git_apply(tmp_path) -> 
     assert (repo / "src" / "main.py").read_text(encoding="utf-8") == (
         'def greet():\n    print("Hello, world!")\n'
     )
+
+
+_WRITERS = frozenset({"apply_commit", "apply_patch", "write_file", "remove_file"})
+_MODULE = "fleet.vcs.apply_patch"
+
+
+def _writer_imports(source: str) -> list[str]:
+    """Every way `source` reaches one of `_WRITERS` in `fleet.vcs.apply_patch`: a `from <module>
+    import <writer>`, or an attribute `<alias>.<writer>` on a name bound to the module by
+    `import fleet.vcs.apply_patch [as X]` / `from fleet.vcs import apply_patch [as X]`. Read from
+    the AST, so a comment or string mentioning a writer is not an import."""
+    import ast
+
+    tree = ast.parse(source)
+    module_aliases: set[str] = set()
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == _MODULE:
+            hits += [f"{node.lineno}: from {_MODULE} import {a.name}"
+                     for a in node.names if a.name in _WRITERS or a.name == "*"]
+        elif isinstance(node, ast.ImportFrom) and node.module == "fleet.vcs":
+            module_aliases |= {a.asname or a.name for a in node.names if a.name == "apply_patch"}
+        elif isinstance(node, ast.Import):
+            module_aliases |= {a.asname or a.name for a in node.names if a.name == _MODULE}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in _WRITERS:
+            owner = ast.unparse(node.value)
+            if owner in module_aliases:
+                hits.append(f"{node.lineno}: {owner}.{node.attr}")
+    return hits
+
+
+def test_nothing_under_src_but_apply_patch_itself_reaches_its_filesystem_writers() -> None:
+    """`git apply` is the harness's ONLY worktree writer; this module's `apply_commit`/
+    `apply_patch` and their default `write_file`/`remove_file` write straight to disk. The
+    module docstring states nothing else calls them — this enforces it instead of trusting it."""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src" / "fleet"
+    own = src / "vcs" / "apply_patch.py"
+    offenders = {
+        str(path.relative_to(src)): hits
+        for path in sorted(src.rglob("*.py"))
+        if path != own and (hits := _writer_imports(path.read_text(encoding="utf-8")))
+    }
+    assert offenders == {}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from fleet.vcs.apply_patch import apply_commit\n",
+        "from fleet.vcs.apply_patch import text_to_patch, write_file as w\n",
+        "from fleet.vcs.apply_patch import *\n",
+        "from fleet.vcs import apply_patch\napply_patch.apply_patch('x', open, print, print)\n",
+        "import fleet.vcs.apply_patch as ap\nap.remove_file('x')\n",
+    ],
+)
+def test_the_writer_sweep_fires_on_each_import_form(source: str) -> None:
+    assert _writer_imports(source)
+
+
+def test_the_writer_sweep_is_silent_on_the_pure_functions_comments_and_strings() -> None:
+    source = (
+        "from fleet.vcs.apply_patch import text_to_patch, patch_to_commit\n"
+        "# never call apply_commit here\n"
+        "NOTE = 'apply_patch.write_file is forbidden'\n"
+    )
+    assert _writer_imports(source) == []
