@@ -187,13 +187,58 @@ string argument (the patch text), not an object with a `patch` property — this
 how GPT-OSS was trained to call this specific tool, not a Fleet convention."""
 
 
+_LOCAL_DEFS_PREFIX: Final[str] = "#/$defs/"
+
+
+def _resolve_refs(schema: Mapping[str, object]) -> dict[str, object]:
+    """`schema` with every local `{"$ref": "#/$defs/X"}` replaced by a copy of `$defs.X` (nested
+    refs included), and the top-level `$defs` dropped once nothing points into it.
+
+    Pydantic v2's `model_json_schema()` emits a nested model as a `$ref` into `$defs` — which is
+    how every diff-bearing Fleet schema arrives here (`files.items` is
+    `{"$ref": "#/$defs/ProposedFileEdit"}`). Neither this module's structural detection nor
+    Harmony's tool-parameter TypeScript renderer follows a `$ref` (the renderer shows the field as
+    `any`), so both must see the inlined shape. Sibling keys next to a `$ref` (Pydantic puts a
+    field's `description` there) are merged over the resolved copy. A ref that is not a local
+    `$defs` pointer, names a missing entry, or is recursive (already being expanded on the current
+    path) is left in place untouched: this backend reports, it never raises on a schema's shape."""
+    defs_value = schema.get("$defs")
+    defs = defs_value if isinstance(defs_value, Mapping) else {}
+    unresolved: list[str] = []
+
+    def walk(node: object, expanding: frozenset[str]) -> object:
+        if isinstance(node, list):
+            return [walk(item, expanding) for item in node]
+        if not isinstance(node, Mapping):
+            return node
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith(_LOCAL_DEFS_PREFIX):
+            name = ref[len(_LOCAL_DEFS_PREFIX) :]
+            target = defs.get(name)
+            if isinstance(target, Mapping) and name not in expanding:
+                # walk() maps a Mapping to a dict, always.
+                resolved = cast(dict[str, object], walk(target, expanding | {name}))
+                siblings = {k: walk(v, expanding) for k, v in node.items() if k != "$ref"}
+                return {**resolved, **siblings}
+            unresolved.append(ref)
+        return {k: walk(v, expanding) for k, v in node.items()}
+
+    top = {k: v for k, v in schema.items() if k != "$defs"}
+    resolved_top = cast(dict[str, object], walk(top, frozenset()))
+    if unresolved and defs:
+        # A recursive local ref survived: keep `$defs` so it still points somewhere.
+        resolved_top["$defs"] = dict(defs)
+    return resolved_top
+
+
 def _file_edits_property(schema: Mapping[str, object]) -> str | None:
     """The name of the one top-level property shaped like `[{path: string, diff: string, ...}]`
     — the `ProposedFileEdit` shape every diff-bearing response schema uses
     (`src/fleet/llm/schemas.py:176-200`, `215-225`, `227-235`) — or `None` for an ordinary
     schema. Structural detection, not a hard-coded property name: this module never imports
-    `fleet.llm.schemas` (no backend does; a backend only ever sees the resolved JSON Schema)."""
-    properties = schema.get("properties")
+    `fleet.llm.schemas` (no backend does; a backend only ever sees the resolved JSON Schema).
+    Refs are resolved first — the real schemas carry `items` as a `$ref`, see `_resolve_refs`."""
+    properties = _resolve_refs(schema).get("properties")
     if not isinstance(properties, Mapping):
         return None
     for name, prop in properties.items():
@@ -267,27 +312,30 @@ def build_conversation(
     rest = [m for m in messages if m.role != "system"]
 
     instructions = "\n\n".join(systems) if systems else None
-    file_edits_property = _file_edits_property(schema) if schema is not None else None
+    # Refs resolved once, up front: Harmony's tool-parameter renderer does not follow `$ref`, so
+    # an unresolved nested model would reach the model as `any` (see `_resolve_refs`).
+    resolved = _resolve_refs(schema) if schema is not None else None
+    file_edits_property = _file_edits_property(resolved) if resolved is not None else None
 
     developer_content = DeveloperContent.new()
-    if file_edits_property is not None:
+    if resolved is not None and file_edits_property is not None:
         text = _APPLY_PATCH_INSTRUCTIONS
         if instructions:
             text = f"{instructions}\n\n{text}"
-        remaining = _remaining_schema(schema, file_edits_property)  # type: ignore[arg-type]
+        remaining = _remaining_schema(resolved, file_edits_property)
         if remaining["properties"]:
             text = f"{text}\n\n{_response_format_block(remaining)}"
         developer_content = developer_content.with_instructions(text).with_function_tools(
             [_APPLY_PATCH_TOOL],
         )
-    elif schema is not None:
+    elif resolved is not None:
         text = instructions or ""
         developer_content = developer_content.with_instructions(text).with_function_tools(
             [
                 ToolDescription.new(
                     _TOOL_NAME,
                     "Return the answer as this function's arguments.",
-                    parameters=dict(schema),
+                    parameters=resolved,
                 ),
             ],
         )

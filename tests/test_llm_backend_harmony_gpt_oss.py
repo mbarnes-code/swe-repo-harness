@@ -176,6 +176,49 @@ def test_file_edits_property_is_none_for_an_ordinary_schema() -> None:
 
 
 @pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@pytest.mark.parametrize(
+    "model_name", ["LlmPatchProposal", "ApiRewriteProposal", "LlmEscalationProposal"],
+)
+def test_file_edits_property_finds_files_in_the_real_pydantic_schemas(model_name: str) -> None:
+    """The REAL `model_json_schema()` output, not a hand-inlined fixture: Pydantic emits
+    `files.items` as `{"$ref": "#/$defs/ProposedFileEdit"}`, which the hand-inlined
+    `LLM_PATCH_PROPOSAL_SCHEMA` above never exercised — the diff-shaped path was dead code in
+    production while that fixture's test passed."""
+    from fleet.llm import schemas
+    from fleet.llm.backends.harmony_gpt_oss import _file_edits_property
+
+    schema = getattr(schemas, model_name).model_json_schema()
+    assert schema["properties"]["files"]["items"] == {"$ref": "#/$defs/ProposedFileEdit"}
+    assert _file_edits_property(schema) == "files"
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_emit_response_renders_a_nested_models_real_shape_not_any() -> None:
+    """Harmony's tool-parameter renderer does not follow `$ref`; unresolved, a nested model's
+    field reaches the model as `any[]`."""
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+    from pydantic import BaseModel
+
+    from fleet.llm.backends.harmony_gpt_oss import build_conversation, render_for_completion
+    from fleet.llm.client import Message
+
+    class Inner(BaseModel):
+        name: str
+
+    class Outer(BaseModel):
+        items: list[Inner]
+
+    schema = Outer.model_json_schema()
+    assert "$defs" in schema
+    convo = build_conversation(target(), (Message(role="user", content="hi"),), schema)
+    rendered = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS).decode(
+        render_for_completion(convo),
+    )
+    assert "items: any[]" not in rendered
+    assert "name: string" in rendered
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
 def test_build_conversation_renders_to_a_nonempty_token_sequence() -> None:
     from fleet.llm.backends.harmony_gpt_oss import build_conversation, render_for_completion
     from fleet.llm.client import Message
