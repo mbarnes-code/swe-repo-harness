@@ -124,3 +124,140 @@ def test_the_declaration_is_a_copy_not_shared_module_state() -> None:
     first.max_context = 999_999  # type: ignore[misc]  # FleetModel allows assignment
     second = backend.declared_capabilities(target())
     assert second.max_context != 999_999
+
+
+LLM_PATCH_PROPOSAL_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "title": "LlmPatchProposal",
+    "properties": {
+        "files": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "diff": {"type": "string"},
+                },
+                "required": ["path", "diff"],
+            },
+        },
+        "approach_summary": {"type": "string"},
+        "rationale": {"type": "string"},
+    },
+    "required": ["files", "approach_summary", "rationale"],
+}
+
+REPO_CLASSIFICATION_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "title": "RepoClassification",
+    "properties": {
+        "ecosystem": {"type": "string"},
+        "is_library": {"type": "boolean"},
+        "confidence": {"type": "number"},
+        "rationale": {"type": "string"},
+    },
+    "required": ["ecosystem", "is_library", "confidence", "rationale"],
+}
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_file_edits_property_finds_the_diff_shaped_array() -> None:
+    from fleet.llm.backends.harmony_gpt_oss import _file_edits_property
+
+    assert _file_edits_property(LLM_PATCH_PROPOSAL_SCHEMA) == "files"
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_file_edits_property_is_none_for_an_ordinary_schema() -> None:
+    from fleet.llm.backends.harmony_gpt_oss import _file_edits_property
+
+    assert _file_edits_property(REPO_CLASSIFICATION_SCHEMA) is None
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_build_conversation_renders_to_a_nonempty_token_sequence() -> None:
+    from fleet.llm.backends.harmony_gpt_oss import build_conversation, render_for_completion
+    from fleet.llm.client import Message
+
+    messages = (
+        Message(role="system", content="Be terse."),
+        Message(role="user", content="Rewrite src/app.py to fix the bug."),
+    )
+    convo = build_conversation(target(), messages, LLM_PATCH_PROPOSAL_SCHEMA)
+    tokens = render_for_completion(convo)
+    assert isinstance(tokens, list)
+    assert len(tokens) > 0
+    assert all(isinstance(t, int) for t in tokens)
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_build_conversation_for_an_ordinary_schema_offers_no_apply_patch_tool() -> None:
+    """The developer message's rendered tokens must not contain the literal `apply_patch`
+    identifier when the schema is not diff-shaped — proven by encoding that literal string and
+    checking it is not a substring of the decoded developer-message text, not by inspecting SDK
+    internals."""
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+
+    from fleet.llm.backends.harmony_gpt_oss import build_conversation, render_for_completion
+    from fleet.llm.client import Message
+
+    messages = (Message(role="user", content="Classify this repo."),)
+    convo = build_conversation(target(), messages, REPO_CLASSIFICATION_SCHEMA)
+    tokens = render_for_completion(convo)
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    rendered_text = encoding.decode(tokens)
+    assert "apply_patch" not in rendered_text
+    assert "emit_response" in rendered_text
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_build_conversation_for_a_diff_shaped_schema_offers_apply_patch() -> None:
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+
+    from fleet.llm.backends.harmony_gpt_oss import build_conversation, render_for_completion
+    from fleet.llm.client import Message
+
+    messages = (Message(role="user", content="Fix the bug in src/app.py."),)
+    convo = build_conversation(target(), messages, LLM_PATCH_PROPOSAL_SCHEMA)
+    tokens = render_for_completion(convo)
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    rendered_text = encoding.decode(tokens)
+    assert "apply_patch" in rendered_text
+    assert "Begin Patch" in rendered_text  # from _APPLY_PATCH_INSTRUCTIONS
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_effort_none_omits_the_reasoning_line_entirely() -> None:
+    """Mirrors `vertex.py`'s `effort` rule: `None` means the operator wrote no preference, and
+    this backend must send no `Reasoning:` line at all rather than the SDK's own MEDIUM default."""
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+
+    from fleet.llm.backends.harmony_gpt_oss import build_conversation, render_for_completion
+    from fleet.llm.client import Message
+
+    messages = (Message(role="user", content="hi"),)
+    convo = build_conversation(target(effort=None), messages, REPO_CLASSIFICATION_SCHEMA)
+    tokens = render_for_completion(convo)
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    assert "Reasoning:" not in encoding.decode(tokens)
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_effort_high_renders_the_reasoning_line() -> None:
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+
+    from fleet.llm.backends.harmony_gpt_oss import build_conversation, render_for_completion
+    from fleet.llm.client import Message
+
+    messages = (Message(role="user", content="hi"),)
+    convo = build_conversation(target(effort="high"), messages, REPO_CLASSIFICATION_SCHEMA)
+    tokens = render_for_completion(convo)
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    # Deviation from the brief's literal assertion (documented in task-4-5-report.md): the
+    # brief's `"Reasoning: high" in decode(tokens).lower() or "Reasoning: High" in decode(tokens)`
+    # is unsatisfiable for ANY rendering — the first branch lowercases the haystack so a
+    # capital-R needle can never match, and the measured SDK output is "Reasoning: high" (capital
+    # R, lowercase "high"), which the second branch also misses. Rewritten as a single
+    # case-insensitive check that preserves the test's intent (the reasoning line is present and
+    # names "high") without guessing the SDK's exact capitalization.
+    assert "reasoning: high" in encoding.decode(tokens).lower()

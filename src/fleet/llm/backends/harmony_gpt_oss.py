@@ -38,27 +38,25 @@ of `invoke()`.
 
 from __future__ import annotations
 
-from typing import ClassVar, Final
+from collections.abc import Mapping, Sequence
+from typing import ClassVar, Final, cast
 
-from openai_harmony import (  # noqa: F401  (re-exported names used by Task 4/5)
-    Author,
+from openai_harmony import (
     Conversation,
     DeveloperContent,
     HarmonyEncodingName,
+    ReasoningEffort,
     Role,
     SystemContent,
     ToolDescription,
     load_harmony_encoding,
 )
-from openai_harmony import (
-    Message as HarmonyMessage,  # noqa: F401  (re-exported name used by Task 4/5)
-)
 
 from fleet.llm.client import (
     BackendReply,
-    FinishReason,  # noqa: F401  (unused until Task 4/6 wire invoke(); see module docstring)
+    FinishReason,  # noqa: F401  (unused until Task 5/6 wire invoke(); see module docstring)
     LlmError,
-    Message,  # noqa: F401  (unused until Task 4/6 wire invoke(); see module docstring)
+    Message,
     ModelBackend,
     TransportError,  # noqa: F401  (unused until Task 6 wires the completions transport)
     register_backend,
@@ -87,6 +85,221 @@ _DECLARED: Final[ModelCapabilities] = ModelCapabilities(
 ADR-0145). `max_context`/`max_output_tokens` are the `ModelCapabilities` defaults, genuinely
 unverified numbers pending a real Spark endpoint — raised per-target via `capabilities_override`
 once measured, matching `config/models.yaml`'s `local` profile precedent."""
+
+
+_TOOL_NAME: Final[str] = "emit_response"
+"""The ordinary generic tool name for a non-diff-shaped schema — matches
+`openai_compatible.py:72` and `vertex.py:92` exactly, so a reader who knows either backend
+recognises this one immediately."""
+
+_APPLY_PATCH_TOOL_NAME: Final[str] = "apply_patch"
+
+_REASONING_EFFORT: Final[Mapping[str, ReasoningEffort]] = {
+    "low": ReasoningEffort.LOW,
+    "medium": ReasoningEffort.MEDIUM,
+    "high": ReasoningEffort.HIGH,
+}
+
+# Vendored VERBATIM from references/gpt-oss/gpt_oss/tools/apply_patch.md (read-only reference;
+# this is our own copy under src/, per CLAUDE.md guardrail "never reference references/ at
+# runtime" — see this module's Global Constraints entry). Keep in sync by hand if that file's
+# prose ever changes upstream; nothing here auto-syncs it.
+_APPLY_PATCH_INSTRUCTIONS: Final[str] = """When requested to perform coding-related tasks, you \
+MUST adhere to the following criteria when executing the task:
+
+- Use `apply_patch` to edit files.
+- If completing the user's task requires writing or modifying files:
+  - Your code and final answer should follow these _CODING GUIDELINES_:
+    - Avoid unneeded complexity in your solution. Minimize program size.
+    - Keep changes consistent with the style of the existing codebase. Changes should be \
+minimal and focused on the task.
+    - NEVER add copyright or license headers unless specifically requested.
+- Never implement function stubs. Provide complete working implementations.
+
+§ `apply_patch` Specification
+
+Your patch language is a stripped-down, file-oriented diff format designed to be easy to \
+parse and safe to apply. You can think of it as a high-level envelope:
+
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
+
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of three headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Update File: <path> - patch an existing file in place (optionally with a rename).
+
+May be immediately followed by *** Move to: <new path> if you want to rename the file.
+Then one or more “hunks”, each introduced by @@ (optionally followed by a hunk header).
+Within a hunk each line starts with:
+
+- for inserted text,
+* for removed text, or
+  space ( ) for context.
+  At the end of a truncated hunk you can emit *** End of File.
+
+A full patch can combine several operations:
+
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+*** Move to: src/main.py
+@@ def greet():
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
+*** End Patch
+
+It is important to remember:
+
+- You must include a header with your intended action (Add/Delete/Update)
+- You must prefix new lines with `+` even when creating a new file
+"""
+
+_APPLY_PATCH_TOOL: Final[ToolDescription] = ToolDescription.new(
+    _APPLY_PATCH_TOOL_NAME,
+    "Patch a file",
+    parameters={
+        "type": "string",
+        "description": "Formatted patch code",
+        "default": "*** Begin Patch\n*** End Patch\n",
+    },
+)
+"""Mirrors `references/gpt-oss/gpt_oss/chat.py:114-124` exactly: `apply_patch` takes ONE raw
+string argument (the patch text), not an object with a `patch` property — this is a fact about
+how GPT-OSS was trained to call this specific tool, not a Fleet convention."""
+
+
+def _file_edits_property(schema: Mapping[str, object]) -> str | None:
+    """The name of the one top-level property shaped like `[{path: string, diff: string, ...}]`
+    — the `ProposedFileEdit` shape every diff-bearing response schema uses
+    (`src/fleet/llm/schemas.py:176-200`, `215-225`, `227-235`) — or `None` for an ordinary
+    schema. Structural detection, not a hard-coded property name: this module never imports
+    `fleet.llm.schemas` (no backend does; a backend only ever sees the resolved JSON Schema)."""
+    properties = schema.get("properties")
+    if not isinstance(properties, Mapping):
+        return None
+    for name, prop in properties.items():
+        if not isinstance(prop, Mapping) or prop.get("type") != "array":
+            continue
+        items = prop.get("items")
+        if not isinstance(items, Mapping):
+            continue
+        item_properties = items.get("properties")
+        if not isinstance(item_properties, Mapping):
+            continue
+        path_prop = item_properties.get("path")
+        diff_prop = item_properties.get("diff")
+        if (
+            isinstance(path_prop, Mapping)
+            and path_prop.get("type") == "string"
+            and isinstance(diff_prop, Mapping)
+            and diff_prop.get("type") == "string"
+        ):
+            return str(name)
+    return None
+
+
+def _remaining_schema(schema: Mapping[str, object], file_edits_property: str) -> dict[str, object]:
+    """`schema` with `file_edits_property` removed from both `properties` and `required` — the
+    part of the response the model must still answer in plain JSON on the `final` channel,
+    because `apply_patch` supplies the file-edits property instead (Task 5 merges the two)."""
+    properties_value = schema.get("properties")
+    properties = dict(properties_value) if isinstance(properties_value, Mapping) else {}
+    properties.pop(file_edits_property, None)
+    required_value = schema.get("required")
+    required = (
+        [r for r in required_value if r != file_edits_property]
+        if isinstance(required_value, list)
+        else []
+    )
+    remaining = {k: v for k, v in schema.items() if k not in ("properties", "required")}
+    remaining["properties"] = properties
+    remaining["required"] = required
+    return remaining
+
+
+def _response_format_block(remaining_schema: Mapping[str, object]) -> str:
+    """`# Response Formats` developer-message block, per
+    `references/harmony/docs/format.md:478-491`'s documented convention."""
+    import json
+
+    rendered = json.dumps(dict(remaining_schema), sort_keys=True)
+    return f"# Response Formats\n\n## response\n\n{rendered}"
+
+
+def build_conversation(
+    target: BackendTarget,
+    messages: Sequence[Message],
+    schema: Mapping[str, object] | None,
+) -> Conversation:
+    """Fleet's neutral `Message`s -> a Harmony `Conversation`: one `system` message (reasoning
+    effort, never fabricated when `target.effort is None` — mirrors `vertex.py`'s identical
+    `effort` rule), one `developer` message (instructions plus whichever tool this call offers),
+    then the rest of `messages` mapped role-for-role (`system` turns beyond the first are folded
+    into the developer instructions, matching how `client.py::_prepare_messages` already folds
+    multiple system turns for a backend with `supports_system_prompt=False`)."""
+    from openai_harmony import Message as HMessage
+
+    system_content = SystemContent.new()
+    system_content.reasoning_effort = (
+        _REASONING_EFFORT[target.effort] if target.effort is not None else None
+    )
+
+    convo_messages = [HMessage.from_role_and_content(Role.SYSTEM, system_content)]
+
+    systems = [m.content for m in messages if m.role == "system"]
+    rest = [m for m in messages if m.role != "system"]
+
+    instructions = "\n\n".join(systems) if systems else None
+    file_edits_property = _file_edits_property(schema) if schema is not None else None
+
+    developer_content = DeveloperContent.new()
+    if file_edits_property is not None:
+        text = _APPLY_PATCH_INSTRUCTIONS
+        if instructions:
+            text = f"{instructions}\n\n{text}"
+        remaining = _remaining_schema(schema, file_edits_property)  # type: ignore[arg-type]
+        if remaining["properties"]:
+            text = f"{text}\n\n{_response_format_block(remaining)}"
+        developer_content = developer_content.with_instructions(text).with_function_tools(
+            [_APPLY_PATCH_TOOL],
+        )
+    elif schema is not None:
+        text = instructions or ""
+        developer_content = developer_content.with_instructions(text).with_function_tools(
+            [
+                ToolDescription.new(
+                    _TOOL_NAME,
+                    "Return the answer as this function's arguments.",
+                    parameters=dict(schema),
+                ),
+            ],
+        )
+    else:
+        developer_content = developer_content.with_instructions(instructions or "")
+
+    convo_messages.append(HMessage.from_role_and_content(Role.DEVELOPER, developer_content))
+    for m in rest:
+        role = {"user": Role.USER, "assistant": Role.ASSISTANT, "tool": Role.TOOL}[m.role]
+        convo_messages.append(HMessage.from_role_and_content(role, m.content))
+
+    return Conversation.from_messages(convo_messages)
+
+
+def render_for_completion(conversation: Conversation) -> list[int]:
+    """`Conversation` -> token ids ready to post as `prompt` to vLLM's completions endpoint."""
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    # openai_harmony ships no py.typed marker (see this module's import-untyped note), so the SDK
+    # call resolves to Any; cast matches the sibling backends' own convention for an untyped SDK
+    # boundary (e.g. openai_compatible.py:257, vertex.py:346).
+    tokens = encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
+    return cast(list[int], tokens)
 
 
 class HarmonyTargetMisconfigured(LlmError):
