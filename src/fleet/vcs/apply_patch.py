@@ -488,8 +488,6 @@ def apply_commit(
                 remove_fn(path)
 
 
-# NEVER called with a real filesystem `write_fn`/`remove_fn` from product code — see this
-# module's docstring. Exercised only by tests/test_apply_patch.py against a tmp_path.
 def open_file(path: str) -> str:
     return pathlib.Path(path).read_text(encoding="utf-8")
 
@@ -552,10 +550,11 @@ def commit_to_file_edits(commit: Commit) -> list[dict[str, str]]:
     `{"path": ..., "diff": ...}`, each `diff` a `git apply`-ready unified diff and each `path` the
     POST-image path — the file that ends up on disk, matching `rewrite/apply.py::FileDiff.path`'s
     own "post-image path — what a validator must bound" convention. `Move to:` (a rename) is
-    represented the same way `rewrite/apply.py::check_diff`/`diff_paths` already accept from an
-    LLM-authored diff today: differing `---`/`+++` paths in ONE diff, no git-extended
-    `rename from`/`rename to` header needed — `parse_unified_diff` there works off the plain
-    `---`/`+++` lines alone.
+    represented using git's extended diff header (`diff --git`, `rename from`, `rename to`)
+    followed by standard `---`/`+++`/`@@` lines — compatible with both `git apply --index`
+    (production's behavior per `src/fleet/vcs/git.py:432`) and
+    `rewrite/apply.py::parse_unified_diff` (which tolerates `diff --git` and `index` preamble
+    lines per its own docstring).
 
     Order matches `commit.changes`' own insertion order (a plain `dict`, so Python 3.7+ preserves
     it), which is the order `text_to_patch` parsed the `*** Add/Update/Delete File:` sections in.
@@ -573,5 +572,8 @@ def commit_to_file_edits(commit: Commit) -> list[dict[str, str]]:
         elif change.type is ActionType.UPDATE:
             dest = change.move_path or path
             diff = _unified_diff(path, dest, change.old_content or "", change.new_content or "")
+            # For renames, prepend git's extended rename header for git apply compatibility
+            if path != dest:
+                diff = f"diff --git a/{path} b/{dest}\nrename from {path}\nrename to {dest}\n{diff}"
             edits.append({"path": dest, "diff": diff})
     return edits

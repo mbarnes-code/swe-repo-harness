@@ -182,7 +182,11 @@ def test_update_with_move_diffs_old_path_against_new_path() -> None:
     # The post-image path is src/main.py: no more entry keyed on the pre-image path.
     assert [e["path"] for e in edits] == ["src/main.py"]
     edit = edits[0]
-    assert edit["diff"].startswith("--- a/src/app.py\n+++ b/src/main.py\n")
+    # For renames, the diff includes git's extended rename header for git apply compatibility
+    assert edit["diff"].startswith("diff --git a/src/app.py b/src/main.py\n")
+    assert "rename from src/app.py\n" in edit["diff"]
+    assert "rename to src/main.py\n" in edit["diff"]
+    assert "--- a/src/app.py\n+++ b/src/main.py\n" in edit["diff"]
 
 
 def test_identical_before_and_after_still_produces_no_hunk_when_only_moved() -> None:
@@ -200,8 +204,9 @@ def test_identical_before_and_after_still_produces_no_hunk_when_only_moved() -> 
 
 def test_commit_to_file_edits_round_trips_through_a_real_git_apply(tmp_path) -> None:
     """The authoritative check (CLAUDE.md guardrail 6: verify in the environment that will run
-    it): a real `git apply` in a scratch repo. Tests the content changes; renames are handled
-    via path info in the returned dicts, not git-extended headers in the diff."""
+    it): a real `git apply --index` in a scratch repo, matching production's behavior
+    (src/fleet/vcs/git.py:432). Tests both content changes and renames via git's extended
+    rename headers."""
     import subprocess
 
     repo = tmp_path / "repo"
@@ -214,9 +219,9 @@ def test_commit_to_file_edits_round_trips_through_a_real_git_apply(tmp_path) -> 
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)  # noqa: S607
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)  # noqa: S607
 
-    # Test a simple UPDATE without move (content changes only) to verify git apply works
+    # Test UPDATE with move (rename + content changes) using git apply --index
     text = (
-        "*** Begin Patch\n*** Update File: src/app.py\n"
+        "*** Begin Patch\n*** Update File: src/app.py\n*** Move to: src/main.py\n"
         '@@ def greet():\n-    print("Hi")\n+    print("Hello, world!")\n*** End Patch'
     )
     orig = {"src/app.py": 'def greet():\n    print("Hi")\n'}
@@ -225,12 +230,15 @@ def test_commit_to_file_edits_round_trips_through_a_real_git_apply(tmp_path) -> 
     edits = commit_to_file_edits(commit)
     assert len(edits) == 1
     edit = edits[0]
+    assert edit["path"] == "src/main.py"
 
     patch_file = tmp_path / "the.patch"
     patch_file.write_text(edit["diff"], encoding="utf-8")
-    subprocess.run(["git", "apply", str(patch_file)], cwd=repo, check=True)  # noqa: S603, S607
+    # Use git apply --index, matching production's actual behavior
+    subprocess.run(["git", "apply", "--index", str(patch_file)], cwd=repo, check=True)  # noqa: S603, S607
 
-    # Verify the file was updated correctly
-    assert (repo / "src" / "app.py").read_text(encoding="utf-8") == (
+    # Verify the old path is gone and the new path has the correct content
+    assert not (repo / "src" / "app.py").exists()
+    assert (repo / "src" / "main.py").read_text(encoding="utf-8") == (
         'def greet():\n    print("Hello, world!")\n'
     )
