@@ -39,6 +39,7 @@ of `invoke()`.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import ClassVar, Final, Protocol, cast
 
@@ -570,6 +571,21 @@ class MissingBaseUrl(HarmonyTargetMisconfigured):
         )
 
 
+class MissingApiKey(HarmonyTargetMisconfigured):
+    """The target NAMES an `api_key_env` and the environment does not hold it — loud at the point
+    of use, exactly like `openai_compatible.py::MissingApiKey`. A target that needs no key omits
+    `api_key_env` and gets the placeholder."""
+
+    def __init__(self, target: BackendTarget, env_name: str) -> None:
+        super().__init__(
+            target,
+            "api_key_env",
+            f"names environment variable {env_name}, which is unset or empty; export it, or drop "
+            "`api_key_env` if this endpoint needs no key",
+        )
+        self.env_name = env_name
+
+
 class MalformedHarmonyStream(LlmError):
     """The completion's token stream did not parse as Harmony messages even under permissive
     (`strict=False`) parsing. Loud, typed, terminal — NOT a `TransportError`: the next target
@@ -671,12 +687,34 @@ class HarmonyGptOssBackend:
     name: ClassVar[str] = "harmony_gpt_oss"
     version: ClassVar[int] = 1
 
-    def __init__(self, transport: TokenCompletionTransport | None = None) -> None:
-        """`register_backend` constructs this with `cls()`, so the collaborator is NOT stored on
-        `self` in the registered case (`vars(inst) == {}`, SPEC §12 item 47) — `invoke` resolves
-        the shared default lazily instead, matching `vertex.py.__init__`'s identical pattern."""
+    def __init__(
+        self,
+        transport: TokenCompletionTransport | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
+        """`register_backend` constructs this with `cls()`, so neither collaborator is stored on
+        `self` in the registered case (`vars(inst) == {}`, SPEC §12 item 47) — `invoke`/`_api_key`
+        resolve the shared default transport and `os.environ` lazily instead, matching
+        `openai_compatible.py.__init__`'s identical pattern."""
         if transport is not None:
             self._transport = transport
+        if env is not None:
+            self._env = env
+
+    def _api_key(self, target: BackendTarget) -> str:
+        """`api_key_env` is a variable NAME (§11.4). Absent means "this endpoint needs no key" and
+        gets the placeholder; present-but-unset is a loud failure naming the variable — identical
+        to `openai_compatible.py::_api_key`."""
+        env_name = target.api_key_env
+        if not env_name:
+            return _PLACEHOLDER_API_KEY
+        environ = getattr(self, "_env", None)
+        if environ is None:
+            environ = os.environ
+        value = environ.get(env_name, "")
+        if not value:
+            raise MissingApiKey(target, env_name)
+        return value
 
     def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
         """Declared, never probed. Validates the target's own required field FIRST (§13 row 36),
@@ -704,13 +742,14 @@ class HarmonyGptOssBackend:
         channel. A diff-shaped invoke() may make 2 real transport calls internally; the harness's
         call-count ceiling (`run_max_llm_calls`, ADR-0142) only counts this as 1."""
         base_url = _require_base_url(target)
+        api_key = self._api_key(target)
         encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
         transport = getattr(self, "_transport", _DEFAULT_TRANSPORT)
 
         async def round_trip(conversation: Conversation) -> tuple[list[int], Mapping[str, object]]:
             raw = await transport(
                 base_url=base_url,
-                api_key=_PLACEHOLDER_API_KEY,
+                api_key=api_key,
                 model_id=target.model_id,
                 prompt_token_ids=render_for_completion(conversation),
                 stop_token_ids=encoding.stop_tokens_for_assistant_actions(),

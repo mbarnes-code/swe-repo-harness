@@ -766,6 +766,46 @@ def test_the_vllm_transport_carries_the_servers_usage_through_to_the_reply(
     assert result.usage.model_id == target().model_id
 
 
+def _invoke_with_env(target_: BackendTarget, env: dict[str, str]) -> _FakeTransport:
+    from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
+    from fleet.llm.client import Message
+    from fleet.models.enums import StructuredOutputMode
+
+    transport = _FakeTransport(
+        {"token_ids": _sampled_completion([_final("hi")]), "finish_reason": "stop"},
+    )
+    asyncio.run(
+        HarmonyGptOssBackend(transport=transport, env=env).invoke(
+            target_, (Message(role="user", content="hi"),), None,
+            StructuredOutputMode.PROMPTED, max_output_tokens=64, timeout_s=30.0,
+        ),
+    )
+    return transport
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_named_api_key_env_is_read_and_sent() -> None:
+    transport = _invoke_with_env(
+        target(api_key_env="PILOT_LLM_API_KEY"), {"PILOT_LLM_API_KEY": "sk-real"},
+    )
+    assert transport.calls[0]["api_key"] == "sk-real"
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_no_api_key_env_sends_the_placeholder() -> None:
+    transport = _invoke_with_env(target(), {"PILOT_LLM_API_KEY": "sk-real"})
+    assert transport.calls[0]["api_key"] == "not-required"
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_named_but_unset_api_key_env_fails_loud_naming_the_variable() -> None:
+    from fleet.llm.backends.harmony_gpt_oss import MissingApiKey
+
+    with pytest.raises(MissingApiKey) as excinfo:
+        _invoke_with_env(target(api_key_env="PILOT_LLM_API_KEY"), {})
+    assert "PILOT_LLM_API_KEY" in str(excinfo.value)
+
+
 @pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
 def test_a_diff_shaped_invoke_whose_patch_fails_to_decode_makes_no_second_call() -> None:
     bad = _apply_patch_call(_PATCH_TEXT.replace("src/app.py", "missing.py"))
