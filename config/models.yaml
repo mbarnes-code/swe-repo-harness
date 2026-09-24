@@ -148,20 +148,3 @@ profiles:
       - { backend: harmony_gpt_oss, model_id: PLACEHOLDER_gpt-oss-120b, effort: low,
           price: free,
           base_url: 'http://pilot-spark.internal:8000/v1' }
-    # PLACEHOLDER — both `model_id` and `base_url` MUST be edited once the Spark host is
-    # provisioned and the real served model name is known (ADR-0145; same treatment as
-    # `base_url` already had at the previous nemotron placeholder — this is not a new kind of
-    # incompleteness, only a renamed one). `model_id` is prefixed `PLACEHOLDER_` rather than a
-    # plausible-looking real name specifically so an operator who forgets to edit it gets a
-    # loud, obviously-wrong string in every log line and cache key, not a quietly wrong one.
-    #
-    # No `capabilities_override` on any tier: harmony_gpt_oss's own declared_capabilities()
-    # already claims TOOL_CALL unconditionally (a fact about the GPT-OSS model family, not this
-    # endpoint) — see that method's docstring in
-    # src/fleet/llm/backends/harmony_gpt_oss.py for why this differs from `local`'s
-    # openai_compatible targets, which DO need overrides to claim anything above the honest
-    # opaque-base_url floor.
-    #
-    # No `api_key_env` — same reasoning as `local`: unknown/unverified whether the eventual Spark
-    # server requires one. Add `api_key_env: PILOT_LLM_API_KEY` (a variable NAME, never a key) if
-    # the real server checks one.
