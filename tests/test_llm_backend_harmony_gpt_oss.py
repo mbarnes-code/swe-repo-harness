@@ -399,6 +399,43 @@ def test_parse_completion_decodes_an_ordinary_tool_call() -> None:
 
 
 @pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_single_property_schema_decodes_its_one_key_object() -> None:
+    """The REAL `PrTitle` schema (`pr_title` role). `apply_patch`'s 1-key-object unwrap once ran
+    on this path too and turned `{"title": ...}` into a bare string that decoded to `None`."""
+    from openai_harmony import Message as HMessage
+    from openai_harmony import Role
+
+    from fleet.llm.backends.harmony_gpt_oss import parse_completion
+    from fleet.llm.schemas import PrTitle
+
+    call = (
+        HMessage.from_role_and_content(Role.ASSISTANT, '{"title": "Migrate to Bazel"}')
+        .with_channel("commentary")
+        .with_recipient("functions.emit_response")
+    )
+    _, tool_arguments, _ = parse_completion(
+        _sampled_completion([call]), PrTitle.model_json_schema(), pre_images={},
+    )
+    assert tool_arguments == {"title": "Migrate to Bazel"}
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_an_apply_patch_call_wrapped_as_a_one_key_object_is_still_unwrapped() -> None:
+    import json
+
+    from fleet.llm.backends.harmony_gpt_oss import parse_completion
+
+    wrapped = _apply_patch_call(json.dumps({"input": _PATCH_TEXT}))
+    _, tool_arguments, _ = parse_completion(
+        _sampled_completion([wrapped]),
+        LLM_PATCH_PROPOSAL_SCHEMA,
+        pre_images={"src/app.py": 'def greet():\n    print("Hi")\n'},
+    )
+    assert tool_arguments is not None
+    assert tool_arguments["files"][0]["path"] == "src/app.py"
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
 def test_parse_completion_decodes_an_apply_patch_call_into_the_file_edits_property() -> None:
     """One completion carries ONLY the `apply_patch` half — it stops at `<|call|>`. (This test
     previously also put a `final` message in the same completion, built via

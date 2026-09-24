@@ -422,9 +422,19 @@ def _plain_text(parsed: Sequence[HarmonyMessage]) -> str | None:
 
 
 def _call_text(message: HarmonyMessage) -> str:
+    """A tool call's raw argument text, verbatim — what the generic `emit_response` path parses
+    as its JSON arguments object."""
     content = message.content[0]
     text = content.text if hasattr(content, "text") else ""
-    if isinstance(text, str) and text.startswith("{"):
+    return text if isinstance(text, str) else ""
+
+
+def _apply_patch_text(message: HarmonyMessage) -> str:
+    """An `apply_patch` call's patch text. `apply_patch` takes ONE raw string, so a 1-key JSON
+    object is unwrapped — ONLY here: applied to `emit_response`, it turned a single-property
+    schema's correct `{"title": "..."}` into a bare string that then failed `json.loads`."""
+    text = _call_text(message)
+    if text.startswith("{"):
         # Matches references/gpt-oss/gpt_oss/chat.py:199-206's own unwrap: some servers wrap a
         # single-string argument as {"<arg name>": "<value>"} JSON.
         try:
@@ -433,7 +443,7 @@ def _call_text(message: HarmonyMessage) -> str:
             return text
         if isinstance(parsed, dict) and len(parsed) == 1:
             return str(next(iter(parsed.values())))
-    return text if isinstance(text, str) else ""
+    return text
 
 
 def _decode_apply_patch(
@@ -478,7 +488,8 @@ def _apply_patch_turn(
     recipient = f"functions.{_APPLY_PATCH_TOOL_NAME}"
     for index, message in enumerate(parsed):
         if message.recipient == recipient:
-            return list(parsed[: index + 1]), _decode_apply_patch(_call_text(message), pre_images)
+            edits = _decode_apply_patch(_apply_patch_text(message), pre_images)
+            return list(parsed[: index + 1]), edits
     return None, None
 
 
