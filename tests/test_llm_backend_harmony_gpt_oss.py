@@ -261,3 +261,140 @@ def test_effort_high_renders_the_reasoning_line() -> None:
     # case-insensitive check that preserves the test's intent (the reasoning line is present and
     # names "high") without guessing the SDK's exact capitalization.
     assert "reasoning: high" in encoding.decode(tokens).lower()
+
+
+def _encode_assistant_reply(convo_messages, encoding) -> list[int]:
+    """Build a fixture token sequence via the SDK's own encode, never hand-written raw token ints.
+    `convo_messages` are the ASSISTANT-authored messages only.
+
+    Deviation from the brief's literal docstring claim (documented in task-4-5-report.md,
+    measured directly against the installed `openai-harmony` 0.0.8):
+    `encoding.render_conversation` does NOT omit a leading new-turn role marker for the first
+    message — it renders the FULL `<|start|>assistant<|channel|>...` header, identical to what
+    `render_conversation_for_completion` would put at the END of a prompt. A real vLLM completions
+    call never echoes that prompt-side
+    `<|start|>assistant` back in its returned completion tokens, so `parse_completion`'s
+    `encoding.parse_messages_from_completion_tokens(tokens, Role.ASSISTANT, ...)` (which tells the
+    parser "the first message's role marker is missing, assume assistant") corrupts on a token
+    stream that still has that marker attached (measured: the two-message fixture raised
+    `MalformedHarmonyStream`, and the one-message fixture silently produced a garbage
+    `recipient='<|start|>assistant'`). Strip exactly the tokens `render_conversation_for_completion`
+    would have appended for an empty, about-to-speak assistant turn -- computed, not hard-coded, so
+    it tracks the installed encoding rather than assuming a token count."""
+    from openai_harmony import Conversation, Role
+
+    full = encoding.render_conversation(Conversation.from_messages(convo_messages))
+    prompt_prefix = encoding.render_conversation_for_completion(
+        Conversation.from_messages([]), Role.ASSISTANT,
+    )
+    return full[len(prompt_prefix) :]
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_parse_completion_decodes_an_ordinary_tool_call() -> None:
+    from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
+    from openai_harmony import Message as HMessage
+
+    from fleet.llm.backends.harmony_gpt_oss import parse_completion
+
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    reply_json = (
+        '{"ecosystem": "python", "is_library": false, "confidence": 0.9, "rationale": "obvious"}'
+    )
+    reply = (
+        HMessage.from_role_and_content(Role.ASSISTANT, reply_json)
+        .with_channel("commentary")
+        .with_recipient("functions.emit_response")
+    )
+    tokens = _encode_assistant_reply([reply], encoding)
+
+    _, tool_arguments, finish_reason = parse_completion(
+        tokens, REPO_CLASSIFICATION_SCHEMA, pre_images={},
+    )
+    assert tool_arguments == {
+        "ecosystem": "python",
+        "is_library": False,
+        "confidence": 0.9,
+        "rationale": "obvious",
+    }
+    assert finish_reason == "tool_call"
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_parse_completion_decodes_an_apply_patch_call_into_the_file_edits_property() -> None:
+    from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
+    from openai_harmony import Message as HMessage
+
+    from fleet.llm.backends.harmony_gpt_oss import parse_completion
+
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    patch_text = (
+        "*** Begin Patch\n*** Update File: src/app.py\n@@ def greet():\n"
+        '-print("Hi")\n+print("Hello, world!")\n*** End Patch'
+    )
+    final = (
+        HMessage.from_role_and_content(
+            Role.ASSISTANT, '{"approach_summary": "fix greeting", "rationale": "typo"}',
+        ).with_channel("final")
+    )
+    call = (
+        HMessage.from_role_and_content(Role.ASSISTANT, patch_text)
+        .with_channel("commentary")
+        .with_recipient("functions.apply_patch")
+    )
+    tokens = _encode_assistant_reply([final, call], encoding)
+
+    _, tool_arguments, finish_reason = parse_completion(
+        tokens,
+        LLM_PATCH_PROPOSAL_SCHEMA,
+        pre_images={"src/app.py": 'def greet():\n    print("Hi")\n'},
+    )
+    assert tool_arguments is not None
+    assert tool_arguments["approach_summary"] == "fix greeting"
+    assert tool_arguments["rationale"] == "typo"
+    files = tool_arguments["files"]
+    assert isinstance(files, list) and len(files) == 1
+    assert files[0]["path"] == "src/app.py"
+    assert "Hello, world!" in files[0]["diff"]
+    assert finish_reason == "tool_call"
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_parse_completion_returns_none_arguments_when_apply_patch_names_a_missing_pre_image() \
+        -> None:
+    from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
+    from openai_harmony import Message as HMessage
+
+    from fleet.llm.backends.harmony_gpt_oss import parse_completion
+
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    patch_text = "*** Begin Patch\n*** Update File: missing.py\n@@\n-a\n+b\n*** End Patch"
+    call = (
+        HMessage.from_role_and_content(Role.ASSISTANT, patch_text)
+        .with_channel("commentary")
+        .with_recipient("functions.apply_patch")
+    )
+    tokens = _encode_assistant_reply([call], encoding)
+
+    _, tool_arguments, finish_reason = parse_completion(
+        tokens, LLM_PATCH_PROPOSAL_SCHEMA, pre_images={},
+    )
+    assert tool_arguments is None
+    assert finish_reason == "tool_call"
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_parse_completion_reads_the_final_channel_as_plain_text_when_no_tool_call() -> None:
+    from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
+    from openai_harmony import Message as HMessage
+
+    from fleet.llm.backends.harmony_gpt_oss import parse_completion
+
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    final = HMessage.from_role_and_content(Role.ASSISTANT, "Hello, human.").with_channel("final")
+    tokens = _encode_assistant_reply([final], encoding)
+
+    text, tool_arguments, finish_reason = parse_completion(tokens, None, pre_images={})
+    assert text == "Hello, human."
+    assert tool_arguments is None
+    assert finish_reason == "stop"

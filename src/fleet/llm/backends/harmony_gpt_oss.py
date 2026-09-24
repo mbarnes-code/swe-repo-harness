@@ -38,6 +38,7 @@ of `invoke()`.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import ClassVar, Final, cast
 
@@ -51,10 +52,13 @@ from openai_harmony import (
     ToolDescription,
     load_harmony_encoding,
 )
+from openai_harmony import (
+    Message as HarmonyMessage,
+)
 
 from fleet.llm.client import (
     BackendReply,
-    FinishReason,  # noqa: F401  (unused until Task 5/6 wire invoke(); see module docstring)
+    FinishReason,
     LlmError,
     Message,
     ModelBackend,
@@ -66,6 +70,13 @@ from fleet.models.tasks import (
     BackendTarget,
     ModelCapabilities,
     TokenUsage,  # noqa: F401  (unused until Task 6 wires the completions transport)
+)
+from fleet.vcs.apply_patch import (
+    DiffError,
+    commit_to_file_edits,
+    identify_files_needed,
+    patch_to_commit,
+    text_to_patch,
 )
 
 _MAX_CONTEXT: Final[int] = ModelCapabilities.model_fields["max_context"].default
@@ -227,8 +238,6 @@ def _remaining_schema(schema: Mapping[str, object], file_edits_property: str) ->
 def _response_format_block(remaining_schema: Mapping[str, object]) -> str:
     """`# Response Formats` developer-message block, per
     `references/harmony/docs/format.md:478-491`'s documented convention."""
-    import json
-
     rendered = json.dumps(dict(remaining_schema), sort_keys=True)
     return f"# Response Formats\n\n## response\n\n{rendered}"
 
@@ -300,6 +309,124 @@ def render_for_completion(conversation: Conversation) -> list[int]:
     # boundary (e.g. openai_compatible.py:257, vertex.py:346).
     tokens = encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
     return cast(list[int], tokens)
+
+
+def _tool_call_message(
+    parsed: Sequence[HarmonyMessage], recipient: str,
+) -> HarmonyMessage | None:
+    for message in parsed:
+        if message.recipient == recipient:
+            return message
+    return None
+
+
+def _final_channel_json(parsed: Sequence[HarmonyMessage]) -> dict[str, object] | None:
+    for message in parsed:
+        if message.channel != "final" or message.recipient is not None:
+            continue
+        if not message.content:
+            continue
+        text = message.content[0].text if hasattr(message.content[0], "text") else None
+        if not isinstance(text, str):
+            continue
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
+    return None
+
+
+def _plain_text(parsed: Sequence[HarmonyMessage]) -> str | None:
+    for message in parsed:
+        if message.channel == "final" and message.recipient is None and message.content:
+            content = message.content[0]
+            text = content.text if hasattr(content, "text") else None
+            if isinstance(text, str):
+                return text
+    return None
+
+
+def _call_text(message: HarmonyMessage) -> str:
+    content = message.content[0]
+    text = content.text if hasattr(content, "text") else ""
+    if isinstance(text, str) and text.startswith("{"):
+        # Matches references/gpt-oss/gpt_oss/chat.py:199-206's own unwrap: some servers wrap a
+        # single-string argument as {"<arg name>": "<value>"} JSON.
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if isinstance(parsed, dict) and len(parsed) == 1:
+            return str(next(iter(parsed.values())))
+    return text if isinstance(text, str) else ""
+
+
+def _decode_apply_patch(
+    patch_text: str, pre_images: Mapping[str, str],
+) -> list[dict[str, str]] | None:
+    """`apply_patch`-format text -> `[{"path", "diff"}]`, or `None` on ANY failure — a malformed
+    or unresolvable patch is reported as "no answer", never raised (§7.7: a backend decides
+    nothing, including never treating a mangled model reply as a hard failure)."""
+    needed_paths = identify_files_needed(patch_text)
+    if any(path not in pre_images for path in needed_paths):
+        return None
+    orig = {path: pre_images[path] for path in needed_paths}
+    try:
+        patch, _fuzz = text_to_patch(patch_text, orig)
+        commit = patch_to_commit(patch, orig)
+        return commit_to_file_edits(commit)
+    except DiffError:
+        return None
+
+
+def parse_completion(
+    tokens: Sequence[int],
+    schema: Mapping[str, object] | None,
+    *,
+    pre_images: Mapping[str, str],
+) -> tuple[str | None, dict[str, object] | None, FinishReason]:
+    """Completion token ids -> `(text, tool_arguments, finish_reason)`. Reports, decides nothing:
+    an unparseable or ambiguous reply comes back as `tool_arguments=None`, never an exception."""
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    try:
+        parsed = encoding.parse_messages_from_completion_tokens(
+            tokens, Role.ASSISTANT, strict=False,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise MalformedHarmonyStream(
+            f"completion token stream did not parse as Harmony messages: {exc}",
+        ) from exc
+
+    file_edits_property = _file_edits_property(schema) if schema is not None else None
+
+    if file_edits_property is not None:
+        call = _tool_call_message(parsed, "functions.apply_patch")
+        if call is None:
+            return _plain_text(parsed), None, "stop"
+        edits = _decode_apply_patch(_call_text(call), pre_images)
+        if edits is None:
+            return None, None, "tool_call"
+        other_fields = _final_channel_json(parsed) or {}
+        remaining = _remaining_schema(dict(schema), file_edits_property)  # type: ignore[arg-type]
+        required_value = remaining.get("required")
+        required = set(required_value) if isinstance(required_value, list) else set()
+        if not required.issubset(other_fields):
+            return None, None, "tool_call"
+        tool_arguments = {**other_fields, file_edits_property: edits}
+        return None, tool_arguments, "tool_call"
+
+    if schema is not None:
+        call = _tool_call_message(parsed, f"functions.{_TOOL_NAME}")
+        if call is None:
+            return _plain_text(parsed), None, "stop"
+        try:
+            arguments = json.loads(_call_text(call))
+        except json.JSONDecodeError:
+            return None, None, "tool_call"
+        return None, (arguments if isinstance(arguments, dict) else None), "tool_call"
+
+    return _plain_text(parsed), None, "stop"
 
 
 class HarmonyTargetMisconfigured(LlmError):
