@@ -25,6 +25,7 @@ against a `tmp_path` to prove parity with upstream, never against the real workt
 
 from __future__ import annotations
 
+import difflib
 import pathlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -521,3 +522,56 @@ def apply_patch(
     commit = patch_to_commit(patch, orig)
     apply_commit(commit, write_fn, remove_fn)
     return "Done!"
+
+
+_NO_NEWLINE_MARKER = "\\ No newline at end of file"
+"""Matches `src/fleet/rewrite/apply.py`'s `NO_NEWLINE_MARKER` value exactly, duplicated rather
+than imported: `rewrite/apply.py` imports `fleet.vcs.git`, so `vcs/` importing back from
+`rewrite/` would invert the dependency direction. Four words is not worth that."""
+
+
+def _unified_diff(old_path: str | None, new_path: str | None, old_text: str, new_text: str) -> str:
+    """One file's `git apply`-ready unified diff, `a/`/`b/`/`/dev/null`-prefixed exactly like
+    `rewrite/apply.py::make_unified_diff` (context=3), generalised to allow `old_path != new_path`
+    (a move) and either side being `/dev/null` (add/delete) — which `make_unified_diff` itself
+    does not need to support, since its only caller diffs one file's own before/after text."""
+    old_lines = old_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
+    from_file = "/dev/null" if old_path is None else f"a/{old_path}"
+    to_file = "/dev/null" if new_path is None else f"b/{new_path}"
+    out: list[str] = []
+    for line in difflib.unified_diff(old_lines, new_lines, fromfile=from_file, tofile=to_file, n=3):
+        out.append(line if line.endswith("\n") else line + "\n")
+        if line and not line.endswith("\n") and not line.startswith(("---", "+++", "@@")):
+            out.append(_NO_NEWLINE_MARKER + "\n")
+    return "".join(out)
+
+
+def commit_to_file_edits(commit: Commit) -> list[dict[str, str]]:
+    """One `Commit` (Task 1's in-memory parse of an `apply_patch` payload) -> a list of
+    `{"path": ..., "diff": ...}`, each `diff` a `git apply`-ready unified diff and each `path` the
+    POST-image path — the file that ends up on disk, matching `rewrite/apply.py::FileDiff.path`'s
+    own "post-image path — what a validator must bound" convention. `Move to:` (a rename) is
+    represented the same way `rewrite/apply.py::check_diff`/`diff_paths` already accept from an
+    LLM-authored diff today: differing `---`/`+++` paths in ONE diff, no git-extended
+    `rename from`/`rename to` header needed — `parse_unified_diff` there works off the plain
+    `---`/`+++` lines alone.
+
+    Order matches `commit.changes`' own insertion order (a plain `dict`, so Python 3.7+ preserves
+    it), which is the order `text_to_patch` parsed the `*** Add/Update/Delete File:` sections in.
+    """
+    edits: list[dict[str, str]] = []
+    for path, change in commit.changes.items():
+        if change.type is ActionType.ADD:
+            new_content = change.new_content or ""
+            diff = _unified_diff(None, path, "", new_content)
+            edits.append({"path": path, "diff": diff})
+        elif change.type is ActionType.DELETE:
+            old_content = change.old_content or ""
+            diff = _unified_diff(path, None, old_content, "")
+            edits.append({"path": path, "diff": diff})
+        elif change.type is ActionType.UPDATE:
+            dest = change.move_path or path
+            diff = _unified_diff(path, dest, change.old_content or "", change.new_content or "")
+            edits.append({"path": dest, "diff": diff})
+    return edits
