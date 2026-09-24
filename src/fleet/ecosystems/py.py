@@ -323,6 +323,7 @@ class PyAdapter(EcosystemAdapter):
                 srcs=srcs,
                 deps=deps,
                 attrs=attrs,
+                visibility=["//visibility:public"],
             )
         ]
         entry = select_entrypoint(srcs, self.entrypoints)
@@ -336,6 +337,7 @@ class PyAdapter(EcosystemAdapter):
                     srcs=[entry],
                     deps=[f":{name}"],
                     attrs={"main": entry, "imports": ["."]},
+                    visibility=["//visibility:private"],
                 )
             )
         return targets

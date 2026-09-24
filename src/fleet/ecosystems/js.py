@@ -714,18 +714,22 @@ class JsAdapter(EcosystemAdapter):
                 srcs=srcs,
                 deps=deps,
                 attrs=attrs,
+                visibility=["//visibility:public"],
             ),
             # D10: `tsconfig = ":tsconfig"` above is a label into this very package, and until
             # this target existed it named nothing — every generated TS package failed to load
             # with "no such target '//<dest>:tsconfig'". The target is emitted here, beside the
             # reference, because the two are one decision: an adapter that names a label owes the
-            # target, exactly as it owes the file `package_files()` declares.
+            # target, exactly as it owes the file `package_files()` declares. Never referenced by
+            # a `//`-qualified label from outside this package (only `:tsconfig`, above), so it
+            # is explicitly private rather than inheriting the model's default.
             BuildTarget(
                 package=unit.dest,
                 name=_TSCONFIG_TARGET,
                 rule="ts_config",
                 load_from="@aspect_rules_ts//ts:defs.bzl",
                 attrs={"src": _TSCONFIG_FILE},
+                visibility=["//visibility:private"],
             ),
         ]
         if _needs_npm_hub(unit):
@@ -766,6 +770,12 @@ class JsAdapter(EcosystemAdapter):
                     rule="npm_package",
                     load_from="@aspect_rules_js//npm:defs.bzl",
                     srcs=[f":{name}", _PACKAGE_JSON_FILE],
+                    # A second dependency surface, not an internal detail: `_unit_package_json`'s
+                    # `link:` entries make `npm_translate_lock` generate a first-party package
+                    # store whose `src` names THIS label from inside the `@npm` hub repository —
+                    # a consumer outside this package, exactly like `deps` on the `ts_project`
+                    # above, so it keeps the same explicit public visibility.
+                    visibility=["//visibility:public"],
                 )
             )
         entry = select_entrypoint(srcs, self.entrypoints)
@@ -786,6 +796,7 @@ class JsAdapter(EcosystemAdapter):
                     # Dropping the edge instead of moving it would produce a binary that
                     # analyses and dies at `bazel run` with MODULE_NOT_FOUND.
                     attrs={"entry_point": _js_output(entry), "data": [f":{name}"]},
+                    visibility=["//visibility:private"],
                 )
             )
         return targets

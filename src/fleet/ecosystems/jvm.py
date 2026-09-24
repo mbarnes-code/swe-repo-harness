@@ -27,6 +27,9 @@ _SOURCE_ROOTS: Final[tuple[str, ...]] = ("src/main/java/", "src/main/kotlin/", "
 """Maven's Standard Directory Layout, which Gradle's `java` plugin adopts verbatim. The package
 of a class is its path *below* one of these roots — the one fact a `main_class` needs."""
 
+_TEST_SOURCE_ROOTS: Final[tuple[str, ...]] = ("src/test/java/", "src/test/kotlin/", "src/test/scala/")
+"""The Standard Directory Layout's test half — the one fact a `test_class` needs (D144)."""
+
 
 @register
 class JvmAdapter(EcosystemAdapter):
@@ -127,6 +130,7 @@ class JvmAdapter(EcosystemAdapter):
             srcs=srcs,
             deps=deps,
             attrs={"resources": resources} if resources else {},
+            visibility=["//visibility:public"],
         )
         targets = [library]
         entry = select_entrypoint(srcs, self.entrypoints)
@@ -139,14 +143,34 @@ class JvmAdapter(EcosystemAdapter):
                     load_from="@rules_java//java:defs.bzl",
                     deps=[f":{name}"],
                     attrs={"main_class": _main_class(entry)},
+                    visibility=["//visibility:private"],
                 )
             )
         return targets
 
     def test_targets(self, unit: BuildUnit) -> list[BuildTarget]:
-        """One `java_test` over `src/test/**`, depending on the library rather than re-compiling
-        it — a second compilation of the same sources is where "the test passed against a
-        different classpath than the build" comes from."""
+        """One `java_test` **per discovered test source file**, each depending on the library
+        rather than re-compiling it — a second compilation of the same sources is where "the test
+        passed against a different classpath than the build" comes from.
+
+        `test_class` is set explicitly (D144) per target, derived from that file's own path below
+        `_TEST_SOURCE_ROOTS` — the same source-root convention `generate_targets` already uses for
+        `main_class`. A single target's name (`{name}_test`, snake_case) never satisfies Bazel's
+        CamelCase-target-name inference convention, so an unset `test_class` is not a style gap:
+        Bazel guesses `<package>.<target-name>` from the target's own label and fails at **test
+        time**, not at build time, with "Class not found" — the target analyzes and builds clean.
+        One target per file is what closes this correctly for a `dest` with more than one test
+        class: bundling every discovered test source into a *single* target with one `test_class`
+        would compile every file but execute only one's `@Test` methods while still reporting a
+        passing build — silently dropping every other file's tests, which is worse than the
+        original "Class not found" failure it would otherwise replace. `srcs` still names the
+        **full** `test_srcs` set on every target (not just that target's own file) so files that
+        reference shared test helpers still compile; only `test_class` (and the target's name)
+        differ per file. The first (sorted) file keeps the un-suffixed `{name}_test` name so the
+        common one-test-file case (this adapter's own e2e fixture) is unaffected; subsequent files
+        get `{name}_test_N` in the same sorted order, which is deterministic and stable across runs
+        because `test_sources(unit)` already returns a sorted list.
+        """
         test_srcs = self.test_sources(unit)
         if not test_srcs:
             return []
@@ -154,14 +178,16 @@ class JvmAdapter(EcosystemAdapter):
         return [
             BuildTarget(
                 package=unit.dest,
-                name=f"{name}_test",
+                name=f"{name}_test" if i == 0 else f"{name}_test_{i}",
                 rule="java_test",
                 load_from="@rules_java//java:defs.bzl",
                 srcs=test_srcs,
                 deps=[f":{name}", *self.external_labels(unit)],
+                attrs={"test_class": _test_class(entry)},
                 testonly=True,
                 visibility=["//visibility:private"],
             )
+            for i, entry in enumerate(test_srcs)
         ]
 
     def toolchain_requirements(self) -> list[ToolchainRequirement]:
@@ -184,12 +210,26 @@ def _main_class(entry: str) -> str:
     from the file name alone would emit a `main_class` that `java` cannot load, and a
     `java_binary` that builds green and dies on `bazel run`.
     """
-    path = entry
-    for root in _SOURCE_ROOTS:
-        marker = root
-        index = path.find(marker)
+    return _fully_qualified_class(entry, _SOURCE_ROOTS)
+
+
+def _test_class(entry: str) -> str:
+    """`src/test/java/com/acme/WidgetTest.java` → `com.acme.WidgetTest` (D144).
+
+    Same derivation as `_main_class`, against the test half of the Standard Directory Layout —
+    `test_targets()` needs this because its own target name (`{name}_test`) never satisfies
+    Bazel's CamelCase-target-name `test_class` inference convention.
+    """
+    return _fully_qualified_class(entry, _TEST_SOURCE_ROOTS)
+
+
+def _fully_qualified_class(path: str, roots: tuple[str, ...]) -> str:
+    """`<root>/<package>/<Class>.java` → `<package>.<Class>`, for whichever `roots` names the
+    Standard Directory Layout half (`main` or `test`) the caller is deriving a class name from."""
+    for root in roots:
+        index = path.find(root)
         if index != -1:
-            path = path[index + len(marker) :]
+            path = path[index + len(root) :]
             break
     else:
         path = path.rsplit("/", maxsplit=1)[-1]

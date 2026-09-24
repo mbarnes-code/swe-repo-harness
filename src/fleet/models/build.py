@@ -93,7 +93,15 @@ class BuildTarget(FleetModel):
     deps: list[str] = Field(default_factory=list, description="Bazel labels, internal or external")
     attrs: dict[str, str | int | bool | list[str]] = Field(default_factory=dict)
     testonly: bool = False
-    visibility: list[str] = Field(default_factory=lambda: ["//visibility:public"])
+    visibility: list[str] = Field(default_factory=lambda: ["//visibility:private"])
+    """Private by default (ADR-0144): at 250-repo scale one shared visibility namespace made
+    every silently-defaulted target — every internal helper, every non-test target nobody
+    intended as a cross-repo surface — `//visibility:public`, the opposite of the style guide's
+    "scope tightly" guidance. A unit's dependency-surface target (the one `deps=[...]` actually
+    reference, per `ecosystems/base.target_name`) sets this explicitly to
+    `["//visibility:public"]` at its own construction site; every other target either inherits
+    this private default or sets its own explicit visibility — never the model default silently
+    deciding a reader's question."""
 
     @property
     def label(self) -> str:

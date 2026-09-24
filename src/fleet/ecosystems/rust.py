@@ -242,6 +242,7 @@ class RustAdapter(EcosystemAdapter):
                 srcs=srcs,
                 deps=deps,
                 attrs=attrs,
+                visibility=["//visibility:public"],
             )
         ]
         entry = select_entrypoint(srcs, self.entrypoints)
@@ -255,6 +256,7 @@ class RustAdapter(EcosystemAdapter):
                     srcs=[entry],
                     deps=[f":{name}", *deps],
                     attrs={"crate_root": entry, "edition": _EDITION},
+                    visibility=["//visibility:private"],
                 )
             )
         return targets

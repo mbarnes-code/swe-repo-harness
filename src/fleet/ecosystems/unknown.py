@@ -91,6 +91,7 @@ class UnknownAdapter(EcosystemAdapter):
                 rule="filegroup",
                 srcs=srcs,
                 attrs={"tags": [DEGRADED_TAG]},
+                visibility=["//visibility:public"],
             )
         ]
 

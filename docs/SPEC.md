@@ -3904,7 +3904,14 @@ class BuildTarget(FleetModel):
     deps: list[str] = Field(default_factory=list, description="Bazel labels, internal or external")
     attrs: dict[str, str | int | bool | list[str]] = Field(default_factory=dict)
     testonly: bool = False
-    visibility: list[str] = Field(default_factory=lambda: ["//visibility:public"])
+    visibility: list[str] = Field(
+        default_factory=lambda: ["//visibility:private"],
+        description="Private by default (ADR-0144): at 250-repo scale, one shared visibility "
+        "namespace made every silently-defaulted target public, the opposite of the Bazel style "
+        "guide's scope-tightly guidance. A unit's dependency-surface target (target_name(unit)) "
+        "sets this explicitly to public at its own construction site; every other target is "
+        "either left at this private default or set explicitly, never silently inherited.",
+    )
 
     @property
     def label(self) -> str:
@@ -6103,6 +6110,27 @@ silently downgraded past what the profile promised:
   message, which is the one transformation the negotiator is allowed to perform on content, and it
   is recorded in the prompt hash like any other rendering decision (§11.6).
 
+**Evidence is untrusted input, and closing code-execution escalation is not the same as closing
+misleading-content influence.** `render_prompt()` (`llm/calls.py:258-290`) embeds an evidence
+mapping as one `sort_keys=True` JSON blob under a fixed `_EVIDENCE_HEADER` label, with no reserved
+boundary marker and no framing beyond each role's natural-language `system` prompt. ADR-0008 closes
+exactly one threat model: a model invoked under one of the five sanctioned classes cannot itself
+execute, apply, or verify anything — only code does — so a compromised or merely misleading
+evidence payload cannot escalate to file mutation, a git operation, or a self-graded verdict. It
+does **not** close a second, distinct threat model: a `RepoClassification`, `ManifestExtraction`,
+or `LlmBuildDiagnosis` response is itself the code's only signal about the world for that call, and
+a misleading or adversarial passage sitting legitimately inside quoted repo file text, a `README`,
+or a build-log excerpt can still produce a schema-valid but factually wrong verdict that passes
+every current gate — Pydantic validation checks shape, not truth, and Phase 3/4 verification checks
+build/test exit codes, not whether the classification that led there was accurate. **This second
+threat model is disclosed and tracked, not closed, as D143 (`docs/INTEGRATION_HONESTY.md`).** Any
+future mechanism adding reserved-boundary escaping (mirroring the pattern independently confirmed
+in a real, shipped harness: neutralizing a literal occurrence of the boundary marker inside
+untrusted content before wrapping it, so the content cannot forge a matching close) would close
+only the *structural forgery* channel — a persuasive passage that never attempts to forge a tag is
+unaffected by escaping alone, because the model still reads it as data and can still be swayed by
+what that data claims.
+
 ---
 
 ## 8. Folder Structure
@@ -7830,6 +7858,16 @@ Stated so scope creep has to argue against a written line. The harness explicitl
     scope; convert to git first.
 12. **Optimize the monorepo layout.** `layout()` is deterministic and total, not clever. It will
     not infer a better package taxonomy than the coordinates the repos already publish.
+13. **Guarantee immunity to persuasive prompt injection inside quoted evidence.** ADR-0008's
+    model-invocation boundary (models judge nothing executable; code applies, builds, and verifies
+    every result) closes the threat model where injected content in a migrated repo's file text, a
+    build log, or another repo's source could escalate to arbitrary action — it cannot, because a
+    model's only output is a schema-validated object that nothing downstream treats as
+    self-certifying. It does **not** close the threat model where that same quoted content misleads
+    a `RepoClassification`, `ManifestExtraction`, or `LlmBuildDiagnosis` call into a schema-valid
+    but factually wrong verdict — Pydantic validates shape, not truth, and no phase corroborates a
+    classification against an independent signal before acting on it. This residual gap is
+    disclosed, not silently assumed closed by ADR-0008: tracked as D143 (`docs/INTEGRATION_HONESTY.md`).
 
 ## 15. QA/QC and Real-Repo Pilot Phase
 

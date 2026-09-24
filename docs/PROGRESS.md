@@ -11349,3 +11349,89 @@ including why it deliberately does **not** set `budget_ledger.halted`.
 **Next:** none dispatched. Choosing an actual `run_max_llm_calls` value for `config/models.yaml`'s
 `pilot`/`local` profiles is left as the operational decision ADR-0142 scopes out, for whoever runs
 the §15.2 pilot. A wall-clock run ceiling remains unbuilt and is a separate circuit breaker.
+
+---
+
+## Checkpoint — 2026-09-24: harness-checklist gap analysis — disclosure (ADR-0143, D143) and two
+real defect fixes (ADR-0144/D144), settled ADR-0139
+
+**Rule 13 declaration.** This round closes NO §12 criterion. **§12 count: 48 of 48**, re-measured
+directly against `docs/SPEC.md` §12 at this commit (`sed -n '/^## 12\./,/^## 13\./p' docs/SPEC.md
+| grep -cE '^[0-9]+\.'`), unchanged from the previous checkpoint. **Disclosed judgment call, per
+Rule 13's restriction on two consecutive no-criterion rounds:** the immediately preceding
+checkpoint (ADR-0142, 2026-09-16) also targeted no §12 criterion and explicitly declared itself
+new feature work, "not a hardening round either." This round is disclosure-and-defect-remediation
+work, not pure process-hardening — it produced two real, tested defect fixes (ADR-0144, D144) —
+but neither targets a §12 criterion number, so whether it falls inside Rule 13's restricted
+"process integrity that never cashes out" category is a genuine judgment call, flagged here rather
+than silently passed over. No criteria-closing round intervened between the two.
+
+**What was completed.**
+
+1. Two Word documents (`AI Harness Specification.docx`, `AI Harness Design Checklist.docx`) pulled
+   from the Gitea `omninexus-imports` repo into `references/`, reviewed in full against
+   `docs/SPEC.md`. **ADR-0143** adjudicates three checklist gaps (intervention/entropy-audit
+   classification, the interactive approval/deny axis, MCP subprocess-credential isolation) as
+   deliberate, disclosed non-goals for this baseline — no code change, disclosure only.
+2. A fourth gap (item 2: no boundary/escaping mechanism for untrusted evidence text quoted into
+   LLM prompts) was researched against real reference harnesses (`references/open-swe`,
+   `references/deepagents`, `references/visa-vulnerability-agentic-harness`) before any SPEC
+   change, per explicit instruction. Landed as **D143** (OPEN, disclosed, not fixed) plus two
+   `docs/SPEC.md` additions (§7.7, §14 item 13) naming two distinct threat models: ADR-0008 closes
+   code-execution escalation from injected evidence; it does **not** close a validated-but-false
+   verdict induced by misleading evidence content, which is D143's residual, disclosed gap.
+3. `bazelbuild/bazel` cloned into `references/bazel/` (shallow, matching the existing
+   `RefactorBench` convention) so its own `docs/`/`examples/` could be checked against this
+   project's generated `BUILD.bazel` output and Bazel-version-pinning story. Three parallel
+   research agents found: version-pinning is sound (ADR-0062's departure from bazelisk is
+   deliberate and justified, though the person's framing — "adapts to whichever version is
+   loaded" — was factually backwards: Fleet Engine forces one pinned version fleet-wide); a real
+   default-visibility gap; a real `java_test`/`test_class` gap; and one settled non-fix
+   (`bazel vendor` cannot help ADR-0139's Cargo network gap).
+4. **ADR-0144**: `BuildTarget.visibility` now defaults to `//visibility:private`
+   (`src/fleet/models/build.py:96`); every ecosystem adapter (`py.py`, `js.py`, `jvm.py`,
+   `rust.py`, `unknown.py`) and `bazel/generators.py` states visibility explicitly at every
+   target's construction site. The audit traced `target_name(unit)`/`resolve_workspace_deps` to
+   find every real cross-unit dependency surface before flipping the default, and caught three
+   non-obvious ones that would have silently broken under a naive flip: the SCC-coarsened
+   cross-cycle target, both stub-redirect targets (`§3.5`'s abandoned-dependency substitution),
+   and a second `npm_package` surface distinct from `ts_project` (traced through
+   `npm_translate_lock`'s `link:` mechanism).
+5. **D144**: `jvm.py::test_targets()` emitted a `java_test` with no `test_class`, silently failing
+   at test time (not build time) for the common single-test-file case — confirmed with a real
+   `tools/bin/bazel test` fixture (pre-fix: `Class not found`; post-fix: real JUnit pass). **A code
+   review of this round's own diff caught a regression in the first draft of this fix**: setting
+   `test_class` from only the first (sorted) test file made a multi-test-file `dest` silently
+   execute and report pass on only one file's tests while compiling but never running the rest —
+   worse than the original bug, which at least failed loudly. Re-fixed to emit one `java_test` per
+   discovered test file; verified at the adapter level (two distinct targets, correct per-file
+   `test_class`, deterministic naming) — a live multi-file `bazel test` round trip is still owed
+   for the same empirical weight the single-file fixture has, and is disclosed as such in D144
+   rather than silently assumed.
+6. `docs/DECISIONS.md`'s **ADR-0139** amended in place with a dated addendum: `bazel vendor` is
+   confirmed, empirically (a real throwaway Cargo fixture, a real Docker sandbox, a genuine
+   before/after control), not to fix the Cargo network-during-verify gap — not for the originally
+   hypothesized reason (repo-rule exclusion), but because `crate_universe`'s fetch runs as inline
+   Starlark inside the module extension itself, invisible to `bazel vendor`, and the fingerprint
+   gating re-fetch changes on every Phase 3/4 build by this project's own deliberate
+   never-commit-the-extension design. Ruled out alongside the two original remedies, which remain
+   the only structural candidates.
+
+**What was verified.** A high-effort `/code-review` pass ran against the full diff before any of
+it was committed (per explicit instruction) and found the D144 regression above (CONFIRMED,
+highest severity) plus several lower-severity findings scoped to **pre-existing, already-committed
+work unrelated to this round** (ADR-0142's `budget_ledger.max_calls` CHECK constraint,
+`fleet status --metrics` not surfacing the call-count ceiling, `open_budget_ledger` call-site
+duplication) — left untouched, since they are not this round's changes to fix and bundling an
+unrelated fix into this batch's commit would misattribute it. Full jvm/ecosystem-touching test
+suite re-run after the D144 correction: 344 passed, 6 skipped (pre-existing `git-filter-repo`
+absence), 10 failed — all 10 are `@pytest.mark.integration` real-Bazel end-to-end tests spanning
+every ecosystem (not JVM-specific), reproduced identically against unmodified `HEAD` in task (b)'s
+own investigation, confirming pre-existing host-environment flakiness (blocked `bcr.bazel.build`
+egress), not a regression from this round.
+
+**Next:** a live multi-test-file `bazel test` fixture to close D144's remaining empirical gap; the
+`WorkspaceDep.label`/`rules_jvm_external` Maven artifact-naming mismatch flagged (not investigated)
+during D144's fixture work (`@maven//:junit` vs. the real generated `@maven//:junit_junit`); the
+deferred §14 disclosure for ADR-0143's items 1/3/4 (explicitly left for a separate pass); and the
+`js.py` `_bin`-target visibility test-coverage gap the code review flagged as weak/non-demonstrated.

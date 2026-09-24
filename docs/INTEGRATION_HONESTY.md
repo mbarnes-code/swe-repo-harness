@@ -11770,3 +11770,180 @@ forge-egress tests alongside the pre-existing DB-mirror test.
 that Tasks 6/7 landed (both the DB mirror and the real posted body/title are genuinely redacted,
 satisfying item 20's literal text). Only the cited evidence (§12.20's DONE paragraph) and the
 §11.4 boundary-list prose (a mechanism description, not §12 criterion text) were corrected.
+
+---
+
+## D143 — OPEN. ADR-0008 closes code-execution escalation from injected evidence content, not persuasion of a validated verdict
+
+Found while cross-checking `docs/SPEC.md` against a generic AI-harness specification/checklist
+(`references/AI Harness Specification.docx`, `references/AI Harness Design Checklist.docx`) and
+grounding the finding against real reference-harness source. `references/open-swe/agent/utils/
+github_comments.py:69-70,130-156` shows a real, shipped defense: untrusted content is wrapped in a
+reserved tag, and any literal occurrence of that tag's open/close strings inside the untrusted text
+is neutralized before wrapping, so the content cannot forge a matching close. Fleet Engine has no
+equivalent mechanism: `render_prompt()` (`llm/calls.py:258-290`) embeds the evidence mapping as one
+`sort_keys=True` JSON blob directly after a fixed `_EVIDENCE_HEADER` label (`llm/calls.py:78`), with
+no reserved boundary marker, no escaping of any literal occurrence of that label inside the evidence
+values, and no explicit "treat as untrusted data, not instructions" framing beyond each role's
+natural-language `system` prompt (e.g. `PROMPTS[Role.REPO_CLASSIFY].system`, `llm/calls.py:102-114`).
+Allocated by the dispatching controller — form-agnostic sweep against this worktree found `D142` as
+the highest allocated number.
+
+**Two distinct threat models, only one closed.** (a) *Code-execution escalation* — an injected
+instruction in evidence text causes the model to cause an action (file mutation, a git operation, a
+self-graded verdict). Closed by ADR-0008: the model may only emit one of five sanctioned response
+types, all Pydantic-validated, and it is forbidden from performing or grading any of file moves, git
+operations, graph construction, retry decisions, state transitions, or verification. (b) *Persuasion
+of a validated verdict* — an injected or merely misleading passage, sitting legitimately inside
+quoted repo file text, a `README`, or a build-log excerpt, causes `classify_repo`, `extract_manifest`,
+or `diagnose_build` to return a schema-valid but factually wrong `RepoClassification`/
+`ManifestExtraction`/`LlmBuildDiagnosis`. Not closed: Pydantic validates shape, not truth; no phase
+in §3 corroborates a classification against an independent signal before acting on it (Phase 1's
+ecosystem/ownership classification feeds directly into DAG construction and cycle-break strategy
+selection); and Phase 3/4 verification checks only build/test exit codes, which cannot detect that
+an earlier classification was induced by adversarial or misleading source content rather than
+genuinely read from it.
+
+**Not closed by adding boundary-marker escaping alone, either.** Escaping (item (a)'s remedy
+pattern, if adopted per `docs/SPEC.md` §7.7's new disclosure) closes *structural forgery* — content
+cannot break out of its quoted position to be reinterpreted as a new instruction. It does not close
+*persuasion*: a passage that never attempts to forge a boundary tag, but simply asserts something
+false or misleading in ordinary prose within its own legitimately-quoted position, is unaffected by
+escaping and can still mislead the model reading it as evidence.
+
+**Not yet fixed — queue for a future dispatch.** No corroboration mechanism exists for any
+ADR-0008 class-1/2/4 verdict. A concrete remedy would need a downstream check specific to what
+each class's verdict claims (e.g. a `ManifestExtraction`'s claimed dependency must actually appear
+in the repo's manifest text at a citable location; a `RepoClassification`'s ecosystem claim must be
+corroborated by at least one deterministic signal before it drives an irreversible decision like a
+cycle-break strategy) — genuine engineering work, not a quick prompt-wording fix, so it is disclosed
+here rather than attempted inline with this entry. `docs/SPEC.md` §7.7 and §14 item 13 cite this
+entry; both were added in the same commit as this entry, per this file's own reconciliation
+discipline (no §12 criterion text changed, so Rule 14 does not apply).
+
+---
+
+## D144 — OPEN. `jvm.py::test_targets()` emitted a `java_test` with no `test_class`, and Bazel's
+name-based inference could not fill the gap, so the test target built clean and failed at test
+time with "Class not found" — a fix is implemented in this working tree but not yet committed;
+there is no landed SHA to cite
+
+Found reviewing generated `BUILD.bazel` output against Bazel's own official examples
+(`references/bazel/examples/java-native/`) and style guide
+(`references/bazel/docs/build/style-guide.mdx:131-135`, "this makes it possible for the
+`test_class` attribute to be inferred from the name of the target" — Upper-CamelCase target
+names only). `src/fleet/ecosystems/jvm.py::test_targets()` names its `java_test` target
+`f"{name}_test"` (snake_case, e.g. `widgets_test`), never CamelCase, so the inference convention
+the style guide describes never fires for a Fleet-generated target regardless of layout; the
+official example (`references/bazel/examples/java-native/src/test/java/com/example/myproject/
+BUILD`) sets `test_class` explicitly on every `java_test` it defines, unconditionally, which is
+the pattern this entry adopts.
+
+**Verified empirically, not from the docs alone.** Built a real, minimal Bazel module
+(`rules_java@9.1.0` + `rules_jvm_external@6.7`, the exact versions `src/fleet/settings.py` pins
+for this fleet) reproducing Fleet's actual generated layout for one Maven coordinate
+`com.acme:widgets`: library at `java/com/acme/widgets` (`JvmAdapter.path_tail` +
+`layout()`), one test source at `java/com/acme/widgets/src/test/java/com/acme/widgets/
+WidgetTest.java` (the exact dest-relative path
+`tests/test_build_e2e.py::test_a_jvm_repo_with_a_real_test_file_gets_a_real_java_test_target`
+already asserts jvm.py emits), and the pre-fix `java_test(name = "widgets_test", srcs =
+[...WidgetTest.java], deps = [":widgets", "@maven//:junit_junit"], testonly = True)` — no
+`test_class`, byte-for-byte what `test_targets()` emitted before this fix. Ran real
+`tools/bin/bazel test` (registry `raw.githubusercontent.com/.../bazel-central-registry`, since
+`bcr.bazel.build` is unreachable from this host; a downloaded Temurin 17 JDK, since none is
+installed) against that fixture:
+
+```
+ERROR: […] Class not found: [com.acme.widgets.widgets_test]
+BazelTestRunner exiting with a return value of 2
+//java/com/acme/widgets:widgets_test  FAILED in 0.1s
+Executed 1 out of 1 test: 1 fails locally.
+```
+
+Bazel's default inference took the BUILD package path (`java/com/acme/widgets`) plus the
+target's own name (`widgets_test`) and guessed `com.acme.widgets.widgets_test` — a class that
+does not exist; the real class is `com.acme.widgets.WidgetTest`. The target **analyzed and built
+successfully**; only `bazel test`'s runtime class-load failed, which is exactly the "builds green,
+fails at test time" shape this entry's title names, not a build-time or analysis-time error a
+`bazel build` verification step would catch.
+
+**Fix.** `test_targets()` now emits **one `java_test` per discovered test source file**, each with
+`attrs={"test_class": _test_class(entry)}` for its own entry, rather than one target bundling every
+`test_srcs` entry under a single `test_class`. `_test_class` (new, alongside the pre-existing
+`_main_class`, both now delegating to a shared `_fully_qualified_class(path, roots)` helper)
+derives the fully-qualified class name from a test source's path below a new
+`_TEST_SOURCE_ROOTS` constant (`src/test/java/`, `src/test/kotlin/`, `src/test/scala/`) — the
+test-half mirror of the pre-existing `_SOURCE_ROOTS` `_main_class` already used for `main_class`,
+so no new source of truth was invented; the adapter already had this path available
+(`self.test_sources(unit)`) and was simply discarding the information `test_class` needs. Every
+target still names the **full** `test_srcs` set as `srcs` (not just its own file), so a test file
+that references a shared test-only helper class still compiles; only `test_class` and the
+target's name differ per file. The first (sorted) file keeps the un-suffixed `{name}_test` name,
+so the common one-test-file case (this adapter's own e2e fixture) is unaffected; subsequent files
+get `{name}_test_N`. Re-ran the identical single-file fixture with
+`test_class = "com.acme.widgets.WidgetTest"` (jvm.py's own output post-fix) under the same real
+`bazel test`:
+
+```
+JUnit4 Test Runner
+.
+Time: 0.006
+OK (1 test)
+BazelTestRunner exiting with a return value of 0
+//java/com/acme/widgets:widgets_test  PASSED in 0.1s
+Executed 1 out of 1 test: 1 test passes.
+```
+
+**Correction: an earlier draft of this fix introduced, rather than disclosed, a regression — caught
+by code review before landing, re-fixed here.** That draft set `test_class` from only
+`test_srcs[0]` and disclosed the multi-test-file case as an unchanged "pre-existing limitation" —
+review found that framing inaccurate: bundling every source into one target with one `test_class`
+had NEVER, before this fix, produced a passing build for a multi-file `dest` (pre-fix, an unset
+`test_class` fails loudly for every case, single- or multi-file, with "Class not found"). Setting
+`test_class` from only the first file closed the single-file case correctly but, for the first
+time, made a multi-file `dest` report a **passing** build while silently never executing every
+file after the first — a regression that draft introduced, not one it inherited. The fix now
+described above (one `java_test` per discovered file) closes this by construction: each file gets
+its own target and its own real pass/fail result, so no target can silently absorb another's
+tests. Verified at the adapter level (not yet a full real-`bazel test` round trip the way the
+single-file case above is — that remains owed for the same empirical weight): constructed a
+`BuildUnit` with two test sources (`java/.../BarTest.java`, `java/.../FooTest.java`) and called
+`JvmAdapter().test_targets(unit)` directly —
+
+```
+multi_test   -> test_class=com.acme.multi.BarTest  srcs=[BarTest.java, FooTest.java]
+multi_test_1 -> test_class=com.acme.multi.FooTest  srcs=[BarTest.java, FooTest.java]
+count: 2
+```
+
+— two distinct targets, each with its own correct `test_class` (not a repeat of the same one),
+both naming the full `test_srcs` set, deterministically sorted (`BarTest` before `FooTest`), and
+correctly suffix-named (`{name}_test`, `{name}_test_1`). This confirms the generation logic is
+correct; a live `bazel test` execution proving both targets actually run and pass under real
+Bazel is the remaining, still-owed step for full empirical parity with the single-file fixture.
+
+**Verification.** `tests/test_ecosystems.py::test_jvm_maps_a_maven_module_to_java_targets`,
+`tests/test_build_e2e.py::test_a_jvm_repo_with_a_real_test_file_gets_a_real_java_test_target`,
+and `tests/test_build_e2e.py::
+test_a_jvm_repo_and_a_js_repo_generate_real_ecosystem_appropriate_targets` pass unchanged
+(none of them pin the `java_test` target's exact `attrs` dict, only rule/name/testonly/srcs/deps
+substrings, all still true with `test_class` added). The wider suites touching `jvm`
+(`tests/test_ecosystems.py`, `tests/test_build_e2e.py`, `tests/test_manifests.py`,
+`tests/test_new_language_touchpoints_e2e.py`, `tests/test_state_models.py`,
+`tests/test_ecosystems_contracts_thrift.py`, `tests/test_ecosystems_contracts_avro.py`,
+`tests/test_settings.py`, `tests/test_workers_build.py`,
+`tests/test_cli_gazelle_support_files_batch45.py`) were run together: 566 passed, 6 skipped
+(`git-filter-repo` not installed on this host), 10 failed — all 10 are `@pytest.mark.integration`
+real-Bazel end-to-end tests spanning every ecosystem (Python, JS, Rust, and the unknown-ecosystem
+filegroup, not only JVM), and reproduce identically against the unmodified, pre-fix `jvm.py`
+(confirmed directly: swapped the working tree back to `git show HEAD:src/fleet/ecosystems/
+jvm.py`, re-ran `test_two_python_repos_with_different_pypi_dependencies_both_build` — a
+pure-Python fixture that never touches `jvm.py` — and it failed the same way, "generated no
+BUILD.bazel", before this fix's changes were restored). Pre-existing host-environment flakiness
+(this host's Bazel module-registry/network conditions), not a regression from this entry's
+change.
+
+**Not yet committed.** This fix (`src/fleet/ecosystems/jvm.py`) is implemented and verified in
+this working tree only; there is no commit SHA to cite. Update this entry's heading to `FIXED,
+LANDED (<sha>)` in the same commit that lands the change, per this file's own status-vocabulary
+discipline.

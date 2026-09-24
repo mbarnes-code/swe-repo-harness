@@ -262,6 +262,11 @@ def coarse_build_targets(
                 load_from=loads.get(coarse.ecosystem),
                 srcs=list(coarse.srcs),
                 attrs={"tags": [f"fleet_scc={coarse.scc_id}"]},
+                # The SCC's dependency-surface target, exactly like an ordinary unit's library
+                # target: `scc_label` (bazel/layout.py) is the label every dependent OUTSIDE the
+                # cycle resolves to, so it must stay reachable across packages same as any other
+                # cross-repo dependency edge.
+                visibility=["//visibility:public"],
             )
         )
     return out
@@ -312,6 +317,10 @@ def stub_failing_target(
             "outs": [_STUB_FAILING_OUT],
             "cmd": f"echo {json.dumps(message)} >&2; exit 1",
         },
+        # `_unit_deps`'s stub-redirect points a consumer OUTSIDE this package at this exact
+        # label (`cli._internal_label`) — a dependency-surface target, so it stays public
+        # explicitly rather than by way of the model's default.
+        visibility=["//visibility:public"],
     )
 
 
@@ -333,7 +342,15 @@ def stub_alias_target(*, name: str, dest: str, actual: str) -> BuildTarget:
     `name` is the caller's job for the identical reason `stub_failing_target` states: it must
     equal `cli._internal_label(...)`'s own target name, never a second, independently-derived one.
     """
-    return BuildTarget(package=dest, name=name, rule="alias", attrs={"actual": actual})
+    return BuildTarget(
+        package=dest,
+        name=name,
+        rule="alias",
+        attrs={"actual": actual},
+        # Same reason as `stub_failing_target`'s: this IS the label the redirect points a
+        # consumer outside this package at.
+        visibility=["//visibility:public"],
+    )
 
 
 # =======================================================================================
