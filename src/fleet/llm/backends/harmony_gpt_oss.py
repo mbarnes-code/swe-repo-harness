@@ -44,6 +44,7 @@ from typing import ClassVar, Final, Protocol, cast
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
 from openai_harmony import (
+    Author,
     Conversation,
     DeveloperContent,
     HarmonyEncodingName,
@@ -343,11 +344,31 @@ def build_conversation(
         developer_content = developer_content.with_instructions(instructions or "")
 
     convo_messages.append(HMessage.from_role_and_content(Role.DEVELOPER, developer_content))
+    # Fleet's `Message` carries no tool name, and Harmony refuses to render a nameless tool turn
+    # (`HarmonyError: Tools should have a name!`, a RuntimeError that no `LlmError` handler
+    # catches). A `tool` turn here is always `client.py::_repair_turns` answering the one tool
+    # THIS call offers, so it is attributed to that tool.
+    offered_tool = _APPLY_PATCH_TOOL_NAME if file_edits_property is not None else _TOOL_NAME
     for m in rest:
-        role = {"user": Role.USER, "assistant": Role.ASSISTANT, "tool": Role.TOOL}[m.role]
+        if m.role == "tool":
+            convo_messages.append(_tool_result(offered_tool, m.content))
+            continue
+        role = {"user": Role.USER, "assistant": Role.ASSISTANT}[m.role]
         convo_messages.append(HMessage.from_role_and_content(role, m.content))
 
     return Conversation.from_messages(convo_messages)
+
+
+def _tool_result(tool_name: str, content: str) -> HarmonyMessage:
+    """A Harmony tool-result turn, per `references/harmony/docs/format.md`'s
+    `<|start|>functions.{name} to=assistant<|channel|>commentary<|message|>...` convention."""
+    return (
+        HarmonyMessage.from_author_and_content(
+            Author.new(Role.TOOL, f"functions.{tool_name}"), content,
+        )
+        .with_channel("commentary")
+        .with_recipient("assistant")
+    )
 
 
 def render_for_completion(conversation: Conversation) -> list[int]:

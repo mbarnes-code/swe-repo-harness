@@ -271,6 +271,40 @@ def test_build_conversation_for_a_diff_shaped_schema_offers_apply_patch() -> Non
 
 
 @pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@pytest.mark.parametrize(
+    ("schema", "tool_name"),
+    [(LLM_PATCH_PROPOSAL_SCHEMA, "apply_patch"), (REPO_CLASSIFICATION_SCHEMA, "emit_response")],
+)
+def test_a_repair_turns_tool_message_renders_attributed_to_the_offered_tool(
+    schema: dict[str, object], tool_name: str,
+) -> None:
+    """`client.py::_repair_turns` sends a bare `Message(role="tool", ...)` (Fleet's `Message` has no
+    name field). Rendered nameless, the real SDK raises `HarmonyError: Tools should have a name!`
+    — a RuntimeError, not an `LlmError`, so it escaped `complete()` uncaught."""
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+
+    from fleet.llm.backends.harmony_gpt_oss import build_conversation, render_for_completion
+    from fleet.llm.client import BackendReply, Message, _repair_turns
+    from fleet.models.enums import StructuredOutputMode
+    from fleet.models.tasks import TokenUsage
+
+    reply = BackendReply(
+        text=None, tool_arguments={"x": 1}, usage=TokenUsage(), finish_reason="tool_call",
+    )
+    messages = (
+        Message(role="user", content="do it"),
+        *_repair_turns(reply, StructuredOutputMode.TOOL_CALL, "field required"),
+    )
+    assert messages[1].role == "tool"
+    tokens = render_for_completion(build_conversation(target(), messages, schema))
+    rendered = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS).decode(tokens)
+    assert (
+        f"<|start|>functions.{tool_name} to=assistant<|channel|>commentary"
+        f'<|message|>{{"x": 1}}<|end|>'
+    ) in rendered
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
 def test_effort_none_omits_the_reasoning_line_entirely() -> None:
     """Mirrors `vertex.py`'s `effort` rule: `None` means the operator wrote no preference, and
     this backend must send no `Reasoning:` line at all rather than the SDK's own MEDIUM default."""
