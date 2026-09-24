@@ -909,3 +909,50 @@ def test_a_default_constructed_backend_leaves_no_instance_state() -> None:
     from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
 
     assert vars(HarmonyGptOssBackend()) == {}
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_the_real_client_gets_a_validated_patch_proposal_through_a_repair_turn() -> None:
+    """End to end through the REAL `LadderModelClient` and the REAL `LlmPatchProposal`: the
+    client passes `model_json_schema()` (with its `$ref`) unchanged (C1). The first invoke()'s
+    second round trip omits `rationale`, so the client sends a TOOL_CALL repair turn — a bare
+    `Message(role="tool")` — which must render rather than raise `HarmonyError` (C3); the
+    repaired invoke() again takes two round trips (C4). Four transport calls in all."""
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+
+    from fleet.llm import schemas
+    from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
+    from fleet.llm.client import LadderModelClient, Message
+    from fleet.llm.roles import LlmRouter
+    from fleet.models.enums import ModelTier
+
+    call = {"token_ids": _sampled_completion([_apply_patch_call()]), "finish_reason": "stop"}
+    transport = _SequencedTransport(
+        [
+            call,
+            {"token_ids": _sampled_completion([_final('{"approach_summary": "fix"}')]),
+             "finish_reason": "stop"},
+            call,
+            {"token_ids": _sampled_completion(
+                [_final('{"approach_summary": "fix", "rationale": "typo"}')]),
+             "finish_reason": "stop"},
+        ],
+    )
+    router = LlmRouter(
+        {"patch": ModelTier.WORKHORSE}, {ModelTier.WORKHORSE: (target(),)}, required_roles=(),
+    )
+    client = LadderModelClient(
+        router, {"harmony_gpt_oss": HarmonyGptOssBackend(transport=transport)},
+    )
+    response = asyncio.run(
+        client.complete(
+            "patch", [Message(role="user", content=_PRE_IMAGE_MESSAGE)], schemas.LlmPatchProposal,
+        ),
+    )
+    assert len(transport.calls) == 4
+    repair_prompt = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS).decode(
+        transport.calls[2]["prompt_token_ids"],
+    )
+    assert "<|start|>functions.apply_patch to=assistant<|channel|>commentary" in repair_prompt
+    assert response.value.rationale == "typo"
+    assert [f.path for f in response.value.files] == ["src/app.py"]
