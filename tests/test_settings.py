@@ -559,6 +559,24 @@ def test_openai_compatible_target_without_base_url_is_refused(tmp_path: Path) ->
     assert "base_url" in str(excinfo.value)
 
 
+def test_harmony_gpt_oss_target_without_base_url_is_refused_at_startup(tmp_path: Path) -> None:
+    """§13 row 36: `harmony_gpt_oss` has no vendor default endpoint either. Missing from
+    `_REQUIRED_TARGET_FIELDS`, a `pilot` target with no `base_url` loaded with `base_url: None`
+    and failed only at the first call."""
+    models = MODELS_YAML.replace(
+        CHEAP_TARGET,
+        "    CHEAP:\n"
+        "      - { backend: harmony_gpt_oss, model_id: gpt-oss-120b, effort: low,\n"
+        "          price: free }\n",
+    )
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(
+            write_config(tmp_path, models=models),
+            known_backends=("anthropic", "openai_compatible", "harmony_gpt_oss"),
+        )
+    assert "profiles.default.CHEAP[0].base_url" in str(excinfo.value)
+
+
 def _cheap_openai_target(base_url: str) -> str:
     return (
         "    CHEAP:\n"

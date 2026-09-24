@@ -127,6 +127,7 @@ _BACKEND_EXTRAS: Final[Mapping[str, str]] = {
 #: §9 rule 2 / §13 row 36: each backend validates its own target fields.
 _REQUIRED_TARGET_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     "openai_compatible": ("base_url",),
+    "harmony_gpt_oss": ("base_url",),
     "bedrock": ("region",),
     "vertex": ("region",),
 }
