@@ -107,6 +107,10 @@ recognises this one immediately."""
 
 _APPLY_PATCH_TOOL_NAME: Final[str] = "apply_patch"
 
+_PATCH_RECEIVED: Final[str] = "patch parsed"
+"""The tool result `invoke()` returns for a decoded `apply_patch` call before asking for the
+schema's remaining fields: confirmation only — the diff itself never goes back to the model."""
+
 _REASONING_EFFORT: Final[Mapping[str, ReasoningEffort]] = {
     "low": ReasoningEffort.LOW,
     "medium": ReasoningEffort.MEDIUM,
@@ -450,14 +454,7 @@ def _decode_apply_patch(
         return None
 
 
-def parse_completion(
-    tokens: Sequence[int],
-    schema: Mapping[str, object] | None,
-    *,
-    pre_images: Mapping[str, str],
-) -> tuple[str | None, dict[str, object] | None, FinishReason]:
-    """Completion token ids -> `(text, tool_arguments, finish_reason)`. Reports, decides nothing:
-    an unparseable or ambiguous reply comes back as `tool_arguments=None`, never an exception."""
+def _parse_messages(tokens: Sequence[int]) -> list[HarmonyMessage]:
     encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
     try:
         parsed = encoding.parse_messages_from_completion_tokens(
@@ -467,24 +464,62 @@ def parse_completion(
         raise MalformedHarmonyStream(
             f"completion token stream did not parse as Harmony messages: {exc}",
         ) from exc
+    return cast(list[HarmonyMessage], parsed)
 
-    file_edits_property = _file_edits_property(schema) if schema is not None else None
+
+def _apply_patch_turn(
+    parsed: Sequence[HarmonyMessage], pre_images: Mapping[str, str],
+) -> tuple[list[HarmonyMessage] | None, list[dict[str, str]] | None]:
+    """`(turn, edits)` for the first of a diff-shaped `invoke()`'s two round trips. `turn` is the
+    assistant's messages up to and including its `apply_patch` call (`None` when it made none) —
+    kept whole because Harmony's convention is that the chain-of-thought preceding a tool call is
+    passed back in for the next sampling (`references/harmony/docs/format.md`, "Handling
+    reasoning output in subsequent sampling"). `edits` is `None` when the patch did not decode."""
+    recipient = f"functions.{_APPLY_PATCH_TOOL_NAME}"
+    for index, message in enumerate(parsed):
+        if message.recipient == recipient:
+            return list(parsed[: index + 1]), _decode_apply_patch(_call_text(message), pre_images)
+    return None, None
+
+
+def _remaining_fields(
+    parsed: Sequence[HarmonyMessage], remaining: Mapping[str, object],
+) -> dict[str, object] | None:
+    """The `final`-channel JSON answering `remaining` (the schema minus its file-edits property),
+    or `None` when it is absent, unparseable, or missing a required field."""
+    fields = _final_channel_json(parsed)
+    if fields is None:
+        return None
+    required_value = remaining.get("required")
+    required = set(required_value) if isinstance(required_value, list) else set()
+    return fields if required.issubset(fields) else None
+
+
+def parse_completion(
+    tokens: Sequence[int],
+    schema: Mapping[str, object] | None,
+    *,
+    pre_images: Mapping[str, str],
+) -> tuple[str | None, dict[str, object] | None, FinishReason]:
+    """ONE completion's token ids -> `(text, tool_arguments, finish_reason)`. Reports, decides
+    nothing: an unparseable or ambiguous reply comes back as `tool_arguments=None`, never an
+    exception.
+
+    For a diff-shaped schema this decodes only the `apply_patch` half, so `tool_arguments` holds
+    just the file-edits property: one completion can never also carry the `final` JSON, because
+    `<|call|>` and `<|return|>` are both stop tokens and the sampler halts at whichever comes first.
+    `invoke()` gets the remaining fields from a second round trip."""
+    parsed = _parse_messages(tokens)
+    resolved = _resolve_refs(schema) if schema is not None else None
+    file_edits_property = _file_edits_property(resolved) if resolved is not None else None
 
     if file_edits_property is not None:
-        call = _tool_call_message(parsed, "functions.apply_patch")
-        if call is None:
+        turn, edits = _apply_patch_turn(parsed, pre_images)
+        if turn is None:
             return _plain_text(parsed), None, "stop"
-        edits = _decode_apply_patch(_call_text(call), pre_images)
         if edits is None:
             return None, None, "tool_call"
-        other_fields = _final_channel_json(parsed) or {}
-        remaining = _remaining_schema(dict(schema), file_edits_property)  # type: ignore[arg-type]
-        required_value = remaining.get("required")
-        required = set(required_value) if isinstance(required_value, list) else set()
-        if not required.issubset(other_fields):
-            return None, None, "tool_call"
-        tool_arguments = {**other_fields, file_edits_property: edits}
-        return None, tool_arguments, "tool_call"
+        return None, {file_edits_property: edits}, "tool_call"
 
     if schema is not None:
         call = _tool_call_message(parsed, f"functions.{_TOOL_NAME}")
@@ -642,31 +677,60 @@ class HarmonyGptOssBackend:
         timeout_s: float,
     ) -> BackendReply:
         """One turn out, one turn back. See `ModelBackend.invoke`: no validation, no retry on a
-        schema failure, no decision taken from `finish_reason`."""
+        schema failure, no decision taken from `finish_reason`.
+
+        A diff-shaped schema takes TWO transport round trips inside this one call: the first
+        returns the `apply_patch` call (a completion stops at `<|call|>`, so it can never also
+        hold the `final` JSON), and only when that patch decodes is the call plus a tool result
+        sent back for the second, which answers the schema's remaining fields on the `final`
+        channel. A diff-shaped invoke() may make 2 real transport calls internally; the harness's
+        call-count ceiling (`run_max_llm_calls`, ADR-0142) only counts this as 1."""
         base_url = _require_base_url(target)
-        conversation = build_conversation(target, messages, schema)
-        prompt_token_ids = render_for_completion(conversation)
         encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
         transport = getattr(self, "_transport", _DEFAULT_TRANSPORT)
-        raw = await transport(
-            base_url=base_url,
-            api_key=_PLACEHOLDER_API_KEY,
-            model_id=target.model_id,
-            prompt_token_ids=prompt_token_ids,
-            stop_token_ids=encoding.stop_tokens_for_assistant_actions(),
-            max_tokens=max_output_tokens,
-            timeout_s=timeout_s,
-        )
-        token_ids = raw.get("token_ids")
-        if not isinstance(token_ids, Sequence):
-            raise TransportError(
-                f"{base_url}: harmony_gpt_oss transport returned no token_ids",
-                trigger="SERVER_ERROR",
+
+        async def round_trip(conversation: Conversation) -> tuple[list[int], Mapping[str, object]]:
+            raw = await transport(
+                base_url=base_url,
+                api_key=_PLACEHOLDER_API_KEY,
+                model_id=target.model_id,
+                prompt_token_ids=render_for_completion(conversation),
+                stop_token_ids=encoding.stop_tokens_for_assistant_actions(),
+                max_tokens=max_output_tokens,
+                timeout_s=timeout_s,
             )
+            token_ids = raw.get("token_ids")
+            if not isinstance(token_ids, Sequence):
+                raise TransportError(
+                    f"{base_url}: harmony_gpt_oss transport returned no token_ids",
+                    trigger="SERVER_ERROR",
+                )
+            return list(token_ids), raw
+
+        conversation = build_conversation(target, messages, schema)
+        token_ids, raw = await round_trip(conversation)
         pre_images = _extract_pre_images(messages)
         text, tool_arguments, decoded_finish_reason = parse_completion(
-            list(token_ids), schema, pre_images=pre_images,
+            token_ids, schema, pre_images=pre_images,
         )
+
+        resolved = _resolve_refs(schema) if schema is not None else None
+        file_edits_property = _file_edits_property(resolved) if resolved is not None else None
+        if resolved is not None and file_edits_property is not None and tool_arguments is not None:
+            turn, _edits = _apply_patch_turn(_parse_messages(token_ids), pre_images)
+            continuation = Conversation.from_messages(
+                [
+                    *conversation.messages,
+                    *(turn or []),
+                    _tool_result(_APPLY_PATCH_TOOL_NAME, _PATCH_RECEIVED),
+                ],
+            )
+            token_ids, raw = await round_trip(continuation)
+            fields = _remaining_fields(
+                _parse_messages(token_ids), _remaining_schema(resolved, file_edits_property),
+            )
+            tool_arguments = None if fields is None else {**fields, **tool_arguments}
+
         finish_reason: FinishReason = (
             "length" if raw.get("finish_reason") == "length" else decoded_finish_reason
         )

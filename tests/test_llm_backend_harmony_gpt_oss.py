@@ -400,36 +400,20 @@ def test_parse_completion_decodes_an_ordinary_tool_call() -> None:
 
 @pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
 def test_parse_completion_decodes_an_apply_patch_call_into_the_file_edits_property() -> None:
-    from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
-    from openai_harmony import Message as HMessage
-
+    """One completion carries ONLY the `apply_patch` half — it stops at `<|call|>`. (This test
+    previously also put a `final` message in the same completion, built via
+    `render_conversation`, which rewrites `<|return|>` to `<|end|>`: a shape no sampler can emit.
+    The remaining fields come from `invoke()`'s second round trip, tested above.)"""
     from fleet.llm.backends.harmony_gpt_oss import parse_completion
 
-    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
-    patch_text = (
-        "*** Begin Patch\n*** Update File: src/app.py\n@@ def greet():\n"
-        '-print("Hi")\n+print("Hello, world!")\n*** End Patch'
-    )
-    final = (
-        HMessage.from_role_and_content(
-            Role.ASSISTANT, '{"approach_summary": "fix greeting", "rationale": "typo"}',
-        ).with_channel("final")
-    )
-    call = (
-        HMessage.from_role_and_content(Role.ASSISTANT, patch_text)
-        .with_channel("commentary")
-        .with_recipient("functions.apply_patch")
-    )
-    tokens = _encode_assistant_reply([final, call], encoding)
-
+    tokens = _sampled_completion([_apply_patch_call()])
     _, tool_arguments, finish_reason = parse_completion(
         tokens,
         LLM_PATCH_PROPOSAL_SCHEMA,
         pre_images={"src/app.py": 'def greet():\n    print("Hi")\n'},
     )
     assert tool_arguments is not None
-    assert tool_arguments["approach_summary"] == "fix greeting"
-    assert tool_arguments["rationale"] == "typo"
+    assert set(tool_arguments) == {"files"}
     files = tool_arguments["files"]
     assert isinstance(files, list) and len(files) == 1
     assert files[0]["path"] == "src/app.py"
@@ -597,6 +581,123 @@ def test_invoke_round_trips_through_a_fake_transport() -> None:
     assert len(transport.calls) == 1
     assert transport.calls[0]["model_id"] == target().model_id
     assert transport.calls[0]["max_tokens"] == 512
+
+
+class _SequencedTransport(_FakeTransport):
+    """Returns `responses[i]` on the i-th call, so a test can see BOTH of a diff-shaped
+    `invoke()`'s round trips happen in order."""
+
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        super().__init__({})
+        self.responses = responses
+
+    async def __call__(self, **kwargs: object) -> dict[str, object]:  # type: ignore[override]
+        self.response = self.responses[len(self.calls)]
+        return await super().__call__(**kwargs)  # type: ignore[arg-type]
+
+
+_PATCH_TEXT = (
+    "*** Begin Patch\n*** Update File: src/app.py\n@@ def greet():\n"
+    '-    print("Hi")\n+    print("Hello, world!")\n*** End Patch'
+)
+_PRE_IMAGE_MESSAGE = 'Fix the greeting.\n```path:src/app.py\ndef greet():\n    print("Hi")\n```'
+
+
+def _apply_patch_call(patch_text: str = _PATCH_TEXT):
+    from openai_harmony import Message as HMessage
+    from openai_harmony import Role
+
+    return (
+        HMessage.from_role_and_content(Role.ASSISTANT, patch_text)
+        .with_channel("commentary")
+        .with_recipient("functions.apply_patch")
+    )
+
+
+def _invoke_diff_shaped(transport):
+    from fleet.llm import schemas
+    from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
+    from fleet.llm.client import Message
+    from fleet.models.enums import StructuredOutputMode
+
+    return asyncio.run(
+        HarmonyGptOssBackend(transport=transport).invoke(
+            target(),
+            (Message(role="user", content=_PRE_IMAGE_MESSAGE),),
+            schemas.LlmPatchProposal.model_json_schema(),
+            StructuredOutputMode.TOOL_CALL,
+            max_output_tokens=512,
+            timeout_s=30.0,
+        ),
+    )
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_diff_shaped_invoke_makes_two_round_trips_and_merges_them() -> None:
+    """Call 1 stops at `<|call|>` with the patch; call 2 is sent the call back plus a tool result
+    and answers the remaining fields on `final`. Uses the REAL `LlmPatchProposal` schema, and the
+    merged arguments must validate against that model."""
+    from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
+    from openai_harmony import Message as HMessage
+
+    from fleet.llm import schemas
+
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    analysis = HMessage.from_role_and_content(Role.ASSISTANT, "Patch it.").with_channel("analysis")
+    transport = _SequencedTransport(
+        [
+            {"token_ids": _sampled_completion([analysis, _apply_patch_call()]),
+             "finish_reason": "stop"},
+            {"token_ids": _sampled_completion(
+                [_final('{"approach_summary": "fix greeting", "rationale": "typo"}')]),
+             "finish_reason": "stop"},
+        ],
+    )
+    result = _invoke_diff_shaped(transport)
+
+    assert len(transport.calls) == 2
+    second_prompt = encoding.decode(transport.calls[1]["prompt_token_ids"])
+    assert second_prompt.startswith(encoding.decode(transport.calls[0]["prompt_token_ids"]))
+    # The CoT before a tool call is passed back (format.md), the call keeps its `<|call|>` as the
+    # SDK renders it, and the tool result is attributed to apply_patch.
+    assert second_prompt.endswith(
+        "<|start|>assistant<|channel|>analysis<|message|>Patch it.<|end|>"
+        "<|start|>assistant to=functions.apply_patch<|channel|>commentary<|message|>"
+        f"{_PATCH_TEXT}<|call|>"
+        "<|start|>functions.apply_patch to=assistant<|channel|>commentary<|message|>"
+        "patch parsed<|end|><|start|>assistant",
+    )
+    assert result.finish_reason == "tool_call"
+    assert result.tool_arguments is not None
+    proposal = schemas.LlmPatchProposal.model_validate(result.tool_arguments)
+    assert proposal.approach_summary == "fix greeting"
+    assert [f.path for f in proposal.files] == ["src/app.py"]
+    assert "Hello, world!" in proposal.files[0].diff
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_diff_shaped_invoke_whose_patch_fails_to_decode_makes_no_second_call() -> None:
+    bad = _apply_patch_call(_PATCH_TEXT.replace("src/app.py", "missing.py"))
+    transport = _SequencedTransport(
+        [{"token_ids": _sampled_completion([bad]), "finish_reason": "stop"}],
+    )
+    result = _invoke_diff_shaped(transport)
+    assert len(transport.calls) == 1
+    assert result.tool_arguments is None
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_diff_shaped_invoke_missing_a_required_field_in_call_two_is_no_answer() -> None:
+    transport = _SequencedTransport(
+        [
+            {"token_ids": _sampled_completion([_apply_patch_call()]), "finish_reason": "stop"},
+            {"token_ids": _sampled_completion([_final('{"approach_summary": "x"}')]),
+             "finish_reason": "stop"},
+        ],
+    )
+    result = _invoke_diff_shaped(transport)
+    assert len(transport.calls) == 2
+    assert result.tool_arguments is None
 
 
 @pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
