@@ -650,7 +650,14 @@ class _VllmCompletionsTransport:
         encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
         token_ids = encoding.encode(text, allowed_special="all")
         finish_reason = "length" if choice.finish_reason == "length" else "stop"
-        return {"token_ids": token_ids, "finish_reason": finish_reason, "stop_reason": None}
+        usage = getattr(response, "usage", None)
+        usage_map = usage.model_dump() if usage is not None else {}
+        return {
+            "token_ids": token_ids,
+            "finish_reason": finish_reason,
+            "stop_reason": None,
+            "usage": usage_map,
+        }
 
 
 _DEFAULT_TRANSPORT: Final[TokenCompletionTransport] = _VllmCompletionsTransport()
@@ -720,6 +727,7 @@ class HarmonyGptOssBackend:
 
         conversation = build_conversation(target, messages, schema)
         token_ids, raw = await round_trip(conversation)
+        usage = _usage(raw, target)
         pre_images = _extract_pre_images(messages)
         text, tool_arguments, decoded_finish_reason = parse_completion(
             token_ids, schema, pre_images=pre_images,
@@ -737,6 +745,16 @@ class HarmonyGptOssBackend:
                 ],
             )
             token_ids, raw = await round_trip(continuation)
+            # Both round trips are billed to this one reply, so token/cost accounting sees the
+            # true 2-call cost even though the call-count ceiling does not.
+            second = _usage(raw, target)
+            usage = usage.model_copy(
+                update={
+                    "input_tokens": usage.input_tokens + second.input_tokens,
+                    "output_tokens": usage.output_tokens + second.output_tokens,
+                    "cache_read_tokens": usage.cache_read_tokens + second.cache_read_tokens,
+                },
+            )
             fields = _remaining_fields(
                 _parse_messages(token_ids), _remaining_schema(resolved, file_edits_property),
             )
@@ -748,9 +766,32 @@ class HarmonyGptOssBackend:
         return BackendReply(
             text=text,
             tool_arguments=tool_arguments,
-            usage=TokenUsage(backend=HarmonyGptOssBackend.name, model_id=target.model_id),
+            usage=usage,
             finish_reason=finish_reason,
         )
+
+
+def _usage(raw: Mapping[str, object], target: BackendTarget) -> TokenUsage:
+    """The transport's `usage` (the `openai` SDK's completions `CompletionUsage`, dumped) as a
+    `TokenUsage`. `model_id` is the CONFIGURED id, never the served one (see `TokenUsage`)."""
+    usage = raw.get("usage")
+    usage_map: Mapping[str, object] = usage if isinstance(usage, Mapping) else {}
+    details = usage_map.get("prompt_tokens_details")
+    details_map: Mapping[str, object] = details if isinstance(details, Mapping) else {}
+    return TokenUsage(
+        backend=HarmonyGptOssBackend.name,
+        model_id=target.model_id,
+        input_tokens=_count(usage_map.get("prompt_tokens")),
+        output_tokens=_count(usage_map.get("completion_tokens")),
+        cache_read_tokens=_count(details_map.get("cached_tokens")),
+    )
+
+
+def _count(value: object) -> int:
+    """Missing, null or negative read as 0 — a server that omits `usage` must not turn a good
+    reply into a `ValidationError` (`TokenUsage` bounds these `ge=0`), matching
+    `openai_compatible.py::_count`."""
+    return max(value, 0) if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _extract_pre_images(messages: Sequence[Message]) -> dict[str, str]:

@@ -713,6 +713,60 @@ def test_a_diff_shaped_invoke_makes_two_round_trips_and_merges_them() -> None:
 
 
 @pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_diff_shaped_invoke_sums_both_round_trips_usage() -> None:
+    transport = _SequencedTransport(
+        [
+            {"token_ids": _sampled_completion([_apply_patch_call()]), "finish_reason": "stop",
+             "usage": {"prompt_tokens": 100, "completion_tokens": 20}},
+            {"token_ids": _sampled_completion(
+                [_final('{"approach_summary": "fix greeting", "rationale": "typo"}')]),
+             "finish_reason": "stop",
+             "usage": {"prompt_tokens": 130, "completion_tokens": 7}},
+        ],
+    )
+    result = _invoke_diff_shaped(transport)
+    assert result.tool_arguments is not None
+    assert (result.usage.input_tokens, result.usage.output_tokens) == (230, 27)
+    assert result.usage.model_id == target().model_id
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_the_vllm_transport_carries_the_servers_usage_through_to_the_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through the REAL `openai` SDK parsing a vLLM-shaped completions body (only the socket is
+    replaced, by an `httpx.MockTransport`), so the `usage` shape is the SDK's, not a guess."""
+    import httpx
+    from openai import AsyncOpenAI
+
+    from fleet.llm.backends import harmony_gpt_oss
+    from fleet.llm.client import Message
+    from fleet.models.enums import StructuredOutputMode
+
+    body = {
+        "id": "cmpl-1", "object": "text_completion", "created": 0, "model": "served-name",
+        "choices": [{"index": 0, "text": "<|channel|>final<|message|>hi<|return|>",
+                     "finish_reason": "stop", "logprobs": None}],
+        "usage": {"prompt_tokens": 321, "completion_tokens": 12, "total_tokens": 333},
+    }
+
+    def factory(**kwargs: object) -> AsyncOpenAI:
+        mock = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+        return AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=mock))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(harmony_gpt_oss, "AsyncOpenAI", factory)
+    result = asyncio.run(
+        harmony_gpt_oss.HarmonyGptOssBackend().invoke(
+            target(), (Message(role="user", content="hi"),), None,
+            StructuredOutputMode.PROMPTED, max_output_tokens=64, timeout_s=30.0,
+        ),
+    )
+    assert result.text == "hi"
+    assert (result.usage.input_tokens, result.usage.output_tokens) == (321, 12)
+    assert result.usage.model_id == target().model_id
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
 def test_a_diff_shaped_invoke_whose_patch_fails_to_decode_makes_no_second_call() -> None:
     bad = _apply_patch_call(_PATCH_TEXT.replace("src/app.py", "missing.py"))
     transport = _SequencedTransport(
