@@ -491,6 +491,35 @@ def _fixture_completion_tokens(assistant_messages) -> list[int]:
     return _encode_assistant_reply(assistant_messages, encoding)
 
 
+def _sampled_completion(assistant_messages) -> list[int]:
+    """What a real sampler returns: every message rendered by the SDK's own `render` (never
+    `render_conversation`, which drops an `analysis` message that precedes a `final` one and
+    rewrites a trailing `<|return|>` to `<|end|>` as it would for stored history), minus the
+    prompt's `<|start|>assistant`, with a `final` message ending in its decode-time `<|return|>`
+    (a tool call already renders ending in `<|call|>`)."""
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    tokens: list[int] = []
+    for message in assistant_messages:
+        tokens += encoding.render(message)
+    start = encoding.encode("<|start|>assistant", allowed_special="all")
+    assert tokens[: len(start)] == start
+    tokens = tokens[len(start) :]
+    if assistant_messages[-1].channel == "final":
+        end, ret = encoding.encode("<|end|><|return|>", allowed_special="all")
+        assert tokens[-1] == end
+        tokens[-1] = ret
+    return tokens
+
+
+def _final(text: str):
+    from openai_harmony import Message as HMessage
+    from openai_harmony import Role
+
+    return HMessage.from_role_and_content(Role.ASSISTANT, text).with_channel("final")
+
+
 @pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
 def test_invoke_round_trips_through_a_fake_transport() -> None:
     from openai_harmony import Message as HMessage
@@ -534,6 +563,40 @@ def test_invoke_round_trips_through_a_fake_transport() -> None:
     assert len(transport.calls) == 1
     assert transport.calls[0]["model_id"] == target().model_id
     assert transport.calls[0]["max_tokens"] == 512
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_invoke_stops_only_on_call_and_return_never_on_end() -> None:
+    """`<|end|>` closes the `analysis` message GPT-OSS always emits first; stopping on it
+    (`encoding.stop_tokens()`) would cut every reply off before its answer. Pinned to the actual
+    ids (`<|return|>` = 200002, `<|call|>` = 200012; `<|end|>` = 200007 must be absent), and
+    shown on a realistic analysis-then-answer stream truncated the way vLLM would."""
+    from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
+    from openai_harmony import Message as HMessage
+
+    from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend, parse_completion
+    from fleet.llm.client import Message
+    from fleet.models.enums import StructuredOutputMode
+
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    transport = _FakeTransport(
+        {"token_ids": _sampled_completion([_final("hi")]), "finish_reason": "stop"},
+    )
+    asyncio.run(
+        HarmonyGptOssBackend(transport=transport).invoke(
+            target(), (Message(role="user", content="hi"),), None,
+            StructuredOutputMode.PROMPTED, max_output_tokens=64, timeout_s=30.0,
+        ),
+    )
+    stops = set(transport.calls[0]["stop_token_ids"])
+    assert stops == {200002, 200012}
+    assert {encoding.decode([t]) for t in stops} == {"<|return|>", "<|call|>"}
+
+    analysis = HMessage.from_role_and_content(Role.ASSISTANT, "Think.").with_channel("analysis")
+    stream = _sampled_completion([analysis, _final("the answer")])
+    cut = next(i for i, t in enumerate(stream) if t in stops)
+    text, _, _ = parse_completion(stream[: cut + 1], None, pre_images={})
+    assert text == "the answer"
 
 
 @pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")

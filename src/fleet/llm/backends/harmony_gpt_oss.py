@@ -632,7 +632,7 @@ class HarmonyGptOssBackend:
             api_key=_PLACEHOLDER_API_KEY,
             model_id=target.model_id,
             prompt_token_ids=prompt_token_ids,
-            stop_token_ids=encoding.stop_tokens(),
+            stop_token_ids=encoding.stop_tokens_for_assistant_actions(),
             max_tokens=max_output_tokens,
             timeout_s=timeout_s,
         )
