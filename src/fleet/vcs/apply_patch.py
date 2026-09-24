@@ -546,7 +546,7 @@ def _unified_diff(old_path: str | None, new_path: str | None, old_text: str, new
 
 
 def commit_to_file_edits(commit: Commit) -> list[dict[str, str]]:
-    """One `Commit` (Task 1's in-memory parse of an `apply_patch` payload) -> a list of
+    """One `Commit` (the in-memory parse of an `apply_patch` payload) -> a list of
     `{"path": ..., "diff": ...}`, each `diff` a `git apply`-ready unified diff and each `path` the
     POST-image path — the file that ends up on disk, matching `rewrite/apply.py::FileDiff.path`'s
     own "post-image path — what a validator must bound" convention. `Move to:` (a rename) is

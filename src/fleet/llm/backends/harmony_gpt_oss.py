@@ -7,21 +7,22 @@ GPT-OSS models are trained on OpenAI's Harmony envelope, not on chat-completions
 (`references/gpt-oss/gpt_oss/tools/apply_patch.md`). This module:
 
 1. Renders Fleet's neutral `Message` sequence into a Harmony `Conversation` and encodes it to
-   token ids via the `openai-harmony` SDK (Task 4).
+   token ids via the `openai-harmony` SDK.
 2. Posts those token ids to vLLM's legacy completions endpoint (NOT chat-completions) via the
    `openai` SDK's `client.completions` resource — already a core dependency
-   (`pyproject.toml:34`) — and gets token ids back (Task 6).
+   (`pyproject.toml:34`) — and gets token ids back.
 3. Parses the returned tokens back into Harmony `Message`s and, when the negotiated schema has a
    `[{path, diff}]`-shaped property, decodes an `apply_patch` tool call into that property via
-   `fleet.vcs.apply_patch` (Task 5); otherwise falls back to the ordinary generic `emit_response`
-   tool call every other TOOL_CALL backend already uses.
+   `fleet.vcs.apply_patch` and takes the schema's remaining fields from a second round trip (see
+   `invoke()`); otherwise falls back to the ordinary generic `emit_response` tool call every
+   other TOOL_CALL backend already uses.
 
 Three properties this module exists to keep true, matching `openai_compatible.py`'s own three
 (module docstring, `src/fleet/llm/backends/openai_compatible.py:9-33`):
 
-1. **The SDK is quarantined.** The `openai_harmony` import is at MODULE scope, unguarded — see
-   this repo's Global Constraints on SDK quarantine. Everything above the transport moves plain
-   Python values.
+1. **The SDK is quarantined.** The `openai_harmony` import is at MODULE scope, unguarded: on a host
+   without the `harmony` extra the import fails and `client.discover()` leaves this backend
+   unregistered. Everything above the transport moves plain Python values.
 2. **The declared capability floor is fact-checked, not assumed.** See `declared_capabilities`'s
    own docstring for why this backend declares `TOOL_CALL` unconditionally where
    `openai_compatible.py` cannot.
@@ -118,10 +119,10 @@ _REASONING_EFFORT: Final[Mapping[str, ReasoningEffort]] = {
     "high": ReasoningEffort.HIGH,
 }
 
-# Vendored VERBATIM from references/gpt-oss/gpt_oss/tools/apply_patch.md (read-only reference;
-# this is our own copy under src/, per CLAUDE.md guardrail "never reference references/ at
-# runtime" — see this module's Global Constraints entry). Keep in sync by hand if that file's
-# prose ever changes upstream; nothing here auto-syncs it.
+# Vendored VERBATIM from references/gpt-oss/gpt_oss/tools/apply_patch.md. `references/` is
+# read-only reference material (CLAUDE.md §5); this is our own copy under src/, so nothing reads
+# `references/` at runtime. Keep in sync by hand if that file's prose ever changes upstream;
+# nothing here auto-syncs it.
 _APPLY_PATCH_INSTRUCTIONS: Final[str] = """When requested to perform coding-related tasks, you \
 MUST adhere to the following criteria when executing the task:
 
@@ -271,7 +272,7 @@ def _file_edits_property(schema: Mapping[str, object]) -> str | None:
 def _remaining_schema(schema: Mapping[str, object], file_edits_property: str) -> dict[str, object]:
     """`schema` with `file_edits_property` removed from both `properties` and `required` — the
     part of the response the model must still answer in plain JSON on the `final` channel,
-    because `apply_patch` supplies the file-edits property instead (Task 5 merges the two)."""
+    because `apply_patch` supplies the file-edits property instead (`invoke()` merges the two)."""
     properties_value = schema.get("properties")
     properties = dict(properties_value) if isinstance(properties_value, Mapping) else {}
     properties.pop(file_edits_property, None)
@@ -619,9 +620,9 @@ _PLACEHOLDER_API_KEY: Final[str] = "not-required"
 class _VllmCompletionsTransport:
     """The ONLY object in this module that imports `openai` for the completions call. Reuses the
     `openai` SDK's LEGACY `client.completions` resource — NOT `client.chat.completions`, which
-    speaks chat-message JSON — because that resource's `prompt` accepts a list of integers. See
-    this task's module-level design note for exactly what is verified vs. assumed about vLLM's
-    own wire contract."""
+    speaks chat-message JSON — because that resource's `prompt` accepts a list of integers.
+    `stop_token_ids`/`skip_special_tokens` are vLLM extensions sent via `extra_body`; this wire
+    contract is not yet verified against a live vLLM server."""
 
     async def __call__(
         self,
@@ -834,9 +835,9 @@ def _count(value: object) -> int:
 
 
 def _extract_pre_images(messages: Sequence[Message]) -> dict[str, str]:
-    """Pull `` ```path:<path>\\n<content>\\n``` `` fenced blocks out of every message's content —
-    see this task's design note on where `apply_patch` pre-images come from. This is a Fleet-side
-    convention this plan introduces (no existing worker emits it yet); confirm or replace it in a
+    """Pull `` ```path:<path>\\n<content>\\n``` `` fenced blocks out of every message's content:
+    the pre-images `apply_patch` hunks are resolved against. This is a Fleet-side convention
+    introduced with this backend (no existing worker emits it yet); confirm or replace it in a
     follow-up review before wiring a real diff-bearing role at this backend (CLAUDE.md's
     directive-authority rule: this is an Agent Recommendation, not a directive)."""
     import re
