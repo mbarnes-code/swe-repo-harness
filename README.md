@@ -141,9 +141,9 @@ for the full flag set of any one of them.
 ## Configuration
 
 Fleet loads three YAML files on startup: `config/repos.yaml`, `config/fleet.yaml`, and
-`config/models.yaml` (startup exits 2 if any is missing). Keep `repos.yaml` and `fleet.yaml` as
-their shipped minimal files unless you need overrides. In `config/models.yaml`, `default_profile`
-must name a profile that exists in `profiles`.
+`config/models.yaml` (startup exits 2 if any is missing). These shipped defaults are committed in
+`config/`; keep `repos.yaml` and `fleet.yaml` as shipped unless you need overrides. In
+`config/models.yaml`, `default_profile` must name a profile that exists in `profiles`.
 
 | File | What it holds |
 |---|---|
