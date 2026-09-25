@@ -6933,7 +6933,7 @@ it is illustrative-profile-listing noise here, not a second worked example — s
 `config/models.yaml` itself for its exact, current targets.
 
 **`config/models.local.yaml` — an untracked, gitignored local override (B2, round
-`pilot-criteria-bringup`).** This repo is public on GitHub, so a real Spark `base_url`/`model_id`
+`pilot-criteria-bringup`).** This repo is public on GitHub, so a real Spark `base_url`
 may never be committed to `config/models.yaml`; the committed `pilot` profile carries a placeholder
 `base_url` for exactly this reason (the real served model name, `gpt-oss-120b`, is not sensitive
 and IS committed). An operator with real endpoint values creates `config/models.local.yaml`
@@ -6953,11 +6953,15 @@ COMMITTED template target by **identity** — its `backend` + `model_id` pair, u
 collection"; an index into this editable list would silently repoint to the wrong target the
 moment `config/models.yaml`'s target list is reordered or grows a second entry, with no error at
 all). Every override entry MUST carry `backend` and `model_id` to name which target it overlays;
-the matched target's other fields (`base_url`, ...) are overlaid before `config/models.yaml`'s own
+the matched target's other fields (`base_url`/`base_urls`, `api_key_env`, ...) are overlaid —
+`backend` and `model_id` are the match key and are therefore **not** overridable here (an entry
+naming a different `model_id` names a different target) — before `config/models.yaml`'s own
 validation rules (rules 1–5 below) run, and any field the override omits comes from the template
 unchanged. Naming a profile or tier the template does not define, an entry missing
-`backend`/`model_id`, or a `backend`+`model_id` pair matching no template target in that tier, is
-a loud startup error, never a silently-ignored or silently-misapplied override. This layer is
+`backend`/`model_id`, a `backend`+`model_id` pair matching no template target in that tier or
+matching more than one (a same-model failover pair is ambiguous), or any malformed shape (a
+top-level key other than `profiles`, a non-mapping profile, a non-list tier, a non-mapping entry),
+is a loud startup error, never a silently-ignored or silently-misapplied override. This layer is
 **not** `FLEET_*` env (§9's "API keys come from the environment only" is unrelated and unaffected
 — this file carries no secret, only endpoint routing) and never asks an operator to export
 anything into their shell.

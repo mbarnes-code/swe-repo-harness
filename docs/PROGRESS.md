@@ -11648,13 +11648,17 @@ one-off, so both are fixed as rule/spec changes rather than as one-off dispensat
    dated forward-reference noting it is the reason §12.49–51 exist — D145's own status line is
    unchanged, no D-number is reused or reallocated (per the brief: D145 is cited, not reopened).
 
-**§12 count: 48 of 51.** 48 already-met criteria are **not re-verified in this round** — MET
+**§12 count: N = 51 criteria; MET status not re-verified this round.** *(Corrected 2026-09-25,
+final review: this line read "48 of 51" — a met-count carried forward from Round VI's thirty-ninth
+wave, which amended Rule 13 forbids; replaced with the form both Round A's and Round B's
+checkpoints now use. The rest of this paragraph is unchanged.)* 48 already-met criteria are **not re-verified in this round** — MET
 status is re-derived per criterion under amended Rule 13, never carried forward, and this round
 did not re-verify any of the 48 (it added criteria under clause (a), not clause (c)); a future
 round re-deriving the full rollup should not read this checkpoint as having done that work. The 3
 new criteria (§12.49–51) are **OPEN, not met** — meeting them requires live Spark hardware
 (§12.49, §12.50, and §12.51 clause (i)'s live leg) and is explicitly out of scope for this round;
-§12.51 clauses (i)–(iii) are meetable against local stub endpoints without hardware and are the
+§12.51 clauses (i)–(iii) *(corrected 2026-09-25, final review: SPEC §12.51 and ADR-0148 say
+(i) and (iii) — (i)'s stub leg and (iii))* are meetable against local stub endpoints without hardware and are the
 cheapest of the three to close first (see `docs/CRITERIA_PLAN.md`'s dispatch-order note).
 
 **Judgment calls made, flagged as this round's own recommendations, not directives:**
@@ -11864,7 +11868,11 @@ already exempted by the grep's own `-v` filter): zero hits.
   dicts) — the brief explicitly deferred this design choice. Rejected an alternative (merging by
   `backend`+`model_id` identity instead of list index) because the committed template's `model_id`
   is itself sometimes the value being overridden, which would make identity-based matching
-  ambiguous on the very first real use.
+  ambiguous on the very first real use. *(Superseded 2026-09-25: `daaf2d3` reversed this and
+  switched TO `backend`+`model_id` identity matching (ADR-0026's no-positional-reference rule);
+  the final-review commit then made the consequence explicit — `backend`/`model_id` are the match
+  key and are NOT overridable through this file; `base_url`/`base_urls` and other fields are. The
+  rationale above is kept as the record of what was decided then, not as current design.)*
 - Choosing NOT to fabricate a synthetic `o200k_base.tiktoken` fixture and instead monkeypatch
   `load_harmony_encoding` for the one harmony-SDK-level test — judged safer than shipping an
   unverifiable fixture that might silently fail the real SDK's internal validation once someone
@@ -11918,19 +11926,25 @@ placement ruling vs. this lane's own wiring choices: ADR-0149. SPEC: §5 `Backen
 `tests/test_run_context_llm_cache.py`'s identity assertion, restated component-wise (ADR-0149).
 Suite (whole `tests/`, no `-k`, 2026-09-25, uncommitted tree): 3035 passed, 61 skipped, 21
 failed; `bazel disk` line clean (peak 3.66 GiB, 0 residual). Every failure classified: **pre-existing
-at `HEAD` (re-run with every modified file restored to `HEAD`)** — 10 in `test_build_e2e.py` (real
+at `HEAD` (re-run with every modified file restored to `HEAD`)** *(corrected 2026-09-25, final
+review: "`HEAD`" here is `daaf2d3`, this lane's parent — NOT `main`; see the `test_config_keys_are_read.py`
+correction below; the other files in this list were not measured against `main`)* — 10 in `test_build_e2e.py` (real
 Bazel; e.g. `test_build_against_a_real_bazel` fails identically in 5.6 s at `HEAD`),
 `test_eligible_contract_units.py` 1, `test_config_keys_are_read.py` 2 (`llm.harmony_vocab_dir`,
-Round B1's key), `test_lint_gate.py` 2 (jvm.py E501; format dirty-count — this round's changed
+Round B1's key — *corrected 2026-09-25, final review: NOT pre-existing; these 2 pass at `main`
+(`b3f3a56`, 39 passed) and were introduced on this branch by `0b7ce54`. FIXED in the final-review
+commit: the key joins `DECLARATIVE` (it is read inside `settings.py`'s vocab startup step) and the
+walked-key count moves 187 → 188; the file is now 40 passed*), `test_lint_gate.py` 2 (jvm.py E501; format dirty-count — this round's changed
 files add no newly-dirty file), `test_integration_honesty_citations.py` 3 (same census, 59, as
 `HEAD`); **caused by this round and fixed** — 4 citation rots from line shifts (`cli.py` +1 import,
 `tasks.py` +22), repointed with dated markers and the `text_mismatch_pins` key updated;
 **precondition-only** — `test_llm_backend_fixture_e2e.py` asserts `src/fleet/` is clean before it
 runs, so it fails on any uncommitted `src/` edit — re-run at `b60e765` (committed): passes, together with the three touched test files whole (93 passed).
 
-**§12 count: 51 criteria total**, re-measured directly at this checkpoint:
+**§12 count: N = 51 criteria; MET status not re-verified this round** (the one form used for both
+Round A's and Round B's checkpoints — final review, 2026-09-25). N re-measured directly:
 `sed -n '/^## 12\./,/^## 13\./p' docs/SPEC.md | grep -cE '^[0-9]+\.'` → `51` (numbered 1–51, no
-gaps or duplicates). **Met count: not re-measured.** The 48 criteria previously recorded as met
+gaps or duplicates). No met-count is claimed. The 48 criteria previously recorded as met
 were NOT re-verified in Round B — permitted under the orchestrator's ruling above, but stated
 plainly so nobody reads this checkpoint as having re-derived them. §12.49–51 remain `OPEN`; §12.51
 progressed (stub legs of (i) and (iii), and (ii)) without closing.

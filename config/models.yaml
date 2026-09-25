@@ -135,9 +135,9 @@ profiles:
     # will launch, never a hostname or IP. `base_url` stays the placeholder below: unlike the
     # model id, a real Spark hostname/IP must never be committed to this public-mirrored repo.
     #
-    # PLACEHOLDER — `base_url` MUST be edited once the Spark host is provisioned (ADR-0145; same
+    # PLACEHOLDER — `base_url` must be REPLACED once the Spark host is provisioned (ADR-0145; same
     # treatment the previous nemotron placeholder had — not a new kind of incompleteness, only a
-    # renamed one). Never hand-edit this file with the real host: use an untracked, gitignored
+    # renamed one), but never by editing it here. Never hand-edit this file with the real host: use an untracked, gitignored
     # `config/models.local.yaml` instead (see `.gitignore` and `docs/SPEC.md`'s `config/models.yaml`
     # section for the override file's format) — `FleetSettings.load()` overlays it onto this
     # committed template at load time, so the real endpoint never touches version control.

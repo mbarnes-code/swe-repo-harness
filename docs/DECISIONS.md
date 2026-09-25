@@ -16081,7 +16081,8 @@ Even a forged pre-image that somehow got through this — for instance a nested 
 
 ## ADR-0147 — Rule 13 gets an explicit satisfaction path for the all-criteria-met state
 
-**Decision (2026-09-25).** §12 reached 48 of 48 on 2026-09-10 (round VIII, `docs/PROGRESS.md`).
+**Decision (2026-09-25).** §12 reached 48 of 48 on 2026-09-10 (Round VI, thirty-ninth wave, `docs/PROGRESS.md` —
+*corrected 2026-09-25, final review: this read "round VIII", which the cited record does not say*).
 Rule 13's operative clause ("before dispatching a round, name which §12 criterion number(s) it is
 expected to move from unmet to met... may not be followed by a second such [no-criterion] round
 without an intervening criteria-closing round") presupposes an unmet criterion always exists to

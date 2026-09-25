@@ -107,8 +107,9 @@ _TIKTOKEN_ENCODINGS_BASE_ENV: Final = "TIKTOKEN_ENCODINGS_BASE"
 _TIKTOKEN_RS_CACHE_DIR_ENV: Final = "TIKTOKEN_RS_CACHE_DIR"
 
 #: B2 (round `pilot-criteria-bringup`). An untracked, gitignored local file carrying REAL `pilot`
-#: endpoint values (`base_url`, `model_id`, ...) that must never reach the public GitHub mirror of
-#: this repo — see `.gitignore` and `docs/SPEC.md`'s `config/models.yaml` section for the format.
+#: endpoint values (`base_url`/`base_urls`, ...; `backend`+`model_id` only name the target) that
+#: must never reach the public GitHub mirror of this repo — see `.gitignore` and `docs/SPEC.md`'s
+#: `config/models.yaml` section for the format.
 _MODELS_OVERRIDE_FILENAME: Final = "models.local.yaml"
 
 #: §7.7's shipped backends. The registry itself lives in `fleet.llm.backends` and is open-ended;
@@ -1512,89 +1513,102 @@ def _apply_model_overrides(
 ) -> dict[str, Any]:
     """`models_data` (parsed `config/models.yaml`) with `config/models.local.yaml`'s per-target
     field overlays applied, BEFORE `_validate_models_config` — B2's untracked-local-override layer
-    for real `base_url`/`model_id`/... values §9 rule 4 refuses to let the COMMITTED template carry.
+    for real endpoint values (`base_url`/`base_urls`, `api_key_env`, ...) that §9 rule 4 refuses to
+    let the COMMITTED template carry.
 
     Shape: `{profiles: {<profile>: {<tier>: [{backend, model_id, ..fields to overlay..}, ...]}}}`.
     Each override entry is matched to a template target by **identity** — its `backend` +
-    `model_id` pair, unique within a tier — never by list position (ADR-0026, `docs/DECISIONS.md`:
-    "no reference may be a positional integer over a recomputed collection"; that rule was written
-    for SQLite rowids, but the rationale generalizes exactly here — an index into
-    `config/models.yaml`'s editable target list silently repoints the moment that list is
-    reordered or grows a second target, misrouting an endpoint with no error at all). The matched
-    target's OTHER fields (`base_url`, ...) are overlaid; `backend`/`model_id` themselves are the
-    lookup key, already equal to what matched. A profile or tier the override names that the
-    template does not define, an override entry missing `backend`/`model_id`, or a `backend` +
-    `model_id` pair matching no template target in that tier, is a loud startup error (Rule 11):
-    silently ignoring an unresolvable override would make a typo read as "no override applied",
-    which is a misconfigured Spark endpoint discovered in wave 7, exactly what §9's own loader
-    rules exist to front-load to startup.
+    `model_id` pair — never by list position (ADR-0026, `docs/DECISIONS.md`: "no reference may be a
+    positional integer over a recomputed collection"; that rule was written for SQLite rowids, but
+    the rationale generalizes exactly here — an index into `config/models.yaml`'s editable target
+    list silently repoints the moment that list is reordered or grows a second target, misrouting
+    an endpoint with no error at all). The matched target's OTHER fields are overlaid.
+    **`backend` and `model_id` are therefore not overridable here**: they say WHICH target, and an
+    entry naming a different `model_id` names a different (and, if absent, unresolvable) target.
+
+    Every malformed or unresolvable shape is a loud startup error (Rule 11), never a skipped entry:
+    a top-level key other than `profiles`, `profiles`/a profile not a mapping, a tier not a list,
+    an entry not a mapping or missing `backend`/`model_id`, a profile or tier the template does not
+    define, an identity matching no template target in that tier — or matching MORE than one
+    (ADR-0149: the same model behind two `base_url`s is a legal failover pair, and overlaying only
+    the first would be a silent partial override). Silently ignoring any of these would make a typo
+    read as "no override applied" — the committed placeholder endpoint staying in use, discovered
+    in wave 7 — exactly what §9's own loader rules exist to front-load to startup.
     """
     if not overrides_data:
         return dict(models_data)
-    merged = copy.deepcopy(dict(models_data))
+
+    def fail(message: str, key: str) -> ConfigValidationError:
+        return ConfigValidationError(message, file=overrides_path, key=key)
+
+    unknown = sorted(str(k) for k in overrides_data if k != "profiles")
+    if unknown:
+        raise fail(f"unknown top-level key(s) {unknown}; the only one allowed is `profiles`",
+                   unknown[0])
     override_profiles = overrides_data.get("profiles")
     if not isinstance(override_profiles, Mapping):
-        return merged
+        raise fail("`profiles` must be a mapping of profile name to tiers", "profiles")
+    merged = copy.deepcopy(dict(models_data))
     base_profiles = merged.get("profiles")
     if not isinstance(base_profiles, dict):
-        raise ConfigValidationError(
-            "names overrides, but config/models.yaml declares no `profiles` at all",
-            file=overrides_path,
-            key="profiles",
-        )
+        raise fail("names overrides, but config/models.yaml declares no `profiles` at all",
+                   "profiles")
     for profile_name, tiers in override_profiles.items():
+        where_profile = f"profiles.{profile_name}"
         if not isinstance(tiers, Mapping):
-            continue
+            raise fail(f"{where_profile} must be a mapping of tier name to a target list",
+                       where_profile)
         base_tiers = base_profiles.get(profile_name)
         if not isinstance(base_tiers, dict):
-            raise ConfigValidationError(
-                f"names profile {profile_name!r}, which config/models.yaml does not define",
-                file=overrides_path,
-                key=f"profiles.{profile_name}",
-            )
+            raise fail(f"names profile {profile_name!r}, which config/models.yaml does not define",
+                       where_profile)
         for tier_name, override_targets in tiers.items():
+            where = f"{where_profile}.{tier_name}"
             base_targets = base_tiers.get(tier_name)
             if not isinstance(base_targets, list):
-                raise ConfigValidationError(
+                raise fail(
                     f"names tier {tier_name!r} of profile {profile_name!r}, which "
                     "config/models.yaml does not define",
-                    file=overrides_path,
-                    key=f"profiles.{profile_name}.{tier_name}",
+                    where,
                 )
-            for override_target in (
-                override_targets if isinstance(override_targets, list) else []
-            ):
+            if not isinstance(override_targets, list):
+                raise fail(f"{where} must be a list of target overrides", where)
+            for index, override_target in enumerate(override_targets):
                 if not isinstance(override_target, Mapping):
-                    continue
+                    raise fail(f"{where}[{index}] must be a mapping, got "
+                               f"{type(override_target).__name__}", f"{where}[{index}]")
                 backend = override_target.get("backend")
                 model_id = override_target.get("model_id")
                 if not backend or not model_id:
-                    raise ConfigValidationError(
-                        f"an entry in profiles.{profile_name}.{tier_name} omits `backend` and/or "
-                        "`model_id` — B2 overrides match a template target by that identity pair, "
-                        "never by list position (ADR-0026), so both are required to name which "
-                        "target to overlay",
-                        file=overrides_path,
-                        key=f"profiles.{profile_name}.{tier_name}",
+                    raise fail(
+                        f"an entry in {where} omits `backend` and/or `model_id` — B2 overrides "
+                        "match a template target by that identity pair, never by list position "
+                        "(ADR-0026), so both are required to name which target to overlay",
+                        where,
                     )
-                match = next(
-                    (
-                        t
-                        for t in base_targets
-                        if isinstance(t, dict)
-                        and t.get("backend") == backend
-                        and t.get("model_id") == model_id
-                    ),
-                    None,
-                )
-                if match is None:
-                    raise ConfigValidationError(
-                        f"names target backend={backend!r} model_id={model_id!r} in "
-                        f"profiles.{profile_name}.{tier_name}, which config/models.yaml does not "
-                        "define (matched by backend+model_id identity, never list position)",
-                        file=overrides_path,
-                        key=f"profiles.{profile_name}.{tier_name}",
+                matches = [
+                    t
+                    for t in base_targets
+                    if isinstance(t, dict)
+                    and t.get("backend") == backend
+                    and t.get("model_id") == model_id
+                ]
+                if not matches:
+                    raise fail(
+                        f"names target backend={backend!r} model_id={model_id!r} in {where}, "
+                        "which config/models.yaml does not define (matched by backend+model_id "
+                        "identity, never list position)",
+                        where,
                     )
+                if len(matches) > 1:
+                    raise fail(
+                        f"names target backend={backend!r} model_id={model_id!r} in {where}, "
+                        f"which config/models.yaml defines {len(matches)} times — the override "
+                        "cannot say which one it means, and applying it to only the first would "
+                        "be a silent partial override",
+                        where,
+                    )
+                match = matches[0]
                 # ADR-0149: `base_url` and `base_urls` are two spellings of ONE fact (which endpoint
                 # this target is), so an override naming either REPLACES the template's other —
                 # the committed template carries a single placeholder `base_url`, and a local file

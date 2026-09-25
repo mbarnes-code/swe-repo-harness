@@ -1353,3 +1353,64 @@ def test_models_local_yaml_naming_both_endpoint_spellings_fails_loud(tmp_path: P
     )
     with pytest.raises((ConfigValidationError, ValidationError)):
         load(config_dir)
+
+
+@pytest.mark.parametrize(
+    ("override", "names"),
+    [
+        # a misspelled top-level key: previously returned with no override applied
+        ("profile:\n  default:\n    HEAVY: []\n", "profile"),
+        # `profiles` as a list, not a mapping
+        ("profiles:\n  - default\n", "profiles"),
+        # a profile given as a list, not a mapping of tiers
+        ("profiles:\n  default:\n    - HEAVY\n", "profiles.default"),
+        # a tier given as a mapping, not a list
+        (
+            "profiles:\n  default:\n    HEAVY:\n      backend: anthropic\n"
+            "      model_id: claude-opus-5\n",
+            "profiles.default.HEAVY",
+        ),
+        # a non-mapping entry in the tier's list
+        ("profiles:\n  default:\n    HEAVY:\n      - just-a-string\n", "profiles.default.HEAVY[0]"),
+    ],
+)
+def test_models_local_yaml_malformed_shapes_fail_loud(
+    tmp_path: Path, override: str, names: str
+) -> None:
+    """Every malformed shape is a startup error naming where, never a silent "no override
+    applied" that leaves the committed placeholder endpoint in use (Rule 11)."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(override, encoding="utf-8")
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(config_dir)
+    assert names in str(excinfo.value)
+
+
+def test_models_local_yaml_ambiguous_identity_fails_loud(tmp_path: Path) -> None:
+    """Two template targets sharing `backend`+`model_id` behind different `base_url`s (a legal
+    ADR-0023 failover pair): an override naming that identity cannot say which it means, and
+    overlaying only the first would be a silent partial override — so it is refused."""
+    pair = """\
+  pair:
+    HEAVY:
+      - { backend: openai_compatible, model_id: twin, effort: high, price: free,
+          base_url: 'http://localhost:8001/v1' }
+      - { backend: openai_compatible, model_id: twin, effort: high, price: free,
+          base_url: 'http://localhost:8002/v1' }
+    WORKHORSE:
+      - { backend: openai_compatible, model_id: twin, effort: high, price: free,
+          base_url: 'http://localhost:8001/v1' }
+    CHEAP:
+      - { backend: openai_compatible, model_id: twin, effort: high, price: free,
+          base_url: 'http://localhost:8001/v1' }
+"""
+    config_dir = write_config(tmp_path, models=MODELS_YAML + pair)
+    assert load(config_dir).models.profiles["pair"]["HEAVY"][1].base_url.endswith("8002/v1")  # type: ignore[union-attr]
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  pair:\n    HEAVY:\n"
+        "      - { backend: openai_compatible, model_id: twin, base_url: 'http://10.0.0.5/v1' }\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(config_dir)
+    assert "2 times" in str(excinfo.value)
