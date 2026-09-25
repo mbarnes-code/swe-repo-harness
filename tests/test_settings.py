@@ -19,6 +19,7 @@ Every test here answers "why does this matter", not "does this line run":
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -204,6 +205,7 @@ def test_minimal_config_lands_every_documented_default(tmp_path: Path) -> None:
     assert cfg.llm.rate_limit.defaults.rpm == 0              # 0 = unlimited
     assert cfg.llm.failover.on_tier_exhausted == "halt"      # fail closed, exit 8
     assert cfg.llm.require_capabilities[ModelTier.HEAVY].min_context == 100_000
+    assert cfg.llm.harmony_vocab_dir is None                 # ADR-0148/§12.50, B1: opt-in only
     assert cfg.pr.merge_wait_timeout_s == 172_800            # 48 h
     assert cfg.gc.cache_max_age == "30d"
     assert cfg.gc.cache_max_age_s() == 30 * 86_400
@@ -1119,3 +1121,146 @@ def test_price_helper_matches_the_11_2_formula() -> None:
     assert target_price_usd(target, in_tokens=200_000, out_tokens=40_000) == pytest.approx(
         (5.0 * 200_000 + 25.0 * 40_000) / 1e6
     )
+
+
+# --------------------------------------------------------------------------------------
+# B1 (round `pilot-criteria-bringup`) — `llm.harmony_vocab_dir`: offline Harmony vocab (§12.50)
+# --------------------------------------------------------------------------------------
+
+
+def _clear_tiktoken_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TIKTOKEN_ENCODINGS_BASE", raising=False)
+    monkeypatch.delenv("TIKTOKEN_RS_CACHE_DIR", raising=False)
+
+
+def test_harmony_vocab_dir_unset_touches_neither_tiktoken_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default (`None`) must be a true no-op: an operator who never touches this key gets the
+    SDK's own default (network-fetched, cached) behaviour, unchanged."""
+    _clear_tiktoken_env(monkeypatch)
+    load(write_config(tmp_path))
+    assert "TIKTOKEN_ENCODINGS_BASE" not in os.environ
+    assert "TIKTOKEN_RS_CACHE_DIR" not in os.environ
+
+
+def test_harmony_vocab_dir_points_tiktoken_env_vars_at_the_configured_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.50 offline-vocab half: the HARNESS sets `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR`
+    itself from `llm.harmony_vocab_dir` — an operator never exports either into their shell."""
+    _clear_tiktoken_env(monkeypatch)
+    vocab_dir = tmp_path / "vocab"
+    vocab_dir.mkdir()
+    (vocab_dir / "o200k_base.tiktoken").write_text("stub vocab content\n", encoding="utf-8")
+    fleet = f"""\
+        llm:
+          harmony_vocab_dir: {vocab_dir}
+    """
+    load(write_config(tmp_path, fleet=fleet))
+    assert os.environ["TIKTOKEN_ENCODINGS_BASE"] == str(vocab_dir)
+    assert os.environ["TIKTOKEN_RS_CACHE_DIR"] == str(vocab_dir)
+
+
+def test_harmony_vocab_dir_missing_directory_fails_loud_at_settings_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 11: a missing vocab dir is `ConfigValidationError` (exit 2) AT SETTINGS LOAD, naming the
+    path — never a lazy `HarmonyError` surfacing at the backend's first `load_harmony_encoding()`
+    call, waves into a run."""
+    _clear_tiktoken_env(monkeypatch)
+    missing = tmp_path / "does-not-exist"
+    fleet = f"""\
+        llm:
+          harmony_vocab_dir: {missing}
+    """
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(write_config(tmp_path, fleet=fleet))
+    assert str(missing) in str(excinfo.value)
+    assert "TIKTOKEN_ENCODINGS_BASE" not in os.environ, "never set on a failed validation"
+
+
+def test_harmony_vocab_dir_missing_vocab_file_fails_loud_naming_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The directory existing is not enough: the message names both the configured path and the
+    specific missing file, per this round's brief."""
+    _clear_tiktoken_env(monkeypatch)
+    vocab_dir = tmp_path / "vocab"
+    vocab_dir.mkdir()
+    fleet = f"""\
+        llm:
+          harmony_vocab_dir: {vocab_dir}
+    """
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(write_config(tmp_path, fleet=fleet))
+    message = str(excinfo.value)
+    assert str(vocab_dir) in message
+    assert "o200k_base.tiktoken" in message
+    assert "TIKTOKEN_ENCODINGS_BASE" not in os.environ
+
+
+# --------------------------------------------------------------------------------------
+# B2 (round `pilot-criteria-bringup`) — `config/models.local.yaml`: untracked endpoint overrides
+# --------------------------------------------------------------------------------------
+
+
+def test_models_local_yaml_absent_falls_back_to_the_template_value(tmp_path: Path) -> None:
+    """No override file (the common case — most clones never create one): the committed
+    template's own values resolve, unchanged."""
+    settings = load(write_config(tmp_path))
+    target = settings.models.profiles["default"]["HEAVY"][0]
+    assert target.model_id == "claude-opus-5"
+
+
+def test_models_local_yaml_overlays_a_field_onto_the_template_target(tmp_path: Path) -> None:
+    """The override supplies only the field it wants to change; every other field of that same
+    target — `api_key_env`, `price`, `effort` — still comes from the committed template."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  default:\n    HEAVY:\n      - { model_id: real-heavy-model }\n",
+        encoding="utf-8",
+    )
+    settings = load(config_dir)
+    target = settings.models.profiles["default"]["HEAVY"][0]
+    assert target.model_id == "real-heavy-model"
+    assert target.api_key_env == "ANTHROPIC_API_KEY"
+    assert target.price == Price(in_per_mtok=5.0, out_per_mtok=25.0)
+
+
+def test_models_local_yaml_naming_an_unknown_profile_fails_loud(tmp_path: Path) -> None:
+    """A typo'd profile name must not silently mean "no override applied" (Rule 11)."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  nope:\n    HEAVY:\n      - { model_id: x }\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(config_dir)
+    assert "nope" in str(excinfo.value)
+
+
+def test_models_local_yaml_naming_an_out_of_range_index_fails_loud(tmp_path: Path) -> None:
+    """`profiles.default.HEAVY` has exactly one target in the fixture template; an override naming
+    index 1 names a target the template does not have."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  default:\n    HEAVY:\n"
+        "      - { model_id: first }\n      - { model_id: second }\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(config_dir)
+    assert "index 1" in str(excinfo.value)
+
+
+def test_models_local_yaml_is_covered_by_the_secret_material_scan(tmp_path: Path) -> None:
+    """§9 rule 4 applies to this file too, not only to the committed three — an override file is
+    still config an operator could accidentally paste a real key into."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  default:\n    HEAVY:\n"
+        "      - { api_key_env: sk-ant-api03-" + "A" * 40 + " }\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(SecretInConfigError):
+        load(config_dir)

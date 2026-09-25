@@ -119,23 +119,28 @@ profiles:
   # chat-completions JSON variation.
   pilot:
     HEAVY:
-      - { backend: harmony_gpt_oss, model_id: PLACEHOLDER_gpt-oss-120b, effort: high,
+      - { backend: harmony_gpt_oss, model_id: gpt-oss-120b, effort: high,
           price: free,
           base_url: 'http://pilot-spark.internal:8000/v1' }
     WORKHORSE:
-      - { backend: harmony_gpt_oss, model_id: PLACEHOLDER_gpt-oss-120b, effort: medium,
+      - { backend: harmony_gpt_oss, model_id: gpt-oss-120b, effort: medium,
           price: free,
           base_url: 'http://pilot-spark.internal:8000/v1' }
     CHEAP:
-      - { backend: harmony_gpt_oss, model_id: PLACEHOLDER_gpt-oss-120b, effort: low,
+      - { backend: harmony_gpt_oss, model_id: gpt-oss-120b, effort: low,
           price: free,
           base_url: 'http://pilot-spark.internal:8000/v1' }
-    # PLACEHOLDER — both `model_id` and `base_url` MUST be edited once the Spark host is
-    # provisioned and the real served model name is known (ADR-0145; same treatment as
-    # `base_url` already had at the previous nemotron placeholder — this is not a new kind of
-    # incompleteness, only a renamed one). `model_id` is prefixed `PLACEHOLDER_` rather than a
-    # plausible-looking real name specifically so an operator who forgets to edit it gets a
-    # loud, obviously-wrong string in every log line and cache key, not a quietly wrong one.
+    # `model_id: gpt-oss-120b` (round `pilot-criteria-bringup`, B2) is the REAL served model
+    # family name, not sensitive — it names what `vllm serve --served-model-name gpt-oss-120b`
+    # will launch, never a hostname or IP. `base_url` stays the placeholder below: unlike the
+    # model id, a real Spark hostname/IP must never be committed to this public-mirrored repo.
+    #
+    # PLACEHOLDER — `base_url` MUST be edited once the Spark host is provisioned (ADR-0145; same
+    # treatment the previous nemotron placeholder had — not a new kind of incompleteness, only a
+    # renamed one). Never hand-edit this file with the real host: use an untracked, gitignored
+    # `config/models.local.yaml` instead (see `.gitignore` and `docs/SPEC.md`'s `config/models.yaml`
+    # section for the override file's format) — `FleetSettings.load()` overlays it onto this
+    # committed template at load time, so the real endpoint never touches version control.
     #
     # No `capabilities_override` on any tier: harmony_gpt_oss's own declared_capabilities()
     # already claims TOOL_CALL unconditionally (a fact about the GPT-OSS model family, not this

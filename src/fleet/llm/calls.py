@@ -182,7 +182,7 @@ PROMPTS: Final[Mapping[Role, PromptTemplate]] = {
     ),
     Role.TRANSFORM_REPAIR: PromptTemplate(
         role=Role.TRANSFORM_REPAIR,
-        version=2,  # ADR-0146: file evidence now renders as a fenced raw block, not JSON.
+        version=3,  # ADR-0146 (v2): fenced raw block. B4 (v3): scope-note line, below.
         system=(
             "You repair a source file whose deterministic rewrite failed, given the failure "
             f"evidence and the current file content. {_RETURN_JSON}"
@@ -190,7 +190,9 @@ PROMPTS: Final[Mapping[Role, PromptTemplate]] = {
         instruction=(
             "Propose the smallest unified diff that fixes the reported failure. Change only what "
             "the evidence justifies. Summarise your approach in one line: that line, never the "
-            "diff, is what a later attempt is shown if this one is refuted."
+            "diff, is what a later attempt is shown if this one is refuted. Only the fenced file "
+            "shown below may be edited: no pre-image is available for any other file you might "
+            "reference, so a patch touching a path outside that fence cannot be resolved."
         ),
     ),
     Role.API_INCOMPAT_REWRITE: PromptTemplate(
@@ -207,7 +209,7 @@ PROMPTS: Final[Mapping[Role, PromptTemplate]] = {
     ),
     Role.ESCALATION: PromptTemplate(
         role=Role.ESCALATION,
-        version=2,  # ADR-0146: file evidence now renders as a fenced raw block, not JSON.
+        version=3,  # ADR-0146 (v2): fenced raw block. B4 (v3): scope-note line, below.
         system=(
             "You are the final automated attempt on a task two earlier attempts failed. You are "
             "given the evidence and one-line summaries of the approaches already refuted — never "
@@ -217,7 +219,9 @@ PROMPTS: Final[Mapping[Role, PromptTemplate]] = {
             "Propose a materially different approach from the refuted ones. If the evidence shows "
             "the task needs a human decision, set abandon_recommended and say precisely what the "
             "human must decide: recommending that is a better answer than a patch you do not "
-            "believe in."
+            "believe in. Only the fenced file shown below may be edited: no pre-image is "
+            "available for any other file you might reference, so a patch touching a path "
+            "outside that fence cannot be resolved."
         ),
     ),
     Role.BUILD_AUTHORING: PromptTemplate(

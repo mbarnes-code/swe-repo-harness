@@ -6397,6 +6397,8 @@ config/
   repos.yaml                  # the fleet manifest: 250 repos
   models.yaml                 # ADR-0023: named profiles; role → tier → [BackendTarget]. The ONLY
                               #   place a model id or a base_url may appear (§12.40)
+  models.local.yaml           # OPTIONAL, gitignored (B2, §9): untracked real `pilot` endpoint
+                              #   values, overlaid onto models.yaml's committed template at load
   rules/*.yml                 # ast-grep RewriteRule definitions
   rules/secrets.txt           # git-filter-repo --replace-text list (§11.4)
 
@@ -6728,6 +6730,16 @@ llm:                          # ADR-0023. WHICH models answer is config/models.y
                               # Deliberately NOT a quality assertion — the harness cannot measure
                               #   that. It is the one mechanical precondition tier-1 work has:
                               #   a repo's evidence bundle must fit. See §13 row 38.
+  harmony_vocab_dir: null     # ADR-0148/§12.50 (offline-vocab half). A local directory holding
+                              #   the Harmony/tiktoken `o200k_base.tiktoken` vocab file. When set,
+                              #   `FleetSettings.load()` points the `openai-harmony` SDK's own
+                              #   `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR` env vars at it
+                              #   itself, before any `load_harmony_encoding()` call in the
+                              #   process — an operator never exports these — and fails loud HERE,
+                              #   at settings load, naming the path and the missing piece, if the
+                              #   directory or its vocab file is absent. `null` (the default)
+                              #   leaves both env vars untouched: the SDK falls back to its own
+                              #   default (network-fetched, cached) behaviour.
 
 pr:
   base: integration
@@ -6910,6 +6922,34 @@ profiles:
       - { backend: anthropic,        model_id: claude-haiku-4-5-20251001,
           api_key_env: ANTHROPIC_API_KEY, price: { in_per_mtok: 1.0, out_per_mtok: 5.0 } }
 ```
+
+A fifth profile, `pilot` (§15.2, ADR-0145/ADR-0148), routes all three tiers to one dedicated Spark
+host serving GPT-OSS-120b over Harmony via the `harmony_gpt_oss` backend; not shown above because
+it is illustrative-profile-listing noise here, not a second worked example — see
+`config/models.yaml` itself for its exact, current targets.
+
+**`config/models.local.yaml` — an untracked, gitignored local override (B2, round
+`pilot-criteria-bringup`).** This repo is public on GitHub, so a real Spark `base_url`/`model_id`
+may never be committed to `config/models.yaml`; the committed `pilot` profile carries a placeholder
+`base_url` for exactly this reason (the real served model name, `gpt-oss-120b`, is not sensitive
+and IS committed). An operator with real endpoint values creates `config/models.local.yaml`
+(`.gitignore`d; absent by default, so a fresh clone needs none) shaped as:
+
+```yaml
+profiles:
+  pilot:
+    HEAVY:    [ { base_url: 'http://10.0.0.5:8000/v1' } ]
+    WORKHORSE: [ { base_url: 'http://10.0.0.5:8000/v1' } ]
+    CHEAP:    [ { base_url: 'http://10.0.0.6:8000/v1' } ]
+```
+
+`FleetSettings.load()` reads this file (if present) and overlays each listed field onto the
+COMMITTED template's `profiles.<profile>.<tier>[<index>]` target, positionally by index, before
+`config/models.yaml`'s own validation rules (rules 1–5 below) run — any field the override omits
+comes from the template unchanged. Naming a profile, tier, or index the template does not define
+is a loud startup error, never a silently-ignored typo. This layer is **not** `FLEET_*` env (§9's
+"API keys come from the environment only" is unrelated and unaffected — this file carries no
+secret, only endpoint routing) and never asks an operator to export anything into their shell.
 
 Five rules the loader enforces at startup, before a repo is touched:
 

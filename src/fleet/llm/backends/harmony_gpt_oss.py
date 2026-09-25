@@ -42,7 +42,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import ClassVar, Final, Protocol, cast
+from typing import Any, ClassVar, Final, Protocol, cast
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
 from openai_harmony import (
@@ -378,13 +378,29 @@ def _tool_result(tool_name: str, content: str) -> HarmonyMessage:
     )
 
 
+def _load_encoding() -> object:
+    """The ONE place this module calls `load_harmony_encoding` (four call sites -> one, Rule 2).
+
+    B1 (round `pilot-criteria-bringup`, ADR-0148/§12.50 offline-vocab half): the SDK reads
+    `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR` from `os.environ` itself and falls back to a
+    network fetch when neither is set. Those two vars are set ONCE, process-wide, by
+    `FleetSettings.load()` (`settings.py::_configure_harmony_vocab`, from `llm.harmony_vocab_dir`)
+    before any backend runs — this call trusts that already happened and never re-derives the
+    directory itself, matching this module's own "quarantine the SDK, decide nothing" discipline
+    (module docstring, property 3). Untyped SDK boundary, like every other `load_harmony_encoding`
+    call site in this file before this refactor — `cast` at each of the four call sites, not here,
+    so this helper's own return type stays honestly untyped rather than lying with a `cast`
+    nothing here actually justifies."""
+    return load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+
+
 def render_for_completion(conversation: Conversation) -> list[int]:
     """`Conversation` -> token ids ready to post as `prompt` to vLLM's completions endpoint."""
-    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    encoding = _load_encoding()
     # openai_harmony ships no py.typed marker (see this module's import-untyped note), so the SDK
     # call resolves to Any; cast matches the sibling backends' own convention for an untyped SDK
     # boundary (e.g. openai_compatible.py:257, vertex.py:346).
-    tokens = encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
+    tokens = cast(Any, encoding).render_conversation_for_completion(conversation, Role.ASSISTANT)
     return cast(list[int], tokens)
 
 
@@ -468,7 +484,7 @@ def _decode_apply_patch(
 
 
 def _parse_messages(tokens: Sequence[int]) -> list[HarmonyMessage]:
-    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    encoding = cast(Any, _load_encoding())
     try:
         parsed = encoding.parse_messages_from_completion_tokens(
             tokens, Role.ASSISTANT, strict=False,
@@ -665,7 +681,7 @@ class _VllmCompletionsTransport:
 
         choice = response.choices[0]  # type: ignore[attr-defined]
         text = choice.text or ""
-        encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+        encoding = cast(Any, _load_encoding())
         token_ids = encoding.encode(text, allowed_special="all")
         finish_reason = "length" if choice.finish_reason == "length" else "stop"
         usage = getattr(response, "usage", None)
@@ -745,7 +761,7 @@ class HarmonyGptOssBackend:
         call-count ceiling (`run_max_llm_calls`, ADR-0142) only counts this as 1."""
         base_url = _require_base_url(target)
         api_key = self._api_key(target)
-        encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+        encoding = cast(Any, _load_encoding())
         transport = getattr(self, "_transport", _DEFAULT_TRANSPORT)
 
         async def round_trip(conversation: Conversation) -> tuple[list[int], Mapping[str, object]]:

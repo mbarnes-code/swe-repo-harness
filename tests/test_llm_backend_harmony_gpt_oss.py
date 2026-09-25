@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -126,6 +127,82 @@ def test_the_declaration_is_a_copy_not_shared_module_state() -> None:
     first.max_context = 999_999  # type: ignore[misc]  # FleetModel allows assignment
     second = backend.declared_capabilities(target())
     assert second.max_context != 999_999
+
+
+# ---------------------------------------------------------------------------------------------
+# B1 (round `pilot-criteria-bringup`) — offline Harmony vocab (§12.50 offline-vocab half).
+# `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR` are set process-wide by
+# `settings.py::_configure_harmony_vocab` (see tests/test_settings.py's mutation-tested proof of
+# THAT half); the tests here cover this module's own side: one shared call site.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_load_harmony_encoding_is_called_from_exactly_one_place_in_this_module() -> None:
+    """Source-level, not behavioral — runs with no `openai-harmony` extra installed at all. Four
+    call sites (`render_for_completion`, `_parse_messages`, `_VllmCompletionsTransport.__call__`,
+    `HarmonyGptOssBackend.invoke`) used to each call `load_harmony_encoding` directly; B1
+    centralizes them into `_load_encoding()` (Rule 2) so the env-var contract in that one
+    function's docstring is the ONLY place a reader needs to check."""
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "fleet"
+        / "llm"
+        / "backends"
+        / "harmony_gpt_oss.py"
+    ).read_text(encoding="utf-8")
+    assert source.count("load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)") == 1
+    assert source.count("_load_encoding()") >= 4, "the four call sites must all route through it"
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_the_backend_loads_the_encoding_from_a_staged_vocab_dir_with_network_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§12.50's offline-vocab bullet, end to end through this module's own call boundary: with
+    `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR` pointed at a pre-staged directory (exactly
+    what `settings.py::_configure_harmony_vocab` does at settings load) and every non-loopback
+    socket refused (`tests/fixtures/llm/stub_openai_server.py::assert_loopback_only`, this repo's
+    existing network-denial pattern — see `tests/test_local_profile_e2e.py`), `_load_encoding()`
+    still returns successfully and opens no socket, because it reads the env vars this module
+    itself never sets (that is `_configure_harmony_vocab`'s job, proven independently in
+    `tests/test_settings.py`) and trusts the SDK to honour them.
+
+    A genuine `o200k_base.tiktoken` is proprietary vocab data this repo does not vendor (CLAUDE.md
+    §5's workspace containment also forbids reading one from outside this checkout); the transport
+    boundary under test here is "did OUR code reach for the network", not "did tiktoken's BPE
+    parser accept this exact file" — that second property is the SDK's own tested contract, so
+    `load_harmony_encoding` itself is monkeypatched to a stub that asserts the env vars are
+    already correct before returning, rather than exercising a hand-rolled vocab file this test
+    cannot validate is genuinely well-formed.
+    """
+    import fleet.llm.backends.harmony_gpt_oss as harmony_mod
+    from tests.fixtures.llm.stub_openai_server import assert_loopback_only
+
+    vocab_dir = tmp_path / "vocab"
+    vocab_dir.mkdir()
+    (vocab_dir / "o200k_base.tiktoken").write_text("stub vocab content\n", encoding="utf-8")
+    monkeypatch.setenv("TIKTOKEN_ENCODINGS_BASE", str(vocab_dir))
+    monkeypatch.setenv("TIKTOKEN_RS_CACHE_DIR", str(vocab_dir))
+
+    calls: list[str] = []
+
+    def fake_load_harmony_encoding(_name: object) -> str:
+        # The property under test: by the time this SDK entry point is reached, the vocab env
+        # vars already point at the pre-staged directory — never require a network fetch.
+        assert os.environ.get("TIKTOKEN_ENCODINGS_BASE") == str(vocab_dir)
+        assert os.environ.get("TIKTOKEN_RS_CACHE_DIR") == str(vocab_dir)
+        calls.append("loaded")
+        return "stub-encoding"
+
+    monkeypatch.setattr(harmony_mod, "load_harmony_encoding", fake_load_harmony_encoding)
+
+    with assert_loopback_only() as guard:
+        result = harmony_mod._load_encoding()
+
+    assert result == "stub-encoding"
+    assert calls == ["loaded"]
+    assert guard.blocked_attempts == [], "no code path here may reach for the network"
 
 
 LLM_PATCH_PROPOSAL_SCHEMA: dict[str, object] = {
@@ -985,6 +1062,60 @@ def _rewrite_shaped_evidence(*, path: str, current_content: str, secret: str | N
     if secret is not None:
         evidence["stderr"] = f"{evidence['stderr']}: {secret}"
     return evidence
+
+
+def test_rewrite_shaped_evidence_fixture_matches_the_real_evidence_key_set(tmp_path: Path) -> None:
+    """Drift guard (B4, round `pilot-criteria-bringup`) for `_rewrite_shaped_evidence` above — the
+    exact class of bug D145 was: a hand-built test fixture silently diverging from what
+    `workers/rewrite.py::RewriteWorker._evidence` actually renders, so this file's tests exercise
+    a shape production never sends. Compares KEY SETS, not values: `_rewrite_shaped_evidence`
+    always uses `ContextPolicy.EVIDENCE_ONLY` (no `rejected_approaches`/`prior_diffs`/
+    `locally_rejected_signatures` keys), so the real `_evidence()` call below is built under that
+    same policy for an apples-to-apples comparison."""
+    from fleet.llm.client import CallBudget
+    from fleet.models.enums import ContextPolicy, FailureClass, TransformTier
+    from fleet.workers.base import WorkerContext
+    from fleet.workers.rewrite import RewriteInput, RewriteWorker
+
+    deadline = 3600.0
+    ctx = WorkerContext(
+        run_id=UUID("00000000-0000-4000-8000-0000000c0ffe"),
+        repo_id="acme-widgets",
+        attempt=2,
+        workdir=str(tmp_path),
+        lease_owner="host:container:1:boot",
+        lease_fence=1,
+        deadline=deadline,
+        cancel=asyncio.Event(),
+        budget=CallBudget(remaining_tokens=200_000, remaining_usd=5.0, deadline=deadline),
+        db=object(),
+        llm=object(),
+        router=object(),
+        limits=object(),
+        log=object(),
+        tier=TransformTier.LLM_REPAIR,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
+    )
+    payload = RewriteInput(
+        branch="migrate/acme-widgets",
+        phase_pre_commit_sha="a" * 40,
+        dest_path="monorepo/widgets",
+        targets=["src/app.py"],
+        rules=[],
+    )
+    real_evidence = RewriteWorker()._evidence(
+        ctx,
+        payload,
+        unit="src/app.py",
+        source="def greet():\n    pass\n",
+        failure=FailureClass.RULE_MISS,
+        probe="deterministic rules",
+        stderr="no rule produced a change",
+    )
+    fixture_evidence = _rewrite_shaped_evidence(path="src/app.py", current_content="x")
+    assert set(fixture_evidence) == set(real_evidence), (
+        "the fixture's key set drifted from RewriteWorker._evidence's real output"
+    )
 
 
 def _update_patch_for(path: str) -> str:

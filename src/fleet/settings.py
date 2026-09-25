@@ -29,6 +29,7 @@ declared price `budget_ledger.spent_usd` stays `0.00`, `run_max_cost_usd` never 
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -98,6 +99,17 @@ CONFIG_SECTIONS: Final[tuple[str, ...]] = (
 
 #: The 15th §10 drift section: "plus the resolved `config/models.yaml` profile".
 MODELS_SECTION: Final = "models_profile"
+
+#: ADR-0148/§12.50. `llm.harmony_vocab_dir`'s expected file, per `openai-harmony`'s own vocab
+#: registry (`references/harmony`'s `HARMONY_GPT_OSS` encoding names `o200k_base`).
+_HARMONY_VOCAB_FILENAME: Final = "o200k_base.tiktoken"
+_TIKTOKEN_ENCODINGS_BASE_ENV: Final = "TIKTOKEN_ENCODINGS_BASE"
+_TIKTOKEN_RS_CACHE_DIR_ENV: Final = "TIKTOKEN_RS_CACHE_DIR"
+
+#: B2 (round `pilot-criteria-bringup`). An untracked, gitignored local file carrying REAL `pilot`
+#: endpoint values (`base_url`, `model_id`, ...) that must never reach the public GitHub mirror of
+#: this repo — see `.gitignore` and `docs/SPEC.md`'s `config/models.yaml` section for the format.
+_MODELS_OVERRIDE_FILENAME: Final = "models.local.yaml"
 
 #: §7.7's shipped backends. The registry itself lives in `fleet.llm.backends` and is open-ended;
 #: settings must not import it (a backend whose SDK is absent does not register, which is not an
@@ -804,6 +816,14 @@ class LlmSection(Section):
     require_capabilities: dict[ModelTier, CapabilityRequirement] = Field(
         default_factory=lambda: {ModelTier.HEAVY: CapabilityRequirement(min_context=100_000)}
     )
+    harmony_vocab_dir: str | None = Field(default=None)
+    """ADR-0148/§12.50 (offline-vocab half). A local directory holding the Harmony/tiktoken
+    `o200k_base.tiktoken` vocab file. When set, `FleetSettings.load()` points the `openai-harmony`
+    SDK's own `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR` env vars at it — the harness sets
+    them, an operator never exports them — BEFORE any `load_harmony_encoding()` call in the
+    process, and fails loud HERE, at settings load, if the directory or its vocab file is missing
+    (Rule 11: never lazily at the backend's first call). `None` (the default) leaves both env vars
+    untouched: the SDK falls back to its own default (network-fetched, cached) behaviour."""
 
 
 class PrSection(Section):
@@ -1255,6 +1275,7 @@ class FleetSettings:
         fleet_path = cfg_dir / "fleet.yaml"
         repos_path = cfg_dir / "repos.yaml"
         models_path = cfg_dir / "models.yaml"
+        models_override_path = cfg_dir / _MODELS_OVERRIDE_FILENAME
 
         file_data, fleet_raw = _read_yaml_mapping(fleet_path)
         env_data = _env_overrides(environ)
@@ -1263,19 +1284,27 @@ class FleetSettings:
         config = cls._validate_fleet_config(
             fleet_path, file_data=file_data, env_data=env_data, cli_data=cli_data
         )
+        _configure_harmony_vocab(config, fleet_path)
 
         repos_data, repos_raw = _read_yaml_mapping(repos_path)
         models_data, models_raw = _read_yaml_mapping(models_path)
+        overrides_data, overrides_raw = _read_optional_yaml_mapping(models_override_path)
 
         # §9 rule 4: the scan uses the MERGED redaction patterns, so it runs after fleet.yaml
         # validates and covers fleet.yaml itself.
-        sources = ((fleet_path, fleet_raw), (repos_path, repos_raw), (models_path, models_raw))
+        sources = (
+            (fleet_path, fleet_raw),
+            (repos_path, repos_raw),
+            (models_path, models_raw),
+            (models_override_path, overrides_raw),
+        )
         for path, raw in sources:
             _refuse_secret_material(path, raw, config.redaction.patterns)
 
         _check_redaction_switch(config, environ, fleet_path)
 
         repos = _validate_model(ReposManifest, repos_data, repos_path)
+        models_data = _apply_model_overrides(models_override_path, models_data, overrides_data)
         models = _validate_models_config(models_path, models_data)
 
         profile = config.llm.profile
@@ -1436,6 +1465,112 @@ def _refuse_secret_material(path: Path, raw: str, patterns: Mapping[str, str]) -
             file=path,
             key=f"redaction.patterns.{kind}",
         )
+
+
+def _configure_harmony_vocab(config: FleetConfig, path: Path) -> None:
+    """ADR-0148/§12.50: point the `openai-harmony` SDK's own vocab-loading env vars at
+    `llm.harmony_vocab_dir` before any `load_harmony_encoding()` call in the process — the SDK
+    reads `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR` itself and falls back to a network
+    fetch when neither is set. Fails loud HERE, at settings load, naming both the configured path
+    and the missing piece, rather than lazily inside the backend's first call (Rule 11) — the
+    harness sets these vars itself; an operator is never asked to export them."""
+    vocab_dir = config.llm.harmony_vocab_dir
+    if vocab_dir is None:
+        return
+    directory = Path(vocab_dir)
+    if not directory.is_dir():
+        raise ConfigValidationError(
+            f"llm.harmony_vocab_dir {vocab_dir!r} does not exist or is not a directory",
+            file=path,
+            key="llm.harmony_vocab_dir",
+        )
+    vocab_file = directory / _HARMONY_VOCAB_FILENAME
+    if not vocab_file.is_file():
+        raise ConfigValidationError(
+            f"llm.harmony_vocab_dir {vocab_dir!r} is missing {_HARMONY_VOCAB_FILENAME!r} "
+            "(the Harmony/tiktoken o200k_base vocab file)",
+            file=path,
+            key="llm.harmony_vocab_dir",
+        )
+    os.environ[_TIKTOKEN_ENCODINGS_BASE_ENV] = vocab_dir
+    os.environ[_TIKTOKEN_RS_CACHE_DIR_ENV] = vocab_dir
+
+
+def _read_optional_yaml_mapping(path: Path) -> tuple[dict[str, Any], str]:
+    """Like `_read_yaml_mapping`, but a missing file is "no overrides", not a `ConfigFileError` —
+    `config/models.local.yaml` (B2) is an OPTIONAL, gitignored local layer most clones never
+    have."""
+    if not path.exists():
+        return {}, ""
+    return _read_yaml_mapping(path)
+
+
+def _apply_model_overrides(
+    overrides_path: Path,
+    models_data: Mapping[str, Any],
+    overrides_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    """`models_data` (parsed `config/models.yaml`) with `config/models.local.yaml`'s per-target
+    field overlays applied, BEFORE `_validate_models_config` — B2's untracked-local-override layer
+    for real `base_url`/`model_id`/... values §9 rule 4 refuses to let the COMMITTED template carry.
+
+    Shape: `{profiles: {<profile>: {<tier>: [{..fields to overlay..}, ...]}}}`, positionally
+    aligned by index onto the template's own `profiles.<profile>.<tier>` list — the override
+    supplies only the fields it wants to change (`base_url`, `model_id`, ...); every other field
+    of that target comes from the committed template unchanged. A profile, tier or index the
+    override names that the template does not define is a loud startup error (Rule 11): silently
+    ignoring an unresolvable override would make a typo read as "no override applied", which is a
+    misconfigured Spark endpoint discovered in wave 7, exactly what §9's own loader rules exist to
+    front-load to startup.
+    """
+    if not overrides_data:
+        return dict(models_data)
+    merged = copy.deepcopy(dict(models_data))
+    override_profiles = overrides_data.get("profiles")
+    if not isinstance(override_profiles, Mapping):
+        return merged
+    base_profiles = merged.get("profiles")
+    if not isinstance(base_profiles, dict):
+        raise ConfigValidationError(
+            "names overrides, but config/models.yaml declares no `profiles` at all",
+            file=overrides_path,
+            key="profiles",
+        )
+    for profile_name, tiers in override_profiles.items():
+        if not isinstance(tiers, Mapping):
+            continue
+        base_tiers = base_profiles.get(profile_name)
+        if not isinstance(base_tiers, dict):
+            raise ConfigValidationError(
+                f"names profile {profile_name!r}, which config/models.yaml does not define",
+                file=overrides_path,
+                key=f"profiles.{profile_name}",
+            )
+        for tier_name, override_targets in tiers.items():
+            base_targets = base_tiers.get(tier_name)
+            if not isinstance(base_targets, list):
+                raise ConfigValidationError(
+                    f"names tier {tier_name!r} of profile {profile_name!r}, which "
+                    "config/models.yaml does not define",
+                    file=overrides_path,
+                    key=f"profiles.{profile_name}.{tier_name}",
+                )
+            for index, override_target in enumerate(
+                override_targets if isinstance(override_targets, list) else []
+            ):
+                if not isinstance(override_target, Mapping):
+                    continue
+                if index >= len(base_targets):
+                    raise ConfigValidationError(
+                        f"names target index {index} of profiles.{profile_name}.{tier_name}, "
+                        f"but config/models.yaml only defines {len(base_targets)} target(s) there",
+                        file=overrides_path,
+                        key=f"profiles.{profile_name}.{tier_name}[{index}]",
+                    )
+                base_target = base_targets[index]
+                if isinstance(base_target, dict):
+                    base_target.update(override_target)
+    return merged
 
 
 def _check_redaction_switch(config: FleetConfig, env: Mapping[str, str], path: Path) -> None:

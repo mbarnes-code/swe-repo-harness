@@ -11681,3 +11681,172 @@ pre-existing-vs-new drift; no test file changes were needed — no test in `test
 §12 criterion count (checked by grep for `48` co-occurring with `12\.`/`criteria`/`Success
 Criteria`; no hit found), so nothing needed updating for the 48→51 count change. See this round's
 own commit message(s) for the exact verification commands and their output.
+
+---
+
+## Round B (B1, B2, B4) of the same owner-approved brief — offline Harmony vocab, untracked
+Spark-endpoint overrides, D145/ADR-0146 carryover items
+
+**This round closes neither §12.49, §12.50, nor §12.51** — all three remain `OPEN`, exactly as
+Round A left them; closing any of them needs live Spark hardware (Round C, not yet started, per
+both criteria's own dated markers and Rule 13(a)/(b)/(c)'s options). This round makes measurable
+progress toward the OFFLINE-VOCAB HALF of §12.50's third bullet ("The Harmony vocabulary loads
+from a pre-staged path with vocab download impossible ... and the harness sets
+`TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR` itself from configuration") without fully
+closing it: the config field, the fail-loud-at-startup validation, and the env-var-setting
+mechanism are built and mutation-tested; the harmony-SDK-level "loads successfully with network
+blocked" proof is written but UNEXECUTED here (see B1 below) — §12.50 also needs its `apply_patch`
+end-to-end bullet and its replay-fixture bullet, neither attempted this round. Per Rule 13, this
+round names no §12 criterion moving unmet → met; it is process/mechanism-hardening work explicitly
+staged for a later hardware round, matching Round A's own framing of the three criteria's scope.
+
+**B1 — offline Harmony vocabulary (`src/fleet/settings.py`, `src/fleet/llm/backends/
+harmony_gpt_oss.py`).** Added `LlmSection.harmony_vocab_dir: str | None` (default `None`, no
+behavior change for an operator who never sets it). `FleetSettings.load()` calls a new
+`_configure_harmony_vocab()` right after `FleetConfig` validates: when set, it requires the
+directory AND its `o200k_base.tiktoken` file to exist, raising `ConfigValidationError` naming both
+the path and the missing piece if not (Rule 11, at settings load — never lazily at the backend's
+first call), then points `os.environ["TIKTOKEN_ENCODINGS_BASE"]`/`os.environ["TIKTOKEN_RS_CACHE_DIR"]`
+at it itself. `harmony_gpt_oss.py`'s four `load_harmony_encoding()` call sites (module docstring's
+own count) are centralized into one new `_load_encoding()` helper (Rule 2) that trusts the env vars
+are already correct rather than re-deriving them.
+
+**Mutation-tested, fully executed in this sandbox (Rule 12):** four new tests in
+`tests/test_settings.py` (default no-op, env-vars-set, missing-dir fails loud, missing-file fails
+loud) — removing the `_configure_harmony_vocab()` call from `load()` turns 3 of 4 RED (the no-op
+control correctly stays GREEN), confirmed and reverted. A source-level test in
+`tests/test_llm_backend_harmony_gpt_oss.py` asserts `load_harmony_encoding(HarmonyEncodingName.
+HARMONY_GPT_OSS)` appears exactly once in the module and `_load_encoding()` is referenced at least
+four times; reintroducing a direct call turns it RED, confirmed and reverted.
+
+**Disclosed gap — could not execute the harmony-SDK-level proof in this sandbox.** The `harmony`
+extra (`openai-harmony`) is **not installed** in this worktree's `.venv`
+(`importlib.util.find_spec("openai_harmony") is None`, verified), and installing it or fetching a
+real `o200k_base.tiktoken` both require network access this round explicitly disallows; reading one
+from elsewhere on the host would also violate CLAUDE.md §5's workspace-containment rule. As a
+result **all 43 `@pytest.mark.skipif(not HARMONY_INSTALLED, ...)` tests in
+`tests/test_llm_backend_harmony_gpt_oss.py` are skipped in this sandbox** (measured: 47 skipped
+individual cases after parametrization, 4 passed — a pre-existing sandbox condition, not something
+this round introduced; the same file's tests were already mostly skip-gated before this round). A
+new HARMONY_INSTALLED-gated test,
+`test_the_backend_loads_the_encoding_from_a_staged_vocab_dir_with_network_blocked`, is written
+(reusing `tests/fixtures/llm/stub_openai_server.py::assert_loopback_only`, this repo's existing
+network-denial pattern) but is UNEXECUTED here — it monkeypatches `load_harmony_encoding` itself
+rather than exercising a hand-fabricated vocab file, because this round could not verify a
+self-constructed `.tiktoken` fixture would actually satisfy the real SDK's internal validation.
+**The brief's "update the 22 previously-network-dependent tests" item is NOT done this round** —
+the actual current count (measured, not assumed) is 43 skip-gated test functions / 47 skipped
+cases; none were converted to hermetic fixture-backed tests, because doing so needs the extra
+installed to verify the fix actually works, which this sandbox cannot provide. This is disclosed
+as an open item for whichever round next has `harmony`-extra + network access, not silently
+dropped.
+
+**B2 — real endpoint values via untracked local override (`config/models.local.yaml`).** Extended
+`FleetSettings.load()` with a new optional layer: `config/models.local.yaml` (gitignored, absent
+by default) is read via a new `_read_optional_yaml_mapping()` (missing file ⇒ no overrides, not a
+`ConfigFileError`) and merged onto the parsed `config/models.yaml` mapping by a new
+`_apply_model_overrides()`, BEFORE `_validate_models_config()` runs. Shape: `{profiles: {<profile>:
+{<tier>: [{..fields..}, ...]}}}`, positionally aligned by index onto the template's own target
+list — an override supplies only the fields it changes; every other field comes from the committed
+template. Naming a profile/tier/index the template does not define raises `ConfigValidationError`
+(Rule 11: a typo must not silently mean "no override applied"). The override file is included in
+the existing §9-rule-4 secret-material scan (`_refuse_secret_material`) alongside the three
+committed config files, for the same reason: an operator could paste a real key into it by
+accident. Not `FLEET_*` env (forbidden by the brief) and never asks an operator to export anything.
+
+`config/models.yaml`'s `pilot` profile: `model_id: PLACEHOLDER_gpt-oss-120b` → `model_id:
+gpt-oss-120b` on all three tiers (the real served model family name — not sensitive, confirmed
+safe to commit per the brief). `base_url` is UNCHANGED (`http://pilot-spark.internal:8000/v1`,
+still a placeholder) — only the model-id placeholder was resolved, per the brief's explicit scope.
+The surrounding comment block is rewritten to point at `config/models.local.yaml` instead of
+"edit this file by hand." `.gitignore` gains `config/models.local.yaml` with an explanatory
+comment. `docs/SPEC.md` §9 gains a documentation paragraph (with a worked YAML example) right after
+the `profiles:` sample block, plus a one-line mention in the `config/` directory listing.
+
+**Tests (`tests/test_settings.py`, all executed, all green):** absent-file falls back to the
+template; present file overlays one field while leaving sibling fields (`api_key_env`, `price`)
+from the template untouched; unknown-profile and out-of-range-index each fail loud; the override
+file is covered by the secret-material scan (a planted `sk-ant-...`-shaped string in it raises
+`SecretInConfigError`). No mutation test was run for this half — the five tests already exercise
+the discriminating branches directly (absent vs. present vs. each of the two error paths).
+
+**§12.40 grep confirmation (required by the brief, re-run after all changes):**
+```
+grep -rnE '\b(claude|gpt|gemini|llama|mistral|qwen|deepseek|phi|mixtral)[-_.][A-Za-z0-9]' src/ --include='*.py' | grep -v '^src/fleet/llm/backends/'
+grep -rnE 'https?://[^"'"'"'[:space:]]*/v1' src/ --include='*.py' | grep -v '^src/fleet/llm/backends/'
+```
+The URL grep returns nothing (clean). **The model-id grep returns 2 pre-existing hits** —
+`src/fleet/vcs/apply_patch.py:2` and `:19`, both comments naming the vendored `gpt-oss` reference
+project (the `.md` header comment, not a model id or endpoint) — confirmed via `git show
+6cb459b:src/fleet/vcs/apply_patch.py` to predate this round entirely (last touched at `ff32d5d`,
+before `6cb459b`). This is the same disclosed class §12.40's own text already carves out for
+`llama.cpp` (a product name, not a model id, inside a `.md`/comment string) — not a regression this
+round introduced, and re-scoping the grep or editing that file is out of this round's stated
+brief. Scoped to the files this round actually touched (`src/fleet/settings.py`,
+`src/fleet/llm/calls.py`; `harmony_gpt_oss.py` is itself under `llm/backends/` and therefore
+already exempted by the grep's own `-v` filter): zero hits.
+
+**B4 — small carryover items from the D145/ADR-0146 review.**
+1. **Disclosure.** Confirmed via grep across `docs/DECISIONS.md`/`docs/INTEGRATION_HONESTY.md`
+   that the specific consequence — "if redaction alters a line, a patch whose context touches that
+   altered line produces a diff that fails `git apply`" — was NOT already stated explicitly (only
+   the more general "redaction still applies to the fenced content" was). Added as a new dated
+   paragraph to ADR-0146 in `docs/DECISIONS.md`, disclosing it as an accepted tradeoff (the
+   alternative is showing the model its own un-redacted secret), not a bug.
+2. **Prompt scope note.** Added one sentence to both `Role.TRANSFORM_REPAIR` and `Role.ESCALATION`
+   instruction text in `src/fleet/llm/calls.py`'s `PROMPTS` table stating only the fenced file may
+   be edited, since no pre-image exists for any other file the model might reference. Both
+   templates' `prompt_template_version` bumped 2 → 3. Checked for hardcoded-`2` test breakage
+   (`grep` across `tests/`): the one hit (`tests/test_state_models.py:349`) is an unrelated
+   fixture's own arbitrary field value, not a comparison against the real `PROMPTS` table, and the
+   one dynamic-lookup site (`tests/test_llm_backend_openai_compatible.py:637`) calls
+   `prompt_template_version(Role.ESCALATION)` live, so it tracks the bump automatically. Full
+   suite run below confirms no breakage.
+3. **Drift guard test.** `_rewrite_shaped_evidence` (the existing fixture helper in
+   `tests/test_llm_backend_harmony_gpt_oss.py`, already named exactly as the brief guessed) now has
+   a sibling test, `test_rewrite_shaped_evidence_fixture_matches_the_real_evidence_key_set`, that
+   constructs a real `WorkerContext`/`RewriteInput` and calls the real
+   `RewriteWorker()._evidence(...)` under `ContextPolicy.EVIDENCE_ONLY` (the fixture's own fixed
+   policy), asserting the two functions' output KEY SETS are equal. Mutation-tested: dropping the
+   fixture's `context_policy` key turns it RED (confirmed and reverted); this needs no
+   `openai-harmony` extra and ran for real in this sandbox.
+
+**Verification — what was run, what was excluded (§6 discipline).**
+- `ruff check .` (whole repo, no path args): **1 finding**, the single pre-existing
+  `src/fleet/ecosystems/jvm.py:30` `E501` noted in this round's brief as the expected baseline —
+  confirmed unrelated to any file this round touched.
+- `python -m mypy` (whole repo, no path args, `packages = ["fleet"]` sets the scope from the
+  manifest): **clean, 136 source files, no errors.**
+- Full test files run WHOLE, no `-k`: `tests/test_settings.py` (68 passed),
+  `tests/test_llm_backend_harmony_gpt_oss.py` (4 passed, 47 skipped — see B1's disclosed gap),
+  `tests/test_llm_roles.py`, `tests/test_llm_cache.py`, `tests/test_llm_backend_openai_compatible.py`,
+  `tests/test_backend_registry_gate.py`, `tests/test_workers_transform.py`,
+  `tests/test_local_profile_e2e.py`, `tests/test_models_yaml_ast.py` — **218 passed, 47 skipped,
+  0 failed** across all nine files run together. These nine were selected as every file this
+  round's diff plausibly touches (settings loader, the two new/changed prompt templates' roles,
+  the harmony backend itself, the real `config/` directory, `RewriteWorker._evidence`) plus every
+  file that loads the REAL `config/models.yaml` directly (`test_backend_registry_gate.py`,
+  `test_llm_backend_openai_compatible.py`, `test_local_profile_e2e.py`, `test_models_yaml_ast.py`).
+  **Excluded:** the full ~15-minute suite was not run in the background this round — a narrower,
+  targeted set was chosen instead and is named here in full rather than left implicit; no other
+  file was checked for hidden coupling to `PROMPTS`, `LlmSection`, or `config/models.yaml`'s exact
+  bytes beyond the grep-based checks described inline above.
+- Nothing requiring live network or hardware was run, per the brief's explicit constraint.
+
+**Judgment calls made, flagged as this round's own recommendations, not directives:**
+- Centralizing the harmony backend's four `load_harmony_encoding` call sites into one
+  `_load_encoding()` helper, and doing the actual env-var-setting once, process-wide, in
+  `settings.py` at load time (rather than re-deriving it at each of the four call sites) — the
+  brief left the exact shape as an explicit "your call."
+- `config/models.local.yaml`'s override shape (profile → tier → index-positional partial-target
+  dicts) — the brief explicitly deferred this design choice. Rejected an alternative (merging by
+  `backend`+`model_id` identity instead of list index) because the committed template's `model_id`
+  is itself sometimes the value being overridden, which would make identity-based matching
+  ambiguous on the very first real use.
+- Choosing NOT to fabricate a synthetic `o200k_base.tiktoken` fixture and instead monkeypatch
+  `load_harmony_encoding` for the one harmony-SDK-level test — judged safer than shipping an
+  unverifiable fixture that might silently fail the real SDK's internal validation once someone
+  with the extra installed actually runs it.
+- ADR-0146's redaction/`git apply` disclosure was added as a new dated paragraph rather than
+  editing the ADR's existing prose in place, per this project's annotate-don't-rewrite convention
+  for decision records.
