@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -956,3 +957,296 @@ def test_the_real_client_gets_a_validated_patch_proposal_through_a_repair_turn()
     assert "<|start|>functions.apply_patch to=assistant<|channel|>commentary" in repair_prompt
     assert response.value.rationale == "typo"
     assert [f.path for f in response.value.files] == ["src/app.py"]
+
+
+# ---------------------------------------------------------------------------------------------
+# ADR-0146 / D145 — file evidence rendered through the REAL `render_prompt`, not a hand-built
+# fenced fixture. Confirms the production defect this round fixes: every diff-bearing role's
+# evidence, rendered exactly as `workers/rewrite.py::_evidence` builds it and exactly as
+# `llm/calls.py::render_prompt` serialises it, decodes to a non-`None` `tool_arguments`.
+# ---------------------------------------------------------------------------------------------
+
+
+def _rewrite_shaped_evidence(*, path: str, current_content: str, secret: str | None = None) -> dict:
+    """Matches `workers/rewrite.py::_evidence`'s real shape (`path`/`current_content` always
+    present together) closely enough to exercise `render_prompt`'s fencing decision the same way
+    production evidence does — not a hand-built fenced string."""
+    evidence: dict[str, object] = {
+        "repo_id": "acme/widgets",
+        "dest_path": "monorepo/widgets",
+        "path": path,
+        "failure_class": "RULE_MISS",
+        "probe": "deterministic rules",
+        "stderr": "no rule produced a change",
+        "current_content": current_content,
+        "rules_considered": [],
+        "context_policy": "EVIDENCE_ONLY",
+    }
+    if secret is not None:
+        evidence["stderr"] = f"{evidence['stderr']}: {secret}"
+    return evidence
+
+
+def _update_patch_for(path: str) -> str:
+    return (
+        f"*** Begin Patch\n*** Update File: {path}\n@@ def greet():\n"
+        '-    print("Hi")\n+    print("Hello, world!")\n*** End Patch'
+    )
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@pytest.mark.parametrize("role_name", ["TRANSFORM_REPAIR", "ESCALATION"])
+def test_a_diff_bearing_roles_real_render_prompt_output_decodes_a_non_none_apply_patch(
+    role_name: str, tmp_path,
+) -> None:
+    """RED before ADR-0146's fix: `render_prompt`'s evidence never contained a
+    `` ```path:...``` `` fence (it JSON-escaped everything, including `current_content`), so
+    `_extract_pre_images` always returned `{}` and `_decode_apply_patch` always returned `None`
+    for real production output. GREEN after: `render_prompt` fences `current_content` and
+    `_extract_pre_images` reads it back. Covers BOTH `TRANSFORM_REPAIR` and `ESCALATION` — the two
+    roles §7.7's sweep confirmed are diff-shaped and actually reachable. Also runs the decoded diff
+    through `git apply --check` against a real worktree seeded with the SAME `original` content —
+    this is the one test in this file where BOTH the RED→GREEN defect (done-bar item 1) and the
+    real-`git-apply` proof (done-bar item 2) depend on the SAME `render_prompt` call, which is what
+    makes the Rule 12 mutation proof below discriminate on this test specifically."""
+    from fleet.llm import schemas
+    from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
+    from fleet.llm.calls import render_prompt
+    from fleet.llm.roles import Role
+    from fleet.models.enums import StructuredOutputMode
+
+    role = Role[role_name]
+    response_models = {
+        "TRANSFORM_REPAIR": schemas.LlmPatchProposal,
+        "ESCALATION": schemas.LlmEscalationProposal,
+    }
+    response_model = response_models[role_name]
+    original = 'def greet():\n    print("Hi")\n'
+    evidence = _rewrite_shaped_evidence(path="src/app.py", current_content=original)
+    messages = render_prompt(role, evidence)
+
+    analysis = _apply_patch_call(_update_patch_for("src/app.py"))
+    final_payload = (
+        '{"approach_summary": "fix greeting", "rationale": "typo"}'
+        if role_name == "TRANSFORM_REPAIR"
+        else '{"approach_summary": "fix greeting", "rationale": "typo", '
+        '"abandon_recommended": false}'
+    )
+    transport = _SequencedTransport(
+        [
+            {"token_ids": _sampled_completion([analysis]), "finish_reason": "stop"},
+            {"token_ids": _sampled_completion([_final(final_payload)]), "finish_reason": "stop"},
+        ],
+    )
+    backend = HarmonyGptOssBackend(transport=transport)
+    result = asyncio.run(
+        backend.invoke(
+            target(),
+            messages,
+            response_model.model_json_schema(),
+            StructuredOutputMode.TOOL_CALL,
+            max_output_tokens=512,
+            timeout_s=30.0,
+        ),
+    )
+    assert result.tool_arguments is not None, "pre-fix defect: apply_patch decoded to None"
+    files = result.tool_arguments["files"]
+    assert files[0]["path"] == "src/app.py"
+    assert "Hello, world!" in files[0]["diff"]
+
+    repo = _real_git_repo(tmp_path, "src/app.py", original)
+    patch_file = tmp_path / f"{role_name}.patch"
+    patch_file.write_text(files[0]["diff"], encoding="utf-8")
+    subprocess.run(  # noqa: S603
+        ["git", "apply", "--check", str(patch_file)],  # noqa: S607
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# `git apply --check` against a real worktree: Update, Delete, Move-with-edit.
+# ---------------------------------------------------------------------------------------------
+
+
+def _git(cwd, *args: str) -> None:
+    subprocess.run(  # noqa: S603
+        ["git", *args],  # noqa: S607
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        env={
+            "GIT_AUTHOR_NAME": "Fleet Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Fleet Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "HOME": str(cwd),
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+        },
+    )
+
+
+def _real_git_repo(tmp_path, path: str, content: str):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--initial-branch=main")
+    target_file = repo / path
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text(content, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "fixture")
+    return repo
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_decoded_update_diff_applies_to_a_real_git_worktree(tmp_path) -> None:
+    from fleet.llm.backends.harmony_gpt_oss import _decode_apply_patch
+
+    original = 'def greet():\n    print("Hi")\n'
+    repo = _real_git_repo(tmp_path, "src/app.py", original)
+    edits = _decode_apply_patch(_update_patch_for("src/app.py"), {"src/app.py": original})
+    assert edits is not None
+    patch_file = tmp_path / "update.patch"
+    patch_file.write_text(edits[0]["diff"], encoding="utf-8")
+    subprocess.run(  # noqa: S603
+        ["git", "apply", "--check", str(patch_file)],  # noqa: S607
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_decoded_delete_diff_applies_to_a_real_git_worktree(tmp_path) -> None:
+    from fleet.llm.backends.harmony_gpt_oss import _decode_apply_patch
+
+    original = "obsolete = True\n"
+    repo = _real_git_repo(tmp_path, "obsolete.py", original)
+    patch_text = "*** Begin Patch\n*** Delete File: obsolete.py\n*** End Patch"
+    edits = _decode_apply_patch(patch_text, {"obsolete.py": original})
+    assert edits is not None
+    patch_file = tmp_path / "delete.patch"
+    patch_file.write_text(edits[0]["diff"], encoding="utf-8")
+    subprocess.run(  # noqa: S603
+        ["git", "apply", "--check", str(patch_file)],  # noqa: S607
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_decoded_move_with_edit_diff_applies_to_a_real_git_worktree(tmp_path) -> None:
+    from fleet.llm.backends.harmony_gpt_oss import _decode_apply_patch
+
+    original = 'def greet():\n    print("Hi")\n'
+    repo = _real_git_repo(tmp_path, "src/app.py", original)
+    patch_text = (
+        "*** Begin Patch\n*** Update File: src/app.py\n*** Move to: src/main.py\n"
+        '@@ def greet():\n-    print("Hi")\n+    print("Hello, world!")\n*** End Patch'
+    )
+    edits = _decode_apply_patch(patch_text, {"src/app.py": original})
+    assert edits is not None
+    assert edits[0]["path"] == "src/main.py"
+    patch_file = tmp_path / "move.patch"
+    patch_file.write_text(edits[0]["diff"], encoding="utf-8")
+    subprocess.run(  # noqa: S603
+        ["git", "apply", "--check", str(patch_file)],  # noqa: S607
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# Redaction still applies after ADR-0146's change: a secret planted in evidence text must never
+# reach the transport's `prompt_token_ids`, fenced or not.
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+def test_a_planted_secret_never_reaches_the_transport_token_ids() -> None:
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+
+    from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
+    from fleet.llm.calls import render_prompt
+    from fleet.llm.roles import Role
+    from fleet.llm.schemas import LlmPatchProposal
+    from fleet.models.enums import StructuredOutputMode
+
+    secret = "github_pat_" + "A" * 40
+    original = f'def greet():\n    print("Hi")  # token: {secret}\n'
+    evidence = _rewrite_shaped_evidence(path="src/app.py", current_content=original, secret=secret)
+    messages = render_prompt(Role.TRANSFORM_REPAIR, evidence)
+    # The secret is planted in TWO evidence fields (current_content and stderr): confirms
+    # redaction still applies both to the fenced block and to the ordinary JSON body.
+    assert secret not in messages[1].content
+
+    transport = _SequencedTransport(
+        [
+            {
+                "token_ids": _sampled_completion(
+                    [_apply_patch_call(_update_patch_for("src/app.py"))],
+                ),
+                "finish_reason": "stop",
+            },
+            {
+                "token_ids": _sampled_completion(
+                    [_final('{"approach_summary": "fix", "rationale": "typo"}')],
+                ),
+                "finish_reason": "stop",
+            },
+        ],
+    )
+    backend = HarmonyGptOssBackend(transport=transport)
+    asyncio.run(
+        backend.invoke(
+            target(),
+            messages,
+            LlmPatchProposal.model_json_schema(),
+            StructuredOutputMode.TOOL_CALL,
+            max_output_tokens=512,
+            timeout_s=30.0,
+        ),
+    )
+    encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    for call in transport.calls:
+        decoded = encoding.decode(call["prompt_token_ids"])
+        assert secret not in decoded
+
+
+# ---------------------------------------------------------------------------------------------
+# Determinism: `render_prompt` must be byte-identical across `PYTHONHASHSEED` values.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_render_prompt_is_byte_identical_across_pythonhashseed() -> None:
+    script = (
+        "from fleet.llm.calls import render_prompt\n"
+        "from fleet.llm.roles import Role\n"
+        "evidence = {\n"
+        "    'repo_id': 'acme/widgets', 'dest_path': 'monorepo/widgets', 'path': 'src/app.py',\n"
+        "    'failure_class': 'RULE_MISS', 'probe': 'deterministic rules',\n"
+        "    'stderr': 'no rule produced a change',\n"
+        "    'current_content': 'def greet():\\n    print(\"Hi\")\\n',\n"
+        "    'rules_considered': [], 'context_policy': 'EVIDENCE_ONLY',\n"
+        "}\n"
+        "messages = render_prompt(Role.TRANSFORM_REPAIR, evidence)\n"
+        "print('\\x1e'.join(f'{m.role}\\x1f{m.content}' for m in messages))\n"
+    )
+    outputs = []
+    for seed in ("0", "1"):
+        result = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        )
+        outputs.append(result.stdout)
+    assert outputs[0] == outputs[1]
+    assert outputs[0]  # sanity: the script actually printed something

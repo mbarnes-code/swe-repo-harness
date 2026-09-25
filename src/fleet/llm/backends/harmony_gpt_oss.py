@@ -69,6 +69,7 @@ from fleet.llm.client import (
     TransportError,
     register_backend,
 )
+from fleet.llm.fences import discover_fenced_paths, parse_file_fences
 from fleet.models.enums import StructuredOutputMode
 from fleet.models.tasks import (
     BackendTarget,
@@ -835,18 +836,19 @@ def _count(value: object) -> int:
 
 
 def _extract_pre_images(messages: Sequence[Message]) -> dict[str, str]:
-    """Pull `` ```path:<path>\\n<content>\\n``` `` fenced blocks out of every message's content:
-    the pre-images `apply_patch` hunks are resolved against. This is a Fleet-side convention
-    introduced with this backend (no existing worker emits it yet); confirm or replace it in a
-    follow-up review before wiring a real diff-bearing role at this backend (CLAUDE.md's
-    directive-authority rule: this is an Agent Recommendation, not a directive)."""
-    import re
-
-    pattern = re.compile(r"```path:(?P<path>[^\n]+)\n(?P<content>.*?)```", re.DOTALL)
+    """Pull `fleet.llm.fences`-format fenced blocks out of every message's content: the
+    pre-images `apply_patch` hunks are resolved against. `render_prompt()`
+    (`llm/calls.py::render_prompt`, ADR-0146) is the real producer — it renders any evidence file
+    content (currently `TRANSFORM_REPAIR`/`ESCALATION`'s `current_content`) as one of these blocks
+    instead of folding it into the JSON evidence body. This backend has no independent list of
+    which paths were legitimately rendered (`invoke()`'s fixed signature carries only `messages`,
+    never a separate path list), so `allowed_paths` here is `discover_fenced_paths`'s own
+    sequential, non-overlapping scan of the same text rather than a caller-supplied allowlist — see
+    `fleet.llm.fences`'s module docstring for exactly what that does and does not defend against."""
     images: dict[str, str] = {}
     for message in messages:
-        for match in pattern.finditer(message.content):
-            images[match.group("path")] = match.group("content")
+        allowed = discover_fenced_paths(message.content)
+        images.update(parse_file_fences(message.content, allowed))
     return images
 
 
