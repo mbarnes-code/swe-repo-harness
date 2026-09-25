@@ -6126,24 +6126,29 @@ CRLF, a missing or extra trailing newline, and non-ASCII UTF-8 (`fleet.llm.fence
 docstring; property-tested in `tests/test_llm_fences.py`). Redaction is unaffected — the fenced
 content is read off the ALREADY-`redact_mapping()`-ed evidence, exactly like every other field.
 
-**Injection-safety trust boundary (corrected 2026-09-25 after independent review found the first
-version exploitable).** A real file's content can itself contain text shaped like a fenced block
-naming an arbitrary path — this repository's own source is exactly such content. The real trust
-boundary `_extract_pre_images` relies on is not "which paths does the text claim" but "who wrote
-this message": `render_prompt()`'s `fence_file` calls only ever land inside a `system`/`user`
-`Message`, never one the model authored, so `_extract_pre_images` scans ONLY `system`/`user`-role
-messages — `assistant`/`tool` messages (which carry the model's own prior reply during a repair
-turn, `llm/client.py::_repair_turns`) are excluded unconditionally, by role, never by content — and
-trusts every top-level block a sequential, non-overlapping scan finds inside one
-(`fleet.llm.fences.trusted_fenced_blocks`). An earlier version derived its "allowlist" by
-re-scanning the very same text it was about to trust (`parse_file_fences(text,
-discover_fenced_paths(text))`), which restricts nothing, and scanned every message regardless of
-role — an independent review proved this let a model echo a forged fence in its own reply and
-silently override the real pre-image, or introduce a path the harness never rendered at all.
-`fleet.llm.fences.parse_file_fences`/`discover_fenced_paths` remain available for a caller with a
-genuinely independent per-path allowlist; `git apply` remains the harness's sole worktree writer
-regardless, so any pre-image forgery that got past every layer here can still only ever produce a
-diff that fails to apply — a safe, loud failure, not silent corruption.
+**Injection-safety trust boundary (corrected TWICE, 2026-09-25, after independent review found each
+prior version exploitable — role alone is not enough, only POSITION is).** A real file's content
+can itself contain text shaped like a fenced block naming an arbitrary path — this repository's own
+source is exactly such content — and a `user`-role message is not always harness-authored either:
+`llm/client.py::_repair_turns` builds a repair round's instruction message as `Message(role="user",
+content=_REPAIR_INSTRUCTION.format(error=detail))` where `detail = str(exc)` is a Pydantic
+`ValidationError`, and `FleetModel`'s `extra="forbid"` means an unexpected key in a malformed model
+reply is quoted VERBATIM into that error text — backticks and newlines included. The trust boundary
+`_extract_pre_images` actually relies on is POSITIONAL: only the messages that exist strictly
+BEFORE the first `assistant`/`tool`-role message — `render_prompt()`'s own ORIGINAL prompt output,
+before any model reply exists anywhere in the conversation — are guaranteed to predate any model
+influence (`harmony_gpt_oss.py::_original_prompt_messages`). `_extract_pre_images` scans only that
+prefix and trusts every top-level block a sequential, non-overlapping scan finds inside one
+(`fleet.llm.fences.trusted_fenced_blocks`); nothing at or after the first `assistant`/`tool` turn is
+scanned, `user`-role messages included. Two earlier, narrower mechanisms were tried and both proved
+exploitable: deriving an "allowlist" by re-scanning the same text about to be trusted (restricts
+nothing), and later, scanning every `system`/`user`-role message regardless of POSITION (a later
+repair-turn `user` message can echo the model's own prior reply and is not reliably
+harness-authored). `fleet.llm.fences.parse_file_fences`/`discover_fenced_paths` remain available
+for a caller with a genuinely independent per-path allowlist sourced from somewhere other than the
+conversation itself; `git apply` remains the harness's sole worktree writer regardless, so any
+pre-image forgery that got past every layer here can still only ever produce a diff that fails to
+apply — a safe, loud failure, not silent corruption.
 
 **Evidence is untrusted input, and closing code-execution escalation is not the same as closing
 misleading-content influence.** `render_prompt()` (`llm/calls.py:258-290`) embeds an evidence

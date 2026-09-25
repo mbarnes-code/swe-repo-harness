@@ -44,21 +44,32 @@ mechanism exploitable.**
    module's one production caller did exactly that, which an independent review correctly flagged
    as no restriction at all.
 
+`parse_file_fences`/`discover_fenced_paths` have no production caller today — `harmony_gpt_oss.py`
+below uses the positional `trusted_fenced_blocks` instead — but they stay public and tested
+deliberately, not as speculative surface: they are the direct complement of ADR-0146's rejected
+typed-side-channel alternative (`docs/DECISIONS.md`), the right tool for a FUTURE backend that
+receives pre-image paths through a real, independent source of truth rather than by scanning
+`Message`s, and the concrete illustration of what an actual per-path allowlist looks like versus
+the self-referential one an earlier version of this module mistook for one.
+
 `harmony_gpt_oss.py::_extract_pre_images` has no independent per-path allowlist — `invoke()`
 carries only `messages`, never a separate path list (`ModelBackend`'s fixed Protocol signature,
 ADR-0146's rejected typed-side-channel alternative) — so it does not use `parse_file_fences` at
-all. Instead it uses `trusted_fenced_blocks` below, restricted to `system`/`user`-role messages:
-the real trust boundary is not "which paths does the text claim" but "who wrote this message". A
-`system`/`user` message is ALWAYS 100% harness-authored text (`render_prompt()`'s own output,
-`client.py`'s system-folding, or its repair-instruction template) — the model never writes into
-one — so every top-level block layer 1's sequential scan finds inside such a message is
-legitimate by construction, with no separate allowlist needed. `assistant`/`tool`-role messages
-(which carry the model's own prior reply during a repair turn, `client.py::_repair_turns`) are
-excluded from the scan entirely and unconditionally, by role, not by content — a forged fence
-echoed back in the model's own reply is never scanned at all, closing the exploit an independent
-review demonstrated: a forged `` ```path:<real path>\n<forged content>``` `` block in an
-`assistant` message no longer overrides the real pre-image, and a path the harness never rendered
-can no longer be introduced this way.
+all. Instead it uses `trusted_fenced_blocks` below, restricted to a POSITIONAL prefix of the
+conversation, not merely a role filter (corrected TWICE after independent review — see
+`harmony_gpt_oss.py::_original_prompt_messages`'s docstring for the full history and the exact
+exploit a role-only check still left open): only the messages that exist strictly BEFORE the
+first `assistant`/`tool`-role message — i.e. `render_prompt()`'s own original output, before any
+model reply exists anywhere in the conversation — are trusted. Every top-level block layer 1's
+sequential scan finds inside one of those messages is legitimate by construction, with no separate
+allowlist needed. Everything from the first `assistant`/`tool` turn onward is excluded
+unconditionally, `user`-role messages included, because a LATER `user`-role message (a repair
+round's instruction turn, `client.py::_repair_turns`) can itself quote the model's own prior reply
+back into its own text and so is not reliably harness-authored either — a forged fence echoed back
+this way is never scanned at all, closing the exploit an independent review demonstrated twice: a
+forged `` ```path:<real path>\n<forged content>``` `` block riding in on either an `assistant`
+message or a LATER `user`-role repair-instruction message no longer overrides the real pre-image,
+and a path the harness never rendered can no longer be introduced either way.
 
 Even a forged pre-image that got through every layer here could only ever feed
 `vcs/apply_patch.py::text_to_patch`/`commit_to_file_edits` a wrong pre-image for a real path.
@@ -154,11 +165,21 @@ def discover_fenced_paths(text: str) -> frozenset[str]:
 def trusted_fenced_blocks(text: str) -> dict[str, str]:
     """One SEQUENTIAL, non-overlapping scan of `text` (`_scan`), trusting every top-level block it
     finds — for a caller that already knows, independently of anything `text` itself claims, that
-    `text` is entirely harness-authored (module docstring: `harmony_gpt_oss.py::
-    _extract_pre_images`, restricted to `system`/`user`-role messages, which is what makes this
-    safe). There is no separate `allowed_paths` parameter here because there is nothing to check
-    it against — layer 1 (nested-forgery protection) still applies, layer 2 (`parse_file_fences`'s
-    allowlist) does not apply and is not needed, since the ONLY writer of these fences,
-    `render_prompt`, only ever appears in exactly the kind of message this function is meant to be
-    called on. Do not call this on text that could carry model output."""
+    `text` cannot carry model-influenced content. There is no separate `allowed_paths` parameter
+    here because there is nothing to check it against — layer 1 (nested-forgery protection) still
+    applies, layer 2 (`parse_file_fences`'s allowlist) does not apply and is not needed, since the
+    ONLY writer of these fences, `render_prompt`, only ever appears in exactly the kind of message
+    this function is meant to be called on.
+
+    **What "cannot carry model-influenced content" actually means (corrected TWICE — module
+    docstring, `harmony_gpt_oss.py::_original_prompt_messages`'s docstring has the full history):
+    it is NOT simply "this message's role is `system` or `user`".** A `user`-role message that
+    exists AFTER the first `assistant`/`tool` turn (a repair round's instruction message,
+    `client.py::_repair_turns`) can itself quote the model's own prior reply back into its own
+    text and so is not trustworthy either. The one caller of this function
+    (`harmony_gpt_oss.py::_extract_pre_images`) only ever calls it on messages drawn from
+    `_original_prompt_messages` — the POSITIONAL prefix of the conversation up to the first
+    `assistant`/`tool` message — never on a message merely because its role happens to be `system`
+    or `user`. Do not call this on any text that has not been established, by position in the
+    conversation and not by role alone, to predate every model reply."""
     return dict(_scan(text))

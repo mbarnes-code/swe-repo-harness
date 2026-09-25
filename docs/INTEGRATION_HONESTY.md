@@ -12049,6 +12049,35 @@ reported before this addendum — the original "57 passed / 2 failed" figure abo
 written per this file's annotate-in-place convention and is superseded by this paragraph's 4-of-61
 for the code as it now stands.
 
+**Second editorial addendum (2026-09-25, same round) — N1: role alone was STILL not enough; the
+`1b85705` mechanism above was itself exploitable, fixed in a further commit.** A second independent
+review found `1b85705`'s "scan only `system`/`user`-role messages" premise false: `user`-role does
+not imply harness-authored once a repair round exists. `client.py::_repair_turns` builds its
+repair-instruction message as `Message(role="user", content=_REPAIR_INSTRUCTION.format(
+error=detail))` where `detail = str(exc)` is a Pydantic `ValidationError`; `FleetModel`'s
+`extra="forbid"` means an unexpected key in a malformed model reply is quoted VERBATIM into that
+error text, backticks and newlines included. The reviewer's probe reproduced this end to end
+through the real `_validate` → `_repair_turns` → `_extract_pre_images` path (no mocks): a model
+reply carrying a bogus key shaped like a fenced block reached a `user`-role message with conversation
+roles `['system', 'user', 'assistant', 'user']` — the forged fence rode in on the SECOND `user`
+message, the repair turn, not the original prompt — overriding the real pre-image and separately
+introducing a path the harness never rendered.
+
+The property that is actually true is narrower than role membership: pre-images never change
+mid-conversation, so ONLY the messages strictly BEFORE the first `assistant`/`tool`-role
+message — the harness's ORIGINAL prompt, `render_prompt()`'s own output, before any model reply
+exists anywhere in the conversation — are guaranteed uncontaminated. Fixed by
+`harmony_gpt_oss.py::_original_prompt_messages`, which returns only that POSITIONAL prefix;
+`_extract_pre_images` now scans exclusively that prefix, never a message at or after the first
+`assistant`/`tool` turn regardless of ITS role. Regression test
+`test_a_forged_fence_from_a_repair_instructions_echoed_validation_error_is_not_trusted`
+reproduces the reviewer's exact probe (same conversation shape, same echoed-`ValidationError`
+mechanism) — confirmed RED against the role-only (`1b85705`) code, GREEN after this correction.
+`docs/DECISIONS.md`'s ADR-0146 and `docs/SPEC.md` §7.7 carry the same correction; `fences.py`'s
+module docstring and `trusted_fenced_blocks`'s own docstring no longer claim "the model never
+writes into a `system`/`user` message" — that claim was false for a repair-turn `user` message and
+is corrected to the positional framing throughout.
+
 ---
 
 ## D146 — OPEN. `Role.API_INCOMPAT_REWRITE` (`ApiRewriteProposal`) has zero callers anywhere in

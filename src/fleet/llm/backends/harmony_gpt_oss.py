@@ -835,42 +835,54 @@ def _count(value: object) -> int:
     return max(value, 0) if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
-_HARNESS_AUTHORED_ROLES: Final[frozenset[str]] = frozenset({"system", "user"})
-"""The only `Message.role`s `render_prompt()` ever writes a fenced block into. `assistant` carries
-the MODEL's own prior reply (`client.py::_repair_turns` under `PROMPTED` mode) and `tool` carries
-it too under `TOOL_CALL` mode's repair turn — both are attacker-influenced text that must never be
-scanned for pre-images (ADR-0146 correction below)."""
+def _original_prompt_messages(messages: Sequence[Message]) -> list[Message]:
+    """The prefix of `messages` up to, but NOT including, the first `assistant`/`tool`-role
+    message — i.e. the harness's ORIGINAL prompt, `render_prompt()`'s own output, before any
+    model reply exists anywhere in the conversation.
+
+    **Trust boundary, corrected TWICE after independent review — role alone is not enough.** The
+    first cut derived `allowed_paths` by re-scanning the very same text being parsed
+    (`discover_fenced_paths(text)` fed straight into `parse_file_fences(text, ...)`), which
+    restricts nothing, and scanned every message regardless of role. That was corrected to "scan
+    only `system`/`user`-role messages" (`assistant`/`tool` carry the model's own prior reply,
+    `client.py::_repair_turns`) — still wrong: a SECOND review found a `user`-role message is not
+    always harness-authored either. `_repair_turns` builds its repair-instruction message as
+    `Message(role="user", content=_REPAIR_INSTRUCTION.format(error=detail))` where
+    `detail = str(exc)` is a Pydantic `ValidationError` — and `FleetModel` uses `extra="forbid"`,
+    so an unexpected key in a malformed model reply is quoted VERBATIM into that error text,
+    backticks and newlines included. A model reply carrying a bogus key shaped like
+    `"x\n` ` ``path:src/a.py\nFORGED\n` ` ``"` therefore reaches a `user`-role message this way,
+    with no `assistant`/`tool` message in between it and the text — reproduced end to end through
+    the real `_validate` → `_repair_turns` → `_extract_pre_images` path, no mocks, before this fix.
+
+    The property that is actually true is narrower: pre-images never change mid-conversation (a
+    file's content is fixed at render time), and ONLY the messages that exist BEFORE the first
+    `assistant`/`tool` turn are guaranteed to predate any model output — nothing after that point,
+    `user`-role included, can be trusted, because a later `user` message may quote the model's own
+    prior (possibly adversarial) reply back into its own text. So the boundary is POSITION
+    (everything up to the first non-`system`/`user` message), not role membership by itself; the
+    role check is still needed within that prefix (`system`/`user` only, matching what
+    `render_prompt()` ever actually emits), it is simply no longer sufficient on its own."""
+    trusted: list[Message] = []
+    for message in messages:
+        if message.role not in ("system", "user"):
+            break
+        trusted.append(message)
+    return trusted
 
 
 def _extract_pre_images(messages: Sequence[Message]) -> dict[str, str]:
-    """Pull `fleet.llm.fences`-format fenced blocks out of the CURRENT call's harness-authored
-    messages only: the pre-images `apply_patch` hunks are resolved against. `render_prompt()`
-    (`llm/calls.py::render_prompt`, ADR-0146) is the real producer — it renders any evidence file
-    content (currently `TRANSFORM_REPAIR`/`ESCALATION`'s `current_content`) as one of these blocks
-    instead of folding it into the JSON evidence body — and it ONLY ever writes into a `system` or
-    `user` message.
-
-    **Trust boundary, corrected after an independent review found the original version
-    exploitable.** The first cut derived `allowed_paths` by re-scanning the very same text being
-    parsed (`discover_fenced_paths(text)` fed straight into `parse_file_fences(text, ...)`), which
-    restricts nothing — any fence found in `text` trivially allows itself. Worse, it scanned EVERY
-    message regardless of role, including `assistant`/`tool` turns that carry the model's own
-    prior reply (`client.py`'s repair-turn machinery, `_repair_turns`); a model that echoed a
-    forged `` ```path:<real path>\n<forged content>``` `` block in its own reply had that block
-    silently override the real pre-image (`dict.update`, last-scanned wins) or introduce a path
-    the harness never rendered at all — reproduced directly against this function before the fix.
-
-    The actual trust boundary is not "which paths does the text claim", it is "who wrote this
-    message": `system`/`user` messages are 100% harness-authored text — `render_prompt()`'s own
-    output, `client.py::_prepare_messages`'s system-folding, or `_repair_turns`'s fixed
-    repair-instruction template — so ANY top-level fenced block a sequential, non-overlapping scan
-    finds inside one is legitimate by construction, with no separate allowlist needed
-    (`fleet.llm.fences.trusted_fenced_blocks`). `assistant`/`tool` messages are excluded from this
-    scan entirely, unconditionally — not filtered by content, filtered by role."""
+    """Pull `fleet.llm.fences`-format fenced blocks out of the CURRENT call's ORIGINAL prompt
+    messages only (`_original_prompt_messages` — see its docstring for the trust boundary and why
+    it is positional, not role-based): the pre-images `apply_patch` hunks are resolved against.
+    `render_prompt()` (`llm/calls.py::render_prompt`, ADR-0146) is the real producer — it renders
+    any evidence file content (currently `TRANSFORM_REPAIR`/`ESCALATION`'s `current_content`) as
+    one of these blocks instead of folding it into the JSON evidence body, always in the first
+    `system`/`user` turn(s), before any repair round exists. Any top-level fenced block a
+    sequential, non-overlapping scan finds inside one of those original messages is legitimate by
+    construction, with no separate allowlist needed (`fleet.llm.fences.trusted_fenced_blocks`)."""
     images: dict[str, str] = {}
-    for message in messages:
-        if message.role not in _HARNESS_AUTHORED_ROLES:
-            continue
+    for message in _original_prompt_messages(messages):
         images.update(trusted_fenced_blocks(message.content))
     return images
 

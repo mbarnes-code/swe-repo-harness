@@ -11566,3 +11566,15 @@ block; the `PYTHONHASHSEED` determinism test documents its worktree-isolation as
 checkpoint's own Rule 13 wording was corrected (see above — the total-vs-met distinction); and
 D145's heading now correctly attributes the fix to `669220a` and this entry's own landing to a
 separate, later commit rather than claiming both happened in one.
+
+**Second follow-up, same round: `1b85705`'s "scan only `system`/`user`-role messages" was ITSELF
+still exploitable — role alone is not enough, only POSITION is.** A second independent review
+found that a repair round's `user`-role instruction message (`client.py::_repair_turns`) is not
+reliably harness-authored: it echoes `str(exc)` verbatim, and a Pydantic `ValidationError` under
+`FleetModel`'s `extra="forbid"` quotes an unexpected model-supplied key back into that text. Fixed
+by restricting `_extract_pre_images` to `_original_prompt_messages` — the POSITIONAL prefix of the
+conversation up to (not including) the first `assistant`/`tool`-role message — never a message at
+or after that boundary regardless of its own role. Regression test reproduces the reviewer's exact
+probe end to end through the real `_validate`/`_repair_turns`/`_extract_pre_images` path (no
+mocks); confirmed RED against the role-only code, GREEN after. Full detail in D145's second
+addendum in `docs/INTEGRATION_HONESTY.md`; ADR-0146 and SPEC.md §7.7 updated to match.
