@@ -67,7 +67,7 @@ fleet --help
 # 1. Enroll the repos you want migrated.
 $EDITOR config/repos.yaml
 
-# 2. Check the LLM routing resolves and the endpoints answer (offline for `list`).
+# 2. Check the LLM routing resolves and backend registration is valid (`list` is offline).
 fleet models list
 fleet models check
 
@@ -132,15 +132,15 @@ for the full flag set of any one of them.
 | `fleet stubs list` | Every stub, plus the "degraded and unresolved" reconciliation view. |
 | `fleet stubs resolve <provider>` | Supersede a provider's active stubs and enqueue revalidation. |
 | `fleet stubs abandon <consumer> <coord>` | Mark a stub abandoned by operator decision. `--reason` required. |
-| `fleet models list` / `profiles` / `check` | Resolved `role → tier → backend` routing, available profiles, and endpoint reachability. |
+| `fleet models list` / `profiles` / `check` | Resolved `role → tier → backend` routing, available profiles, and backend registration checks. |
 
-`--format json` is available on every table above; `--filter k=v` is repeatable on the list
-commands.
+`--format json` is available on every table above. Most list commands accept repeatable
+`--filter k=v`; `fleet models list` uses `--role` and `--tier` instead.
 
 ## Configuration
 
-Three YAML files under `config/`, all optional — every key has a typed default, so an empty
-file is a valid starting point.
+Three YAML files under `config/` are loaded on startup. Key defaults keep them small, but
+`config/models.yaml` must define the configured `default_profile`.
 
 | File | What it holds |
 |---|---|
@@ -158,15 +158,15 @@ outright — the settings model forbids extra keys, so one stray export makes ev
 the variable it wants (`api_key_env: ANTHROPIC_API_KEY`) and the backend reads it at call time.
 Config text that matches a redaction pattern is refused at startup.
 
-**If your host has less than 48 GiB of RAM**, the shipped `config/fleet.yaml` will refuse to load:
+**If your host has less than 36 GiB of RAM**, the shipped `config/fleet.yaml` can refuse to load:
 `concurrency.docker` × `verify.container_memory` + `budgets.max_rss_mb` must fit under
-`budgets.max_host_rss_mb`, which is set to 49152 MiB. Lower `concurrency.docker` and
-`budgets.max_host_rss_mb` to match your machine — the comment block at the top of that file
-explains the arithmetic.
+`budgets.max_host_rss_mb`. The shipped values are `4 × 8192 + 4096 = 36864` MiB. On a smaller
+host, reduce the commitment inputs (`concurrency.docker`, `verify.container_memory`,
+`budgets.max_rss_mb`), then set `budgets.max_host_rss_mb` at or above the resulting commitment.
 
 ## Exit codes
 
-A non-zero exit is always a specific refusal, never a generic failure.
+Non-zero exits include both specific refusals and an unexpected-failure path (`1`).
 
 | | | | |
 |---|---|---|---|

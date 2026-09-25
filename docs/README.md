@@ -29,7 +29,7 @@ That is the newcomer path. Everything below is reference and archive.
 
 | File | Size | What it is | When you open it |
 |---|---|---|---|
-| [`SPEC.md`](SPEC.md) | ~8,000 lines | The specification. Every field, table, flag and module name here is normative. §12 holds the 48 acceptance criteria. | A task names a section. Jump to it. |
+| [`SPEC.md`](SPEC.md) | ~8,000 lines | The specification. Concrete field, table, flag and module names are normative; sections explicitly marked as reproducing in-tree artifacts are descriptive and the artifact governs. §12 holds the 48 acceptance criteria. | A task names a section. Jump to it. |
 | [`DECISIONS.md`](DECISIONS.md) | ~16,100 lines | The ADR log — every non-obvious choice with its rationale and rejected alternatives. Entries are appended, never edited; a superseded decision is replaced by a later numbered entry that names it. | You want to know *why* something is the way it is, and the code comment cites an ADR number. |
 
 `SPEC.md` is subordinate to `DECISIONS.md`: where the two disagree, the ADR wins.
@@ -38,15 +38,15 @@ That is the newcomer path. Everything below is reference and archive.
 
 ## Archive — the build record, not documentation
 
-These are historical. They accumulate; they are not maintained as descriptions of the current
-tree. **Do not read them to learn how the system works** — you will learn how it was built, which
-is a different and much longer story.
+These are mostly historical records. They accumulate, and most are journals rather than canonical
+descriptions of the current tree. **Do not read them to learn how the system works** — you will
+learn how it was built, which is a different and much longer story.
 
 | File | Size | What it is |
 |---|---|---|
 | [`PROGRESS.md`](PROGRESS.md) | ~11,700 lines | The checkpoint journal. One entry per development round: what was completed, what was verified, what the next task is. |
 | [`INTEGRATION_HONESTY.md`](INTEGRATION_HONESTY.md) | ~12,200 lines | The defect ledger (D-numbers) and a per-external-tool verdict on what the test suite actually proves versus what it appears to prove. |
-| [`CRITERIA_PLAN.md`](CRITERIA_PLAN.md) | ~4,400 lines | The per-criterion closure backlog for SPEC §12: what each acceptance criterion still needs, and a bounded "done bar" for each. |
+| [`CRITERIA_PLAN.md`](CRITERIA_PLAN.md) | ~4,400 lines | The active per-criterion closure backlog for SPEC §12: what each acceptance criterion still needs, and a bounded "done bar" for each (used by CLAUDE.md Rule 13 dispatch). |
 | [`superpowers/plans/`](superpowers/plans/) | 86 files | Per-task research notes, design reviews and round reports written by development subagents. Point-in-time working documents. |
 
 Two things to know before you open `PROGRESS.md`:
