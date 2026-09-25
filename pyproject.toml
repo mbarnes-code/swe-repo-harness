@@ -63,7 +63,7 @@ dev = [
 [project.optional-dependencies]
 # ADR-0023 failover transports. Same models, different transport; installed only if a profile
 # routes a tier through them.
-bedrock = ["boto3>=1.43.99"]
+bedrock = ["boto3>=1.43.100"]
 vertex = ["google-cloud-aiplatform>=1.70"]
 # ADR-0145: the pilot profile's GPT-OSS-over-Harmony transport. Version floor matches the
 # vendored reference crate's own version (references/harmony/Cargo.toml:3, 0.0.8) — the earliest
