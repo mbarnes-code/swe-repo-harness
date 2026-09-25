@@ -34,7 +34,7 @@ dependencies = [
   "openai>=1.60",      # llm/backends/openai_compatible.py — any base_url: local vLLM, Ollama,
                        #   LM Studio, llama.cpp, TGI, and hosted OpenAI-compatible endpoints.
                        #   The workhorse for local development on this host.
-  "networkx>=3.4",
+  "networkx>=3.7",
   "pyyaml>=6.0",
 ]
 
