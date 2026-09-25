@@ -11909,7 +11909,7 @@ files add no newly-dirty file), `test_integration_honesty_citations.py` 3 (same 
 `HEAD`); **caused by this round and fixed** — 4 citation rots from line shifts (`cli.py` +1 import,
 `tasks.py` +22), repointed with dated markers and the `text_mismatch_pins` key updated;
 **precondition-only** — `test_llm_backend_fixture_e2e.py` asserts `src/fleet/` is clean before it
-runs, so it fails on any uncommitted `src/` edit (re-run after commit, below).
+runs, so it fails on any uncommitted `src/` edit — re-run at `b60e765` (committed): passes, together with the three touched test files whole (93 passed).
 
 **§12 count: 48 of 51** — carried from Round A's checkpoint, NOT re-derived this round (no criterion
 moved unmet → met; §12.51 progressed but its live leg remains).
