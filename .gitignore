@@ -59,6 +59,7 @@ tools/go/
 tools/rust/
 tools/bin/*
 !tools/bin/cargo
+!tools/bin/fetch-harmony-vocab
 !tools/bin/gazelle
 !tools/bin/go
 !tools/bin/rustc
