@@ -30,7 +30,7 @@ dependencies = [
   "typer>=0.15",
   "aiosqlite>=0.20",
   "structlog>=24.4",
-  "anthropic>=0.69",   # llm/backends/anthropic.py
+  "anthropic>=1.8.0",   # llm/backends/anthropic.py
   "openai>=1.60",      # llm/backends/openai_compatible.py — any base_url: local vLLM, Ollama,
                        #   LM Studio, llama.cpp, TGI, and hosted OpenAI-compatible endpoints.
                        #   The workhorse for local development on this host.
