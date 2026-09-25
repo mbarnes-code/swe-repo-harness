@@ -142,8 +142,9 @@ for the full flag set of any one of them.
 
 Fleet loads three YAML files on startup: `config/repos.yaml`, `config/fleet.yaml`, and
 `config/models.yaml` (startup exits 2 if any is missing). These shipped defaults are committed in
-`config/`; keep `repos.yaml` and `fleet.yaml` as shipped unless you need overrides. In
-`config/models.yaml`, `default_profile` must name a profile that exists in `profiles`.
+`config/`; keep `repos.yaml` and `fleet.yaml` as shipped unless you need overrides. Values have
+typed defaults, but the files still need to exist at those paths. In `config/models.yaml`,
+`default_profile` must name a profile that exists in `profiles`.
 
 | File | What it holds |
 |---|---|
@@ -165,7 +166,7 @@ Config text that matches a redaction pattern is refused at startup.
 refuse to load:
 `concurrency.docker` × `verify.container_memory` + `budgets.max_rss_mb` must be less than or equal
 to `budgets.max_host_rss_mb`. The shipped values are `4 × 8192 + 4096 = 36864` MiB. Set
-`budgets.max_host_rss_mb` to your host ceiling, then reduce the commitment inputs
+`budgets.max_host_rss_mb` to your host ceiling (the limit), then reduce the commitment inputs
 (`concurrency.docker`, `verify.container_memory`, `budgets.max_rss_mb`) until that total fits.
 
 ## Exit codes

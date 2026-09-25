@@ -89,7 +89,6 @@ line: `/home/redmage/swe repo harness/src`. Under a symlinked venv:
 **Not `uv sync`.** Even with `uv.lock` tracked, provisioning here needs an offline,
 byte-identical environment copied from the primary; a fresh resolve remains a network operation
 and can drift from what the primary is tested against if indexes/caches differ between runs.
-Note also that `uv` is not on `PATH` at all on this host; the only copy is `.venv/bin/uv`.
 
 The hardlink copy is offline, ~2 seconds, byte-identical to the primary, and — because `sed -i`
 writes a temp file and renames — the rewritten files get fresh inodes rather than corrupting the
