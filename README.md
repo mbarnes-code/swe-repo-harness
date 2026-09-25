@@ -168,6 +168,7 @@ refuse to load:
 to `budgets.max_host_rss_mb`. The shipped values are `4 × 8192 + 4096 = 36864` MiB. Set
 `budgets.max_host_rss_mb` to your host ceiling (the limit), then reduce the commitment inputs
 (`concurrency.docker`, `verify.container_memory`, `budgets.max_rss_mb`) until that total fits.
+Lowering only `budgets.max_host_rss_mb` makes the check stricter and does not solve this refusal.
 Fleet does not auto-tune these values: it validates the configured numbers and refuses when the
 commitment exceeds the configured or detected host limit.
 
