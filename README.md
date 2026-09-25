@@ -140,9 +140,10 @@ for the full flag set of any one of them.
 
 ## Configuration
 
-Three YAML files under `config/` are required and loaded on startup. `repos.yaml` and
-`fleet.yaml` can stay minimal with defaults, but `config/models.yaml` must set `default_profile`
-to a profile that exists in `profiles` or startup exits 2.
+Fleet loads three YAML files on startup: `config/repos.yaml`, `config/fleet.yaml`, and
+`config/models.yaml` (startup exits 2 if any is missing). `repos.yaml` and `fleet.yaml` can stay
+minimal with defaults, but `config/models.yaml` must set `default_profile` to a profile that
+exists in `profiles`.
 
 | File | What it holds |
 |---|---|
@@ -160,7 +161,8 @@ outright — the settings model forbids extra keys, so one stray export makes ev
 the variable it wants (`api_key_env: ANTHROPIC_API_KEY`) and the backend reads it at call time.
 Config text that matches a redaction pattern is refused at startup.
 
-**If your host has less than 36 GiB of RAM**, the shipped `config/fleet.yaml` can refuse to load:
+**If your host cannot satisfy 36864 MiB of commitment**, the shipped `config/fleet.yaml` can
+refuse to load:
 `concurrency.docker` × `verify.container_memory` + `budgets.max_rss_mb` must fit under
 `budgets.max_host_rss_mb`. The shipped values are `4 × 8192 + 4096 = 36864` MiB. On a smaller
 host, reduce the commitment inputs (`concurrency.docker`, `verify.container_memory`,
