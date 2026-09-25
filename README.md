@@ -167,7 +167,7 @@ host, reduce the commitment inputs (`concurrency.docker`, `verify.container_memo
 
 ## Exit codes
 
-Non-zero exits include both specific refusals and an unexpected-failure path (`1`).
+Non-zero exits include both specific refusals and one unexpected-failure path (`1`, listed below).
 
 | | | | |
 |---|---|---|---|
