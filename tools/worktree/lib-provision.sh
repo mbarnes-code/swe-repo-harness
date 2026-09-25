@@ -87,9 +87,12 @@ provision_worktree() {
   # sets pythonpath=["src"] and tests/conftest.py inserts REPO_ROOT/src, both worktree-relative)
   # but `.venv/bin/fleet` and any plain `python -c "import fleet"` would silently import the
   # primary's source, not this worktree's.
-  # NOT `uv sync` -- there is no uv.lock in this repo and every pin in pyproject.toml is a floor
-  # (`>=`), so a fresh resolve is a network operation that can drift from what the primary is
-  # tested against, and `uv` is not on PATH outside `.venv/bin/uv` on this host anyway.
+  # NOT `uv sync` -- `uv` is not on PATH outside `.venv/bin/uv` on this host, and a fresh resolve
+  # is a network operation that can drift from what the primary is tested against. (Corrected
+  # 2026-09-25: the original reason given here opened with "there is no uv.lock in this repo",
+  # which `uv.lock` being tracked at HEAD has falsified. The decision is unchanged -- a hardlink
+  # copy of the primary's `.venv` is the only offline path that guarantees byte-identical
+  # versions -- and the falsified clause is removed rather than the whole reason rewritten.)
   if [ -d "$wt/.venv" ]; then
     say ".venv already present, not re-cloned (rm -rf \"$wt/.venv\" first to force a re-clone)"
   else
