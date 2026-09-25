@@ -737,14 +737,16 @@ _PINNED_UNRESOLVED_CRITERIA_PLAN: tuple[tuple[str, str], ...] = (
 )
 
 # Discovered *while building* this profile, not hypothetical: containment alone (the primary
-# predicate) calls this citation resolved, because 213 falls inside `RejectedApproach`'s own
-# 208-226 span -- but line 213 is the class's own docstring, not the `class RejectedApproach`
-# line, so the second derivation below (which requires the anchor's own token at the cited line)
-# flags it. Read against source it is a deliberate, correct citation: the doc's claim is "this
-# class has no field that can hold diff text", and line 235 is the docstring sentence stating
-# exactly that -- a citation to *supporting prose*, the same category `INTEGRATION_HONESTY.md`'s
-# `response.usage` pin documents. Pinned rather than repointed, because there is no more-precise
-# line to point it at: the claim is about the class as a whole, not one field.
+# predicate) calls this citation resolved, because the cited line (213 when this pin was written,
+# 235 since ADR-0149 added 22 lines above it, 2026-09-25) falls inside `RejectedApproach`'s own span
+# (208-226 then, 230-248 now) -- but that line is the class's docstring, not its
+# `class` statement, so the second derivation below (which requires the anchor's own token at
+# the cited line) flags it. Read against source it is a deliberate, correct citation: the doc's
+# claim is "this class has no field that can hold diff text", and line 235 is the docstring sentence
+# stating exactly that -- a citation to *supporting prose*, the same category
+# `INTEGRATION_HONESTY.md`'s `response.usage` pin documents. Pinned rather than repointed, because
+# there is no more-precise line to point it at: the claim is about the class as a whole, not one
+# field.
 _TEXT_MISMATCH_PINS_CRITERIA_PLAN: tuple[tuple[str, str], ...] = (
     ("RejectedApproach", "src/fleet/models/tasks.py:235"),
 )

@@ -16209,8 +16209,15 @@ down: that method binds cache-key concerns and never reaches `_inner`, so it cou
    (from/to backend and model_id — identical across replicas), and counted in
    `usage.llm_failovers` → `attempts.llm_failovers`, never `phases.attempts` (§12.43 unchanged).
 4. **Breaker key includes the endpoint.** `BackendHealth._key` was `backend:model_id`, which both
-   replicas share: measured (mutation M4 below), a refusing replica's three failures opened the
-   breaker for its healthy peer and the next call raised `TierUnavailable`. The key is now
+   replicas share. Measured (mutation M4 below, re-measured by the review and again by this lane
+   with a pinned-interpreter probe: 5 sequential calls, a dead affine replica): the breaker NEVER
+   opens — each call's refusal on the dead replica is followed by its peer's `record_success` on
+   the same key, which resets the failure count, so the dead replica is dialled on every call (5
+   of 5, not 3) and every affected call pays its refusal/timeout first. No call raised.
+   *Corrected 2026-09-25 after review:* this sentence first claimed the shared key "opened the
+   breaker for its healthy peer and the next call raised `TierUnavailable`" — unmeasured, and
+   false for sequential calls; that outcome would need concurrent in-flight calls landing in a
+   particular order, which nothing here measures. The key is now
    `backend:model_id@base_url` when a `base_url` is set. This also separates two ordinary targets
    that share `backend:model_id` behind different `base_url`s (the "legitimate failover pair"
    `TierRoute`'s docstring names), which previously shared a breaker — a behaviour change,

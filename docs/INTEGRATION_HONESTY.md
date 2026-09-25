@@ -7713,8 +7713,9 @@ wire through (`record_task_anchor` is REWRITE/RELOCATE-specific, called only fro
 scenario is specifically the `git apply`/`git commit` REWRITE mutation flow), so this scope
 boundary does not block the criteria this defect names.
 
-`_TransformClaimHook` (`cli.py:5931`, repointed +1, 2026-09-25, by ADR-0149's `scope_to_repo`
-import, superseding the repoint +2, 2026-09-16, by ADR-0142's `max_calls=`
+`_TransformClaimHook` (`cli.py:5933`, repointed +3, 2026-09-25: +1 for ADR-0149's `scope_to_repo`
+import, +2 for drift the 2026-09-16 repoint left — it cited 5930 while `class _TransformClaimHook`
+sat at 5932 — found in ADR-0149's review and re-checked by reading line 5933 itself; superseding the repoint +2, 2026-09-16, by ADR-0142's `max_calls=`
 argument added to `_scan_impl`'s `open_budget_ledger` call above it, superseding the repoint +27, 2026-09-11, by an uncommitted bug-fix pass's
 insertions above it in `cli.py` — pure insertion, confirmed by exact-line-content match against
 the current tree; round VI task 111's own repoint (`cli.py:5901`) is superseded, per this file's
@@ -9268,7 +9269,9 @@ the premise it was quoting from ADR-0119 has moved. See ADR-0119's own matching 
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2797-2834`, repointed +1, 2026-09-25, by ADR-0149's `scope_to_repo` import, superseding
+(`cli.py:2799-2834`, repointed 2026-09-25: start +3 — +1 for ADR-0149's `scope_to_repo` import, +2
+for drift the 2026-09-16 repoint left (it cited 2796 while `async def _committed_contracts` sat at
+2798), found in ADR-0149's review and re-checked by reading line 2799 itself; superseding
 the repoint +2, 2026-09-16, by ADR-0142's `max_calls=` argument added to
 `_scan_impl`'s `open_budget_ledger` call above it, superseding the repoint +27, 2026-09-11, by an uncommitted bug-fix pass's insertions above
 it in `cli.py` — pure insertion, confirmed by exact-line-content match against the current tree;

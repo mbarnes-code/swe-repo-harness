@@ -20,8 +20,9 @@ Rule 12 — the unique discriminator of each mutation (the ADR-0149 matrix):
 * per-call re-roll in `resolve_replicas` → `test_every_call_for_one_repo_hits_one_replica`.
 * replica failover disabled (affine replica only) → `test_a_refusing_replica_fails_over_...`
   and the CLI arm `test_fleet_scan_completes_on_the_live_replica_...`.
-* breaker keyed on `backend:model_id` alone → `test_a_refusing_replica_fails_over_...` (its fifth
-  call: the dead replica's three failures open the SHARED breaker and the healthy peer is skipped).
+* breaker keyed on `backend:model_id` alone → `test_a_refusing_replica_fails_over_...` (the peer's
+  successes reset the SHARED counter, so the breaker never opens and the dead replica is dialled
+  on all five calls instead of three — every call still completes).
 """
 
 from __future__ import annotations

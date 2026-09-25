@@ -104,9 +104,9 @@ class BackendHealth:
     @staticmethod
     def _key(target: BackendTarget) -> str:
         # ADR-0149: the ENDPOINT is part of the breaker's identity. Keyed on `backend:model_id`
-        # alone, a replica refusing connections opened the breaker for its healthy peer too (both
-        # resolve to the same pair), and after `open_after_failures` calls the whole tier read DOWN
-        # while one replica was serving fine — the exact outage replicas exist to absorb.
+        # alone, both replicas share one counter: a dead replica's failure is reset by its healthy
+        # peer's success on the same call, so the breaker never opens and the dead replica is
+        # dialled — and its refusal/timeout paid — on every call (measured, ADR-0149 §4).
         if target.base_url is None:
             return f"{target.backend}:{target.model_id}"
         return f"{target.backend}:{target.model_id}@{target.base_url}"

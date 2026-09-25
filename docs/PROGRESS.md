@@ -11687,6 +11687,10 @@ own commit message(s) for the exact verification commands and their output.
 ## Round B (B1, B2, B4) of the same owner-approved brief — offline Harmony vocab, untracked
 Spark-endpoint overrides, D145/ADR-0146 carryover items
 
+> **Annotated 2026-09-25 (orchestrator ruling):** superseded as Round B's Rule-13 checkpoint by the
+> consolidated "Round B — closing checkpoint" section below; this section remains the record of
+> B1/B2/B4's work.
+
 **This round closes neither §12.49, §12.50, nor §12.51** — all three remain `OPEN`, exactly as
 Round A left them; closing any of them needs live Spark hardware (Round C, not yet started, per
 both criteria's own dated markers and Rule 13(a)/(b)/(c)'s options). This round makes measurable
@@ -11871,7 +11875,20 @@ already exempted by the grep's own `-v` filter): zero hits.
 
 ---
 
-## Round B3 of the same owner-approved brief — replica endpoints with per-repo affinity (§12.51, ADR-0149)
+## Round B — closing checkpoint for the whole round (B1–B4: `0b7ce54` and B3's `b60e765`/`6aa4f05` onward); B3 detail: replica endpoints with per-repo affinity (§12.51, ADR-0149)
+
+**Rule 13 accounting — orchestrator ruling, recorded here, not this lane's self-approval.** The
+orchestrator split the brief's Round B into two implementer dispatches (B1/B2/B4 → `0b7ce54`; B3 →
+this section's commits), which produced two consecutive no-criterion-movement checkpoints. Its
+ruling: **all of Round B (B1–B4) is ONE Rule-13 accounting unit**, matching the brief's three-round
+structure (Round A / B / C). Round B satisfies none of amended Rule 13's (a)/(b)/(c) — no criterion
+closed, no existing criterion re-verified against fresh evidence — and is permitted as ONE
+no-movement round following Round A's (a)-satisfying round (which added §12.49–51). **The next
+round dispatched against this branch (Round C, or any further Round B follow-up) must satisfy
+(a), (b) or (c), or Rule 13's consecutive-round prohibition trips.** This section therefore
+consolidates and supersedes the `0b7ce54` "Round (B1, B2, B4)" checkpoint above as Round B's
+checkpoint; that section stays as the record of what B1/B2/B4 did (annotate, never rewrite).
+
 
 **This round does not close §12.51** — it stays `OPEN`. Proven now, in the default (non-`live`)
 suite, against two local loopback stub endpoints: (i)'s stub leg (a real-CLI `fleet scan` drives
@@ -11911,5 +11928,9 @@ files add no newly-dirty file), `test_integration_honesty_citations.py` 3 (same 
 **precondition-only** — `test_llm_backend_fixture_e2e.py` asserts `src/fleet/` is clean before it
 runs, so it fails on any uncommitted `src/` edit — re-run at `b60e765` (committed): passes, together with the three touched test files whole (93 passed).
 
-**§12 count: 48 of 51** — carried from Round A's checkpoint, NOT re-derived this round (no criterion
-moved unmet → met; §12.51 progressed but its live leg remains).
+**§12 count: 51 criteria total**, re-measured directly at this checkpoint:
+`sed -n '/^## 12\./,/^## 13\./p' docs/SPEC.md | grep -cE '^[0-9]+\.'` → `51` (numbered 1–51, no
+gaps or duplicates). **Met count: not re-measured.** The 48 criteria previously recorded as met
+were NOT re-verified in Round B — permitted under the orchestrator's ruling above, but stated
+plainly so nobody reads this checkpoint as having re-derived them. §12.49–51 remain `OPEN`; §12.51
+progressed (stub legs of (i) and (iii), and (ii)) without closing.
