@@ -167,10 +167,9 @@ refuse to load:
 `concurrency.docker` × `verify.container_memory` + `budgets.max_rss_mb` must be less than or equal
 to the effective limit, which is the lower of `budgets.max_host_rss_mb` and detected host
 `MemTotal`. The shipped values are `4 × 8192 + 4096 = 36864` MiB. Set
-`budgets.max_host_rss_mb` to your host ceiling, then reduce the commitment inputs
-(`concurrency.docker`, `verify.container_memory`, `budgets.max_rss_mb`) until that total fits
-under both limits. Lowering only `budgets.max_host_rss_mb` makes the check stricter and does not
-solve this refusal.
+`budgets.max_host_rss_mb` to your host ceiling, then reduce `concurrency.docker`,
+`verify.container_memory`, and/or `budgets.max_rss_mb` until the computed total fits. Lowering
+only `budgets.max_host_rss_mb` makes the check stricter and does not solve this refusal.
 
 ## Exit codes
 
