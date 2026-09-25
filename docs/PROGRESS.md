@@ -11435,3 +11435,111 @@ egress), not a regression from this round.
 during D144's fixture work (`@maven//:junit` vs. the real generated `@maven//:junit_junit`); the
 deferred §14 disclosure for ADR-0143's items 1/3/4 (explicitly left for a separate pass); and the
 `js.py` `_bin`-target visibility test-coverage gap the code review flagged as weak/non-demonstrated.
+
+---
+
+## Checkpoint — 2026-09-25: ADR-0146/D145 — real `apply_patch` decode fix for the `pilot` profile's
+diff-shaped roles; D146 disclosed
+
+**Rule 13 declaration.** This round closes NO §12 criterion. **§12 count: 48 of 48**, re-measured
+directly against `docs/SPEC.md` §12 at this round's HEAD (`sed -n '/^## 12\./,/^## 13\./p'
+docs/SPEC.md | grep -cE '^[0-9]+\.'`), unchanged from every checkpoint since the project first
+reached 48/48. **This is at least the 4th consecutive no-criterion round by count, and the count is
+almost certainly an undercount:** the immediately preceding checkpoint (ADR-0142, 2026-09-16)
+declared itself new-feature work targeting no criterion; the one before that (ADR-0143/D143/ADR-
+0144/D144, 2026-09-24) also targeted no criterion. Between that checkpoint and this one, **ADR-0145**
+landed the entire `harmony_gpt_oss` backend on `main` (`9a39478`) — also targeting no §12 criterion
+— **and has no `docs/PROGRESS.md` checkpoint of its own at all.** That is a Rule 10 gap: flagged
+here, not silently backfilled, since reconstructing someone else's checkpoint after the fact is not
+this round's job and risks writing a version of events this round did not itself observe.
+
+**Disclosed judgment call, per Rule 13's restriction on two consecutive no-criterion rounds.** This
+round fixes a confirmed, verified **blocking functional defect on the path the fleet actually runs
+in production**: every diff-bearing role (`TRANSFORM_REPAIR`, `ESCALATION`) on the `pilot` profile
+was silently decoding `tool_arguments=None` on every call, burning its repair turn and walking the
+ladder to `REQUIRES_HUMAN_INTERVENTION` — not a hypothetical or a hardening concern, a real defect
+in code that had already landed and would have been the first thing to fail the moment `pilot` ran
+against real files. That is a stronger justification than pure process-hardening, and it is stated
+explicitly here rather than treated as automatically acceptable under Rule 13 — the fact remains
+that this makes four (arguably five, counting ADR-0145's unchecked-in round) consecutive rounds
+with no criterion movement, which is itself worth a future round's attention if the pattern
+continues.
+
+**What was completed.**
+
+1. **Root cause, confirmed by tracing real code, not fixture tests:** `harmony_gpt_oss.py::
+   _decode_apply_patch` needs a `pre_images` mapping to resolve the model's `apply_patch` hunks
+   against; `_extract_pre_images` built it by scraping `` ```path:...``` `` fences out of message
+   text, but `llm/calls.py::render_prompt` never emitted any such fence — it serialised ALL
+   evidence, including a file's literal on-disk content (`current_content`), as one `ensure_ascii`
+   JSON blob. `_extract_pre_images` returned `{}` against real `render_prompt` output, confirmed
+   interactively. A second, independent defect: even a hand-supplied pre-image built from
+   `ensure_ascii=True` JSON carries escaped `\n`/`\"` sequences instead of real bytes, which a
+   V4A/unified-diff hunk's context lines must match byte-for-byte.
+2. **ADR-0146** (Agent Recommendation, reviewed and adopted): file-content evidence now renders as
+   one raw, CommonMark-safe fenced block appended after the JSON evidence body, via a new shared
+   module `src/fleet/llm/fences.py` (`fence_file`/`parse_file_fences`/`discover_fenced_paths`) that
+   both `render_prompt` (writer) and `_extract_pre_images` (reader) use — one format, one place it
+   is defined, so the two cannot drift apart. `prompt_template_version` bumped 1 → 2 for
+   `TRANSFORM_REPAIR` and `ESCALATION` so no stale-format cache entry can be served.
+3. **D145** opened and closed in this round (`docs/INTEGRATION_HONESTY.md`): the defect above, its
+   two independent causes, and the fix, with the mutation matrix proving the new test actually
+   discriminates the fix from a reversion.
+4. **D146** opened, left OPEN, explicitly out of scope: `Role.API_INCOMPAT_REWRITE`
+   (`ApiRewriteProposal`) is diff-shaped by schema but has zero callers anywhere in `src/fleet` —
+   confirmed by grep — so no evidence wiring was built for it.
+
+**What was verified.**
+
+* `tests/test_llm_fences.py` (new, 14 tests): exact round trip for backtick runs of length 0–10,
+  arbitrary Unicode, CRLF, missing/extra trailing newline, empty content, and non-ASCII UTF-8
+  (`hypothesis`-driven plus fixed cases), the CommonMark fence-length rule, and injection safety —
+  a forged fence embedded inside real content is never discovered as a second top-level block, and
+  `parse_file_fences` never returns a path absent from its caller's `allowed_paths`.
+* `tests/test_llm_backend_harmony_gpt_oss.py` (7 new tests, 45 total, all passing): the RED→GREEN
+  verification test for both `TRANSFORM_REPAIR` and `ESCALATION`, each ALSO running its decoded
+  diff through `git apply --check` against a real git worktree; two further `git apply --check`
+  tests (Delete, Move-with-edit) against `_decode_apply_patch` directly; a planted-secret test
+  confirming redaction still applies to both the fenced block and the ordinary JSON body; and a
+  `PYTHONHASHSEED=0` vs `=1` subprocess determinism test for `render_prompt`.
+* **Rule 12 mutation proof.** `render_prompt`'s fenced-block branch was temporarily stubbed out
+  (reverted to JSON-only rendering) and the whole `harmony_gpt_oss` + `fences` test files re-run:
+  `test_a_diff_bearing_roles_real_render_prompt_output_decodes_a_non_none_apply_patch` (both
+  parametrizations) went RED (`assert result.tool_arguments is not None` failed, exactly the
+  pre-fix defect), the fence round-trip tests in `tests/test_llm_fences.py` stayed GREEN (the
+  revert only touched `calls.py`, not `fences.py`, so this correctly shows the mutation is scoped
+  to the intended module), and the pre-existing hand-built `_PRE_IMAGE_MESSAGE`-based tests
+  (including `test_the_real_client_gets_a_validated_patch_proposal_through_a_repair_turn`) stayed
+  GREEN throughout — exactly the discriminating shape Rule 12 requires, since those tests never
+  call `render_prompt`. `git diff` confirmed the revert actually changed lines before trusting the
+  RED result, and only the two expected tests went red (not the whole file/module), ruling out an
+  implausible all-RED false signal.
+* `python -m mypy` with **no path arguments** (repo-wide; manifest scopes `strict` +
+  `packages = ["fleet"]`): clean, 136 source files. `ruff check .` whole repository: **1
+  pre-existing, unrelated failure** (`src/fleet/ecosystems/jvm.py:30:101`, `E501`), confirmed
+  present at this round's base commit (`9a39478`) before any of this round's changes, left
+  untouched (not this round's file). `ruff format --check .` whole repository: the pinned baseline
+  test (`tests/test_lint_gate.py`) is **also already red at the base commit** — 121 dirty files
+  measured vs. a pinned baseline of 117, confirmed by reproducing the same 121/117 mismatch with
+  this round's changes fully stashed. Both `fences.py` and `tests/test_llm_fences.py` (the two new
+  files this round adds) are individually format-clean; the three touched files
+  (`calls.py`, `harmony_gpt_oss.py`, `tests/test_llm_backend_harmony_gpt_oss.py`) were already in
+  the dirty baseline before this round touched them and this round's edits do not change their
+  dirty/clean status.
+
+**Full suite** (`.venv/bin/pytest -q`, ~20 min, background, single session — no concurrent pytest
+per §6): **3052 passed, 17 failed, 14 skipped.** Every failure traced to one of two causes, neither
+this round's: (a) 14 pre-existing failures reproduced identically against the stashed base commit
+(`9a39478`) — 10 real-Bazel `test_build_e2e.py` network-dependent flakes matching this project's
+own documented pattern for that file, `test_eligible_contract_units.py::
+test_a_failed_contract_is_never_re_ingested_by_build`, 3 `test_integration_honesty_citations.py`
+citation/census-drift failures, and the same 2 lint-gate failures already disclosed above; (b)
+`test_llm_backend_fixture_e2e.py::test_fixture_backend_serves_every_role_with_zero_src_fleet_changes`
+fails only against an UNCOMMITTED working tree (it asserts `git status -- src/fleet/` is empty
+before it runs anything) and passes once this round's changes are committed — an artifact of
+running the suite pre-commit, not a real failure; re-run after commit to confirm.
+
+**Not done, disclosed rather than silently skipped:** re-pinning `tests/test_lint_gate.py`'s
+117-baseline to the currently-measured 121, and fixing the pre-existing `jvm.py` E501 — both are
+pre-existing drift unrelated to this round's scope and are left for whoever owns that baseline
+next, per Rule 3 (surgical changes, clean up only your own mess).

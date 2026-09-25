@@ -6110,6 +6110,27 @@ silently downgraded past what the profile promised:
   message, which is the one transformation the negotiator is allowed to perform on content, and it
   is recorded in the prompt hash like any other rendering decision (§11.6).
 
+**File content is rendered as a raw fenced block, not folded into the JSON evidence blob
+(ADR-0146).** `render_prompt()` (`llm/calls.py::render_prompt`) serialises evidence with
+`ensure_ascii=True`, which is correct for structured fields but wrong for a diff's context lines: a
+JSON string escapes a real newline/quote byte to a literal two-character `\n`/`\"`, and a
+V4A/unified-diff hunk's context has to match the real file byte-for-byte. So the one evidence key
+verified to carry a literal file's on-disk content (`current_content`, alongside a sibling `"path"`
+key — `workers/rewrite.py::_evidence`, `TRANSFORM_REPAIR`/`ESCALATION`) is pulled out of the
+mapping AFTER redaction but BEFORE JSON serialisation and appended as one raw fenced block instead,
+via `fleet.llm.fences.fence_file`/`parse_file_fences` — the ONE shared module both
+`render_prompt()` (writer) and `llm/backends/harmony_gpt_oss.py::_extract_pre_images` (reader) use,
+so the two can never drift out of sync. The fence is CommonMark-safe (a backtick run one longer
+than the longest run inside the content, minimum 3) and the round trip is exact for any content,
+including embedded backtick runs, CRLF, a missing or extra trailing newline, and non-ASCII UTF-8
+(`fleet.llm.fences` module docstring; property-tested in `tests/test_llm_fences.py`). Redaction is
+unaffected — the fenced content is read off the ALREADY-`redact_mapping()`-ed evidence, exactly
+like every other field. `parse_file_fences` never infers which paths are legitimate from the text
+itself: it takes an explicit `allowed_paths` set from its caller, because a real file's content can
+itself contain text shaped like a fenced block naming an arbitrary path (`fleet.llm.fences`'s
+injection-safety note; `git apply` remains the harness's sole worktree writer regardless, so a
+forged pre-image can only ever produce a diff that fails to apply — a safe, loud failure).
+
 **Evidence is untrusted input, and closing code-execution escalation is not the same as closing
 misleading-content influence.** `render_prompt()` (`llm/calls.py:258-290`) embeds an evidence
 mapping as one `sort_keys=True` JSON blob under a fixed `_EVIDENCE_HEADER` label, with no reserved

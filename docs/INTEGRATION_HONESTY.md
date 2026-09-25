@@ -11947,3 +11947,101 @@ change.
 this working tree only; there is no commit SHA to cite. Update this entry's heading to `FIXED,
 LANDED (<sha>)` in the same commit that lands the change, per this file's own status-vocabulary
 discipline.
+
+---
+
+## D145 — FIXED, LANDED (`669220a`; docs added in the same commit as this entry, matching D142's
+own same-round disclosure convention). Every diff-bearing `pilot` role decoded
+`tool_arguments=None` in production: `render_prompt()` never emitted the fence
+`_extract_pre_images` looked for, and `ensure_ascii=True` JSON escaped file content the model
+would have needed to match byte-for-byte even where a pre-image was supplied by hand
+
+Found by tracing real `render_prompt` output (not the fixture tests) against
+`harmony_gpt_oss.py::_decode_apply_patch`/`_extract_pre_images`, per ADR-0146's own explicit
+verification requirement before allocating fix work. Confirmed interactively:
+`_extract_pre_images` returns `{}` against real `render_prompt()` output for `Role.TRANSFORM_REPAIR`
+and `Role.ESCALATION`, the two diff-shaped roles with real callers (`workers/rewrite.py`).
+
+**The gap, as measured — two independent causes, both closed by the same fix.**
+
+1. `_decode_apply_patch` (`harmony_gpt_oss.py`) returns `None` whenever any Update/Delete path in
+   the model's `apply_patch` call is missing from `pre_images`. `pre_images` is built by
+   `_extract_pre_images`, which regex-scraped `` ```path:<p>\n<content>``` `` fences out of
+   message text — a convention its own docstring said "no existing worker emits it yet," true at
+   the time it was written and never revisited before wiring a real diff-bearing role at this
+   backend. `render_prompt()` (`llm/calls.py`) emits ALL evidence, `current_content` included, as
+   one `json.dumps(redact_mapping(evidence), ...)` blob — no ` ```path: ` fence can ever appear in
+   its output. Consequence in production: every diff-bearing role on `pilot` burned its repair turn
+   on every call and the repo walked the ladder to `REQUIRES_HUMAN_INTERVENTION`.
+2. Independent of (1): `ensure_ascii=True` JSON renders a real newline/quote byte as the literal
+   two-character sequence `\n`/`\"`. A V4A/unified-diff hunk's context lines must match the real
+   file byte-for-byte, so even a hand-supplied `pre_images` entry built from escaped JSON text
+   would require the model to mentally un-escape before it could write a matching context line —
+   confirmed by rendering `{"current_content": "def greet():\n    print(\"Hi\")\n"}` and observing
+   the literal two-character `\n` sequence in the JSON value, not a real newline byte.
+
+`tests/test_llm_backend_harmony_gpt_oss.py`'s `_PRE_IMAGE_MESSAGE` fixture and
+`test_the_real_client_gets_a_validated_patch_proposal_through_a_repair_turn` both hand-build a
+fenced message directly (`Message(role="user", content=_PRE_IMAGE_MESSAGE)`), never calling
+`render_prompt` — confirmed zero occurrences of `render_prompt` in either that test file or
+`harmony_gpt_oss.py` before this fix. This is why the suite was green while the production path
+was broken.
+
+**Fix (ADR-0146).** File-content evidence now renders as a raw, CommonMark-safe fenced block
+appended after the JSON evidence body, via one new shared module, `src/fleet/llm/fences.py`
+(`fence_file`/`parse_file_fences`, plus `discover_fenced_paths` for the one caller with no
+independent path allowlist). `render_prompt()` calls the writer; `harmony_gpt_oss.py::
+_extract_pre_images` calls the reader — one module, so the two formats cannot drift apart.
+`prompt_template_version` bumped 1 → 2 for `Role.TRANSFORM_REPAIR` and `Role.ESCALATION` in
+`llm/calls.py`'s `PROMPTS` table, so no cached answer keyed on the old JSON-only prompt bytes can
+be served against the new fenced-block prompt.
+
+**Proof, not assertion.** `tests/test_llm_backend_harmony_gpt_oss.py::
+test_a_diff_bearing_roles_real_render_prompt_output_decodes_a_non_none_apply_patch` (parametrized
+over both `TRANSFORM_REPAIR` and `ESCALATION`) renders evidence through the REAL `render_prompt`,
+feeds it to `HarmonyGptOssBackend` with a scripted `apply_patch` reply, and asserts a non-`None`
+`tool_arguments`. **Mutation matrix, actually measured (Rule 12), not asserted:** with
+`render_prompt` temporarily reverted to JSON-only rendering (`git diff --numstat` confirmed 16
+lines actually changed before trusting the result), `tests/test_llm_backend_harmony_gpt_oss.py` +
+`tests/test_llm_fences.py` together went from 59 passed / 0 failed to **57 passed / 2 failed** —
+exactly the two new parametrized cases of this test, both on
+`assert result.tool_arguments is not None`. Every other test, including every
+`tests/test_llm_fences.py` round-trip test (`fences.py` was untouched by this mutation, so this
+correctly shows the mutation scoped to `calls.py`) and the existing hand-built
+`_PRE_IMAGE_MESSAGE`-based tests (`test_the_real_client_gets_a_validated_patch_proposal_through_a_
+repair_turn` included, since it never calls `render_prompt`), stayed GREEN. Reapplying the fix
+returned the suite to 59/59 — this is the discriminating shape CLAUDE.md Rule 12 requires (old
+code passes, new-shaped test fails, under a mutation confirmed to have actually changed the code
+and confirmed not to have broken the whole module: only 2 of 59 cases went red, not all of them).
+The same test also runs the decoded diff through `git apply --check` against a real git worktree
+seeded with the original file content. A planted secret (`tests/test_llm_backend_harmony_gpt_oss.py::
+test_a_planted_secret_never_reaches_the_transport_token_ids`) is confirmed absent from the
+transport's decoded `prompt_token_ids` in both evidence fields it was planted in, proving
+redaction still applies to the fenced block. `render_prompt()`'s determinism is confirmed
+byte-identical across two subprocesses under `PYTHONHASHSEED=0` and `PYTHONHASHSEED=1`.
+
+---
+
+## D146 — OPEN. `Role.API_INCOMPAT_REWRITE` (`ApiRewriteProposal`) has zero callers anywhere in
+`src/fleet` — a diff-shaped role that is unreachable in the shipped pipeline, disclosed and
+explicitly out of scope for D145's fix
+
+Found during D145/ADR-0146's sweep of which roles are actually diff-shaped and actually reachable,
+before deciding which roles' evidence needed the fenced-block fix. `src/fleet/llm/calls.py:390`
+defines `rewrite_api_incompat()`, bound to `Role.API_INCOMPAT_REWRITE` and schema
+`ApiRewriteProposal` (`schemas.py`, extends `LlmPatchProposal` — diff-shaped, same as
+`TRANSFORM_REPAIR`/`ESCALATION`). `grep -rn "rewrite_api_incompat" src/fleet/` and
+`grep -rn "API_INCOMPAT_REWRITE|ApiRewriteProposal" src/fleet/workers/` both return nothing outside
+the role/schema/prompt-table definitions themselves — no worker calls `rewrite_api_incompat()`, no
+worker builds evidence carrying a file-content key for it. It is a defined, schema-valid role with
+no caller, not a role that is called and silently fails.
+
+**Not fixed here — explicitly out of scope for D145/ADR-0146.** D145's fix wires the
+`current_content`/`path` evidence pairing through `render_prompt()`'s fenced-block rendering for
+`TRANSFORM_REPAIR` and `ESCALATION` only, the two roles confirmed to have a real caller. Building
+evidence wiring for a role nothing calls would be speculative generality with no way to verify it
+against real evidence shape (CLAUDE.md's directive against inventing speculative generality beyond
+what can be verified). Whoever wires a caller for `api_incompat_rewrite()` in the future should
+confirm at that point whether its evidence carries a file-content key in the same `current_content`
+shape, or a different one, and extend `render_prompt()`'s file-carrier handling accordingly — the
+mechanism (`fleet.llm.fences`) does not need to change, only which evidence key triggers it.
