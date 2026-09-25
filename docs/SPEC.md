@@ -6118,18 +6118,32 @@ V4A/unified-diff hunk's context has to match the real file byte-for-byte. So the
 verified to carry a literal file's on-disk content (`current_content`, alongside a sibling `"path"`
 key — `workers/rewrite.py::_evidence`, `TRANSFORM_REPAIR`/`ESCALATION`) is pulled out of the
 mapping AFTER redaction but BEFORE JSON serialisation and appended as one raw fenced block instead,
-via `fleet.llm.fences.fence_file`/`parse_file_fences` — the ONE shared module both
-`render_prompt()` (writer) and `llm/backends/harmony_gpt_oss.py::_extract_pre_images` (reader) use,
-so the two can never drift out of sync. The fence is CommonMark-safe (a backtick run one longer
-than the longest run inside the content, minimum 3) and the round trip is exact for any content,
-including embedded backtick runs, CRLF, a missing or extra trailing newline, and non-ASCII UTF-8
-(`fleet.llm.fences` module docstring; property-tested in `tests/test_llm_fences.py`). Redaction is
-unaffected — the fenced content is read off the ALREADY-`redact_mapping()`-ed evidence, exactly
-like every other field. `parse_file_fences` never infers which paths are legitimate from the text
-itself: it takes an explicit `allowed_paths` set from its caller, because a real file's content can
-itself contain text shaped like a fenced block naming an arbitrary path (`fleet.llm.fences`'s
-injection-safety note; `git apply` remains the harness's sole worktree writer regardless, so a
-forged pre-image can only ever produce a diff that fails to apply — a safe, loud failure).
+via `fleet.llm.fences.fence_file` — the ONE shared module both `render_prompt()` (writer) and
+`llm/backends/harmony_gpt_oss.py::_extract_pre_images` (reader) use, so the two can never drift out
+of sync. The fence is CommonMark-safe (a backtick run one longer than the longest run inside the
+content, minimum 3) and the round trip is exact for any content, including embedded backtick runs,
+CRLF, a missing or extra trailing newline, and non-ASCII UTF-8 (`fleet.llm.fences` module
+docstring; property-tested in `tests/test_llm_fences.py`). Redaction is unaffected — the fenced
+content is read off the ALREADY-`redact_mapping()`-ed evidence, exactly like every other field.
+
+**Injection-safety trust boundary (corrected 2026-09-25 after independent review found the first
+version exploitable).** A real file's content can itself contain text shaped like a fenced block
+naming an arbitrary path — this repository's own source is exactly such content. The real trust
+boundary `_extract_pre_images` relies on is not "which paths does the text claim" but "who wrote
+this message": `render_prompt()`'s `fence_file` calls only ever land inside a `system`/`user`
+`Message`, never one the model authored, so `_extract_pre_images` scans ONLY `system`/`user`-role
+messages — `assistant`/`tool` messages (which carry the model's own prior reply during a repair
+turn, `llm/client.py::_repair_turns`) are excluded unconditionally, by role, never by content — and
+trusts every top-level block a sequential, non-overlapping scan finds inside one
+(`fleet.llm.fences.trusted_fenced_blocks`). An earlier version derived its "allowlist" by
+re-scanning the very same text it was about to trust (`parse_file_fences(text,
+discover_fenced_paths(text))`), which restricts nothing, and scanned every message regardless of
+role — an independent review proved this let a model echo a forged fence in its own reply and
+silently override the real pre-image, or introduce a path the harness never rendered at all.
+`fleet.llm.fences.parse_file_fences`/`discover_fenced_paths` remain available for a caller with a
+genuinely independent per-path allowlist; `git apply` remains the harness's sole worktree writer
+regardless, so any pre-image forgery that got past every layer here can still only ever produce a
+diff that fails to apply — a safe, loud failure, not silent corruption.
 
 **Evidence is untrusted input, and closing code-execution escalation is not the same as closing
 misleading-content influence.** `render_prompt()` (`llm/calls.py:258-290`) embeds an evidence

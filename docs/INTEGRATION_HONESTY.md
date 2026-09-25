@@ -11950,8 +11950,11 @@ discipline.
 
 ---
 
-## D145 — FIXED, LANDED (`669220a`; docs added in the same commit as this entry, matching D142's
-own same-round disclosure convention). Every diff-bearing `pilot` role decoded
+## D145 — FIXED, LANDED (`669220a`; this entry itself landed in the immediately following commit,
+`8615d6c`, matching D142's own same-round disclosure convention — **corrected 2026-09-25**: an
+earlier draft of this heading said "docs added in the same commit as this entry", which is not
+what happened — `669220a` is the fix, `8615d6c` is the entry describing it, two commits, not one).
+Every diff-bearing `pilot` role decoded
 `tool_arguments=None` in production: `render_prompt()` never emitted the fence
 `_extract_pre_images` looked for, and `ensure_ascii=True` JSON escaped file content the model
 would have needed to match byte-for-byte even where a pre-image was supplied by hand
@@ -12019,6 +12022,32 @@ test_a_planted_secret_never_reaches_the_transport_token_ids`) is confirmed absen
 transport's decoded `prompt_token_ids` in both evidence fields it was planted in, proving
 redaction still applies to the fenced block. `render_prompt()`'s determinism is confirmed
 byte-identical across two subprocesses under `PYTHONHASHSEED=0` and `PYTHONHASHSEED=1`.
+
+**Editorial addendum (2026-09-25, same round, before this branch's review completed) —
+`669220a`'s `_extract_pre_images` was itself exploitable, fixed in `1b85705`.** An independent
+review of `669220a`/`8615d6c` found the "injection safety" this entry originally described was not
+real protection: `_extract_pre_images` derived its `allowed_paths` by re-scanning the SAME text it
+was about to parse (`parse_file_fences(text, discover_fenced_paths(text))`), which restricts
+nothing, and it scanned EVERY message in the conversation regardless of role, including
+`assistant`/`tool` messages that carry the model's own prior reply during a repair turn
+(`client.py::_repair_turns`). The review proved this exploitable, not merely imprecise: an
+`assistant`-role message echoing a forged `` ```path:src/app.py\n<forged>``` `` block silently
+overrode the REAL pre-image for that same path (`dict.update`, last-scanned wins), and a second
+probe introduced a path (`/etc/x`) the harness had never rendered at all. Fixed in `1b85705`: the
+real trust boundary is "who wrote this message", not "what does the text claim" —
+`_extract_pre_images` now scans ONLY `system`/`user`-role messages (the only roles `render_prompt`
+ever writes a fence into) and trusts every block a sequential scan finds inside one
+(`fleet.llm.fences.trusted_fenced_blocks`); `assistant`/`tool` messages are excluded
+unconditionally, by role. Regression tests
+`test_a_forged_assistant_message_fence_never_overrides_or_introduces_a_pre_image` and
+`test_a_forged_tool_message_fence_is_also_never_scanned` reproduce the reviewer's exact probe —
+confirmed RED against `669220a`'s code, GREEN after `1b85705`. **Corrected mutation matrix:**
+re-running the Rule 12 proof against the fixed code, reverting `render_prompt`'s fencing now
+reddens **4** of 61 tests (the original 2 RED→GREEN cases plus these 2 new regression tests, since
+they also depend on a real fence existing in the harness-rendered message), not the 2 originally
+reported before this addendum — the original "57 passed / 2 failed" figure above is left as
+written per this file's annotate-in-place convention and is superseded by this paragraph's 4-of-61
+for the code as it now stands.
 
 ---
 

@@ -11441,11 +11441,18 @@ deferred §14 disclosure for ADR-0143's items 1/3/4 (explicitly left for a separ
 ## Checkpoint — 2026-09-25: ADR-0146/D145 — real `apply_patch` decode fix for the `pilot` profile's
 diff-shaped roles; D146 disclosed
 
-**Rule 13 declaration.** This round closes NO §12 criterion. **§12 count: 48 of 48**, re-measured
-directly against `docs/SPEC.md` §12 at this round's HEAD (`sed -n '/^## 12\./,/^## 13\./p'
-docs/SPEC.md | grep -cE '^[0-9]+\.'`), unchanged from every checkpoint since the project first
-reached 48/48. **This is at least the 4th consecutive no-criterion round by count, and the count is
-almost certainly an undercount:** the immediately preceding checkpoint (ADR-0142, 2026-09-16)
+**Rule 13 declaration.** This round closes NO §12 criterion — this round is a defect fix on an
+unrelated LLM-prompt-rendering path and does not touch any §12 acceptance-bar text, code, or test.
+**Correction (caught in review):** an earlier draft of this checkpoint wrote "§12 count: 48 of 48,
+re-measured", implying the MET-count had been re-derived this round. It had not. `sed -n
+'/^## 12\./,/^## 13\./p' docs/SPEC.md | grep -cE '^[0-9]+\.'` — the command actually run — counts
+how many criteria §12 LISTS (the total, structurally unchanged at **48**, confirmed by re-running
+it at this round's HEAD), not how many are currently MET; it cannot support a "48 of 48 met" claim,
+and this round does not re-derive the full met/unmet census (Rule 13 requires naming which
+criterion a round moves — none, here — not re-auditing all 48 for an unrelated fix). Whatever the
+last full census found stands as the last full census found it; this round makes no claim about it
+either way. **This is at least the 4th consecutive no-criterion round by count:** the immediately
+preceding checkpoint (ADR-0142, 2026-09-16)
 declared itself new-feature work targeting no criterion; the one before that (ADR-0143/D143/ADR-
 0144/D144, 2026-09-24) also targeted no criterion. Between that checkpoint and this one, **ADR-0145**
 landed the entire `harmony_gpt_oss` backend on `main` (`9a39478`) — also targeting no §12 criterion
@@ -11543,3 +11550,19 @@ running the suite pre-commit, not a real failure; re-run after commit to confirm
 117-baseline to the currently-measured 121, and fixing the pre-existing `jvm.py` E501 — both are
 pre-existing drift unrelated to this round's scope and are left for whoever owns that baseline
 next, per Rule 3 (surgical changes, clean up only your own mess).
+
+**Follow-up, same round (`1b85705`): independent review found `669220a`'s `_extract_pre_images`
+allowlist ineffective and exploitable, not just imprecise.** It derived `allowed_paths` by
+re-scanning the same text it parsed — restricting nothing — and scanned every message regardless
+of role, so an `assistant`-role message (the model's own prior reply during a repair turn) echoing
+a forged fence could override a real pre-image or introduce a path the harness never rendered.
+Fixed by scanning ONLY `system`/`user`-role messages and trusting every block found inside one
+(`fleet.llm.fences.trusted_fenced_blocks`) — those are the only roles `render_prompt` ever writes
+a fence into, so the fix is a role-based trust boundary, not a stronger allowlist. Full detail and
+the corrected mutation matrix (4 of 61 tests redden under the Rule 12 revert, not 2) are in D145's
+addendum in `docs/INTEGRATION_HONESTY.md`. Also fixed in this follow-up, all minor/cheap per
+review: `fence_file` now raises on a newline in `path` instead of silently producing a malformed
+block; the `PYTHONHASHSEED` determinism test documents its worktree-isolation assumption; this
+checkpoint's own Rule 13 wording was corrected (see above — the total-vs-met distinction); and
+D145's heading now correctly attributes the fix to `669220a` and this entry's own landing to a
+separate, later commit rather than claiming both happened in one.
