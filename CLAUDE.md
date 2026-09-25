@@ -87,10 +87,28 @@ to met.** A round with none — pure verification/process-hardening — is allow
 explicitly, and may not be followed by a second such round without an intervening
 criteria-closing round: process integrity that never cashes out in criteria movement is the
 failure this rule exists to stop. Every `docs/PROGRESS.md` checkpoint (Rule 10) reports the
-current count as `<n> of 48`, re-measured against §12 directly — never carried forward from the
-last audit. Pick targets from `docs/CRITERIA_PLAN.md`, the per-criterion closure backlog this
-rule requires be kept current; each criterion there carries a bounded "done bar" so a round knows
-when to stop, not just where to start.
+current count as `<n> of N` (N = the current §12 criterion count — see the amendment below; N was
+fixed at 48 from when this rule was written until 2026-09-25), re-measured against §12 directly —
+never carried forward from the last audit. Pick targets from `docs/CRITERIA_PLAN.md`, the
+per-criterion closure backlog this rule requires be kept current; each criterion there carries a
+bounded "done bar" so a round knows when to stop, not just where to start.
+
+**Amended 2026-09-25 (ADR-0147).** §12 reached 48 of 48 on 2026-09-10, which made the paragraph
+above structurally unsatisfiable — with nothing left unmet, no round could "name which criterion
+it is expected to move from unmet to met," and several consecutive checkpoint rounds after that
+point were each declared "no-criterion" and needed an ad-hoc controller ruling to avoid tripping
+the no-two-consecutive-no-criterion-rounds prohibition. This paragraph closes that gap.
+
+**When every §12 criterion is met**, a round satisfies this rule by doing one of the following,
+named in its checkpoint:
+(a) adding or amending criteria through Rule 14's disclosed adjudication;
+(b) closing a criterion added under (a);
+(c) re-verifying one or more existing criteria against fresh evidence at the round's HEAD, named
+by number, with the re-verification recorded as it was actually run.
+
+The prohibition on consecutive rounds that do none of (a)–(c) still applies. The checkpoint's
+`<n> of N` is re-measured as MET status per criterion, never as the structural total. N is the
+current criterion count, no longer fixed at 48.
 
 ### Rule 14 — §12 Criterion Text Changes Only By Disclosed Adjudication
 A `docs/SPEC.md` §12 criterion's wording is the acceptance bar Rule 13 measures against —

@@ -16076,3 +16076,99 @@ Even a forged pre-image that somehow got through this — for instance a nested 
 **Scope.** `Role.API_INCOMPAT_REWRITE` (`ApiRewriteProposal`) is diff-shaped by schema but has zero callers anywhere in `src/fleet` — confirmed by grep — so it is not wired into this fix; see D146.
 
 ---
+
+## ADR-0147 — Rule 13 gets an explicit satisfaction path for the all-criteria-met state
+
+**Decision (2026-09-25).** §12 reached 48 of 48 on 2026-09-10 (round VIII, `docs/PROGRESS.md`).
+Rule 13's operative clause ("before dispatching a round, name which §12 criterion number(s) it is
+expected to move from unmet to met... may not be followed by a second such [no-criterion] round
+without an intervening criteria-closing round") presupposes an unmet criterion always exists to
+name. Once none did, every round became a "no-criterion" round by the rule's own literal text,
+and the no-two-consecutive prohibition became permanently un-satisfiable without either (a) a
+fresh criterion to close — none existed — or (b) a controller ruling issued fresh each time.
+Several consecutive checkpoint rounds after 2026-09-10 hit exactly this: each was declared
+"no-criterion" in its own checkpoint and each needed an ad-hoc controller ruling to avoid tripping
+the prohibition (see `docs/PROGRESS.md`'s post-2026-09-10 checkpoints, e.g. the round citing "this
+round closes NO §12 criterion... Rule 13's restriction on two consecutive no-criterion rounds").
+Ad-hoc rulings issued round over round are exactly the undisclosed-adjudication failure mode Rule
+14 exists to prevent for criterion wording — the same discipline was missing here for the rule
+that measures against that wording.
+
+**The fix.** CLAUDE.md's Rule 13 gains an explicit paragraph for the all-criteria-met case: a round
+satisfies the rule by (a) adding or amending criteria through Rule 14's disclosed adjudication,
+(b) closing a criterion added under (a), or (c) re-verifying one or more existing criteria against
+fresh evidence at the round's HEAD, named by number and recorded as actually run. The
+no-two-consecutive-no-movement prohibition is explicitly preserved — it now reads "none of (a)–(c)"
+in place of "no criterion moved from unmet to met" — so a round still cannot coast on pure
+process-hardening indefinitely; it must add, close, or re-verify something nameable. The
+checkpoint's `<n> of N` is re-measured as MET-status-per-criterion, never carried forward as the
+structural total, and N is no longer pinned at 48 — it is whatever §12 currently contains,
+re-derived at the moment a round names it (mirroring this project's existing "measured, not
+carried forward" discipline for D-number censuses and citation sweeps elsewhere in CLAUDE.md).
+
+**Why not just declare 48/48 the terminal state and drop Rule 13 once satisfied.** §12's own
+history (39 → 48, `docs/PROGRESS.md:33` vs. 2026-08-27) shows the criteria set is not fixed for
+the life of the project — the D145 gap this same round's ADR-0148 closes is direct proof a
+"complete" acceptance bar can still miss a real production defect class. Retiring Rule 13 at
+48/48 would have removed the only mechanism forcing a future gap like D145 to become a *named,
+tracked* criterion rather than a defect fixed and never re-tied to the bar.
+
+**Scope.** This ADR amends CLAUDE.md's process rule only; it adds no §12 criteria itself — that is
+ADR-0148, a separate, disclosed decision per Rule 14.
+
+---
+
+## ADR-0148 — Three new §12 criteria close the `pilot`/Harmony live-conformance gap D145 exposed
+
+**Decision (2026-09-25).** §12 reached 48 of 48 on 2026-09-10, but D145 (fixed `669220a`, disclosed
+in `docs/INTEGRATION_HONESTY.md`) is direct proof the acceptance bar had a real gap: the `pilot`
+profile could not decode a single existing-file `apply_patch` — every diff-bearing role burned its
+repair turn and the repo walked the ladder to `REQUIRES_HUMAN_INTERVENTION` — and no §12 criterion
+would have caught it before it shipped. §12.41 only exercises `--profile local` against a stub
+OpenAI-compatible server; nothing in §12 drives `pilot` → `render_prompt` → `HarmonyGptOssBackend`
+→ a real endpoint, and nothing checks that work is actually spread across the two Spark endpoints
+this fleet will use in production. Per Rule 14, a scope addition to §12 is a decision, not a
+bugfix, and is recorded here rather than folded silently into D145's fix commit.
+
+**The fix.** Three criteria are added to `docs/SPEC.md` §12 (48 → 51; the 48 already met are
+unaffected, re-derived per criterion under amended Rule 13/ADR-0147, not carried forward):
+
+- **§12.49 — Harmony conformance against a live endpoint.** A `live`-marked suite (skipped by
+  default) exercises every endpoint in the `pilot` profile against plain replies, a tool call, the
+  two-round `apply_patch` flow, a ≥64k-token prompt, and ≥32 concurrent requests per endpoint, with
+  token-level assertions (first token `<|channel|>`, every tool call terminates `<|call|>`, every
+  recipient resolves, arguments parse as JSON, no `analysis`-channel leakage into the final
+  answer). Failures classify as server-corruption signatures (fail the criterion) versus model
+  format deviations (pass under a threshold pre-registered before the first live run, to avoid
+  post-hoc threshold-shopping). A report is committed under `docs/evidence/`.
+- **§12.50 — `pilot` completes a fixture run end to end, offline at the LLM layer.** Proves the
+  live path lands a real `apply_patch`-decoded fix via `git apply`, that every outbound LLM call
+  targets a configured Spark endpoint, that the Harmony vocabulary loads without network access to
+  a vocab host, and that the live run's token streams are captured as a replay fixture so the
+  default (non-`live`) suite can verify the same decode path without hardware.
+- **§12.51 — calls distribute across both Spark endpoints with per-repo affinity.** Both endpoints
+  serve calls over a fixture run with the split recorded; one `repo_id`'s calls within a phase
+  stick to one endpoint (stable hash); losing one endpoint fails over to the other without
+  charging the repo (mirrors §12.43's existing failover-accounting invariant). Clauses (i) and
+  (iii) are provable against local stub endpoints in the default suite today; (i) is also to be
+  measured live.
+
+**This round adds the criteria; it does not meet them.** Meeting §12.49–51 requires access to live
+Spark hardware (both endpoints), which this round does not have — that is deliberately a later,
+separate round's work. All three are recorded `OPEN` in `docs/CRITERIA_PLAN.md` with their own
+done bars, per Rule 14's "kept current in the same commit" requirement.
+
+**Why three criteria and not one.** §12.49 is a conformance property of the backend in isolation
+(does Harmony decode correctly against a real model), §12.50 is an end-to-end pipeline property
+(does a real fix land through the full six-phase flow, and can the default suite replay it without
+hardware), and §12.51 is a fleet-operations property (is load actually spread across the hardware
+this project owns, with correct affinity and failover). A single combined criterion would let a
+future round claim partial credit by conflating "the backend can decode a patch" with "the fleet
+correctly uses both machines," which is exactly the kind of narrowing Rule 14 exists to prevent.
+
+**D145 disposition.** D145 itself is already `FIXED, LANDED` (`669220a`) per
+`docs/INTEGRATION_HONESTY.md` — this ADR does not reopen it. §12.49–51 exist so the *class* of gap
+D145 exposed (a real defect with no covering criterion) is now covered going forward, independent
+of whether any individual future Harmony defect happens to get its own D-number.
+
+---

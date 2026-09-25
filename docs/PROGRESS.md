@@ -11596,3 +11596,88 @@ or after that boundary regardless of its own role. Regression test reproduces th
 probe end to end through the real `_validate`/`_repair_turns`/`_extract_pre_images` path (no
 mocks); confirmed RED against the role-only code, GREEN after. Full detail in D145's second
 addendum in `docs/INTEGRATION_HONESTY.md`; ADR-0146 and SPEC.md §7.7 updated to match.
+
+---
+
+## Checkpoint — 2026-09-25: Rule 13 amended for the all-criteria-met state (ADR-0147); three new
+§12 criteria close the `pilot`/Harmony live-conformance gap D145 exposed (ADR-0148) — docs-only,
+Round A of a larger owner-approved brief
+
+**Rule 13 declaration, under AMENDED Rule 13 (this round's own change).** This round closes NO
+existing §12 criterion. It qualifies under Rule 13(a), just added by this same round: "adding or
+amending criteria through Rule 14's disclosed adjudication." This is itself the first live use of
+new Rule 13(a) — stated explicitly, since the round that writes a rule and the round that first
+invokes it are not always the same round, and this one is both.
+
+**Why this round exists.** §12 reached 48 of 48 on 2026-09-10 (round VI, thirty-ninth wave). Since
+then, every checkpoint has been a "no-criterion" round by construction — nothing was left to name
+as moving from unmet to met — and multiple consecutive rounds needed an ad-hoc controller ruling
+each time to avoid tripping Rule 13's no-two-consecutive-no-criterion-rounds prohibition (see e.g.
+the 2026-09-16 and 2026-09-24 checkpoints above, both declaring "closes NO §12 criterion" and both
+reasoning explicitly about the consecutive-round count). Separately, D145 (fixed `669220a`, the
+immediately preceding checkpoint above) was a real production defect — the `pilot` profile could
+not decode a single existing-file `apply_patch` — that no §12 criterion would have caught before
+it shipped: §12.41 only proves `--profile local` against a stub server, and nothing in §12 drives
+`pilot` → `render_prompt` → `HarmonyGptOssBackend` against a real endpoint or checks load is
+actually spread across the two Spark endpoints this fleet will use. Both gaps are structural, not
+one-off, so both are fixed as rule/spec changes rather than as one-off dispensations.
+
+**What changed.**
+1. **CLAUDE.md Rule 13** gains an explicit paragraph for the all-criteria-met case (`ADR-0147`): a
+   round satisfies the rule by (a) adding/amending criteria via Rule 14, (b) closing a criterion
+   added under (a), or (c) re-verifying existing criteria against fresh evidence, named by number.
+   The no-two-consecutive-no-movement prohibition is preserved, reworded to "none of (a)–(c)."
+   Rule 13's `<n> of 48` checkpoint-reporting instruction is corrected to `<n> of N`, with N
+   defined as the current §12 count rather than fixed at 48. The two historical narrative
+   sentences citing `12be741`'s "1 of 48" measurement and the 93%-coverage-vs-1-of-48 divergence
+   are **left untouched** — they describe what was true at that specific past commit, not the
+   ongoing invariant, per this file's own annotate-don't-rewrite convention.
+2. **`docs/SPEC.md` §12** gains three new criteria, **§12.49, §12.50, §12.51** (`ADR-0148`,
+   citing `D145`), each carrying its own 2026-09-25 dated in-place marker stating it is newly
+   added and OPEN: (49) a `live`-marked conformance suite against every `pilot`-profile endpoint,
+   with token-level Harmony-format assertions and a server-corruption-vs-model-deviation failure
+   split; (50) a live `pilot`-profile fixture run landing a real `apply_patch` fix end to end,
+   with its token streams captured as a replay fixture so the default suite can verify the same
+   decode path offline; (51) call distribution across both Spark endpoints with per-repo affinity
+   and disclosed failover accounting, provable today against local stub endpoints except for one
+   live-measurement clause.
+3. **`docs/CRITERIA_PLAN.md`** gains matching `## 49.`/`## 50.`/`## 51.` entries, each with a
+   bounded done bar and status `OPEN — NEW-MECHANISM`, plus a note in the Rollup table's
+   "everything else" row (appended, not rewriting the row's existing history).
+4. **`docs/INTEGRATION_HONESTY.md`**: D145's entry (already `FIXED, LANDED`) gains an appended,
+   dated forward-reference noting it is the reason §12.49–51 exist — D145's own status line is
+   unchanged, no D-number is reused or reallocated (per the brief: D145 is cited, not reopened).
+
+**§12 count: 48 of 51.** 48 already-met criteria are **not re-verified in this round** — MET
+status is re-derived per criterion under amended Rule 13, never carried forward, and this round
+did not re-verify any of the 48 (it added criteria under clause (a), not clause (c)); a future
+round re-deriving the full rollup should not read this checkpoint as having done that work. The 3
+new criteria (§12.49–51) are **OPEN, not met** — meeting them requires live Spark hardware
+(§12.49, §12.50, and §12.51 clause (i)'s live leg) and is explicitly out of scope for this round;
+§12.51 clauses (i)–(iii) are meetable against local stub endpoints without hardware and are the
+cheapest of the three to close first (see `docs/CRITERIA_PLAN.md`'s dispatch-order note).
+
+**Judgment calls made, flagged as this round's own recommendations, not directives:**
+- The brief's proposed Rule 13 amendment paragraph was adopted with only the wording of the "as
+  named in its checkpoint" framing lightly restated; every requirement (the three clauses, the
+  preserved consecutive-round prohibition, the `<n> of N` re-measurement rule) is unchanged.
+- The brief's proposed §12.49–51 wording was adopted verbatim in substance; each criterion's
+  opening sentence gained an explicit dated OPEN marker (matching the §12.16/§12.40/§12.45/§12.48
+  convention) rather than relying on this checkpoint alone to disclose non-met status.
+- Rather than assert the brief's background claim of "four consecutive rounds" needing ad-hoc
+  rulings as a measured number, this checkpoint (and ADR-0147) describe it qualitatively
+  ("multiple consecutive rounds") — a spot check of this file's post-2026-09-10 checkpoints found
+  at least five distinct "closes NO §12 criterion" declarations, which is in the right range but
+  was not pinned to an exact re-derived count, per CLAUDE.md's "never pass an unmeasured number"
+  discipline.
+- `docs/CRITERIA_PLAN.md`'s Rollup table's `DONE | 48 | ...` row was left completely unedited
+  (still accurate — all 48 are still met) rather than restated with a new total; the 3 new
+  criteria are noted only in the "everything else" row and their own new entries, consistent with
+  the DONE row's existing 48-item enumeration not needing to mention criteria it doesn't contain.
+
+**No source code changed this round** — governance/docs only, per the dispatch brief's own scope.
+`ruff check .`, `ruff format --check .`, and `python -m mypy` (no path args) were run to confirm no
+pre-existing-vs-new drift; no test file changes were needed — no test in `tests/` hardcodes the
+§12 criterion count (checked by grep for `48` co-occurring with `12\.`/`criteria`/`Success
+Criteria`; no hit found), so nothing needed updating for the 48→51 count change. See this round's
+own commit message(s) for the exact verification commands and their output.

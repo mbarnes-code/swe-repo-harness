@@ -12078,6 +12078,13 @@ module docstring and `trusted_fenced_blocks`'s own docstring no longer claim "th
 writes into a `system`/`user` message" — that claim was false for a repair-turn `user` message and
 is corrected to the positional framing throughout.
 
+**Added 2026-09-25.** This defect is the reason `docs/SPEC.md` §12 gained three new criteria
+(§12.49–51, `docs/DECISIONS.md` ADR-0148): D145 was a real production defect that no §12 criterion
+would have caught before it shipped, since §12.41's local-profile proof never exercised `pilot` →
+`render_prompt` → `HarmonyGptOssBackend` against a real endpoint. This note does not change D145's
+own `FIXED, LANDED` status above — it records the forward link for a reader following citations
+from ADR-0148.
+
 ---
 
 ## D146 — OPEN. `Role.API_INCOMPAT_REWRITE` (`ApiRewriteProposal`) has zero callers anywhere in

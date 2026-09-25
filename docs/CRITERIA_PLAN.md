@@ -4328,6 +4328,77 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 ---
 
+## 49. Harmony conformance against a live endpoint
+**OPEN — NEW-MECHANISM (added 2026-09-25, ADR-0148, D145, round `pilot-criteria-bringup`).**
+Not yet started; needs live Spark hardware, out of scope for the round that added it.
+
+**Done bar (all required):**
+1. A `live`-marked pytest suite exists (excluded from the default `pytest` run by marker, per
+   §12.3's "no network" default-suite invariant) that connects to every endpoint configured under
+   `profiles.pilot` in `config/models.yaml`.
+2. It drives, per endpoint: a plain `final` reply, a single tool call, the two-round `apply_patch`
+   flow (an `*** Update File` patch against a fenced pre-image from real `render_prompt` output,
+   not a hand-built fixture), a ≥64k-token prompt, and ≥32 concurrent requests.
+3. Per-completion assertions: first sampled token is `<|channel|>`; every tool call terminates
+   `<|call|>`; every recipient resolves to a declared tool; tool arguments parse as JSON; no
+   `analysis`-channel text leaks into the parsed final answer.
+4. Failures classify into server-corruption signatures (wrong first token, special-token IDs
+   outside the Harmony vocabulary) versus model format deviations (everything the backend's own
+   typed errors already catch). The deviation-rate pass threshold is pre-registered in an ADR
+   update **before** the first live run — not chosen after seeing results.
+5. A report (container image digest, vLLM version, launch flags, case counts, per-failure class)
+   is committed under `docs/evidence/`.
+
+**Blocked on:** live access to both Spark endpoints. No D-number blocks the mechanism itself —
+this is a build-and-run task once hardware access exists, not a design gap.
+
+## 50. `pilot` profile completes a fixture run end to end, offline at the LLM layer
+**OPEN — NEW-MECHANISM (added 2026-09-25, ADR-0148, round `pilot-criteria-bringup`).**
+Not yet started; needs live Spark hardware, out of scope for the round that added it.
+
+**Done bar (all required):**
+1. `--profile pilot` against the live Sparks completes the fixture fleet through
+   `scan → sequence → transform → build → verify → integrate`.
+2. At least one `TRANSFORM_REPAIR` or `ESCALATION` proposal decodes via `apply_patch` and lands
+   via `git apply` (mirrors §12.35's "no raw prior diff reaches a prompt" proof but for the
+   Harmony decode path specifically).
+3. A test asserts every LLM-layer outbound connection during the run targets a configured Spark
+   endpoint (no accidental fallback to a different backend/profile).
+4. The Harmony vocabulary loads from a pre-staged path with the vocab host network-denied, and the
+   harness sets `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR` itself from configuration rather
+   than relying on ambient environment state.
+5. The live run's token streams are captured as a replay fixture, and a non-`live` test in the
+   default suite replays them through the real backend and pipeline — so this criterion's decode
+   path is verified by the default suite without hardware, once the live capture exists.
+6. The Bazel/registry egress policy active during the run is recorded in the evidence report, not
+   asserted as a pass/fail condition — a separate future criterion, not this one's scope.
+
+**Blocked on:** live access to both Spark endpoints, and §12.49's `live` suite existing first
+(shares its endpoint-connection setup).
+
+## 51. Calls distribute across both Spark endpoints with per-repo affinity
+**OPEN — NEW-MECHANISM (added 2026-09-25, ADR-0148, round `pilot-criteria-bringup`).**
+Clauses (i) and (iii) are provable today against local stub endpoints without hardware; clause
+(ii) needs the same; (i) additionally needs a live re-measurement. None of the three is met yet.
+
+**Done bar (all required):**
+1. (i) With two endpoints configured as replicas of one pilot target, a fixture run drives calls
+   to both, and the per-endpoint split is recorded (e.g. a call-count-by-endpoint assertion).
+2. (ii) Every round trip of one `invoke()`, and every call for one `repo_id` within a phase, hits
+   the same endpoint — proven via a stable hash of `repo_id`, not incidental client affinity.
+3. (iii) With one endpoint refusing connections, the run completes on the other; §12.43's existing
+   failover-accounting invariant is unchanged (`attempts.llm_failovers` counted, never charged to
+   a repo) — this reuses §12.43's own test machinery rather than duplicating it.
+4. (i) is additionally measured live against the two real Spark endpoints, with the split
+   recorded in the same evidence-report convention as §12.49/§12.50.
+
+**Blocked on:** (i)'s live leg needs live access to both Spark endpoints; (i)/(ii)/(iii) against
+stub endpoints need no hardware and are the cheapest of the three new criteria to close first —
+recommended dispatch order: §12.51 (i)+(ii)+(iii) stub-only first, then §12.49, then §12.50 (which
+depends on §12.49's live suite existing), then §12.51 (i)'s live re-measurement last.
+
+---
+
 ## Rollup
 
 | status | count | criteria |
@@ -4336,7 +4407,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
 | OPEN — blocked on an existing D-number, don't duplicate | 2 | 31 (blocked on new `D111`, confirmed multi-leg by round VI research-22, 2026-09-03 — added to this row, see §31's own entry), 43 (partial) — `38` removed 2026-09-05 after round VI task 50 closed `D115` (its last tracked blocker, following `D94`/`D105`'s own earlier closures) — moved to the "everything else" row below, NOT to DONE: no D-number blocks it now, but its own 20-sub-clause text needs a fresh re-audit before it can count DONE, see §38's own entry. `36` removed 2026-09-04 after round VI task 46 closed it, moved to the DONE row above; `22` removed 2026-09-03 after round VI tasks 26-29 closed it, moved to the DONE row above |
-| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), plus all others not listed in a row above — `38` removed 2026-09-05 after research-31 + round VI task 52 closed it, moved to the DONE row above — see individual entries (2026-09-04: `27` removed — this row still listed it though §27 has been in the DONE row above since round VI's twentieth wave, 2026-09-03; the two rows contradicted each other, same class of staleness this row's own note already flags for `35`/`41`/`47` below, corrected here now that it was independently re-noticed. 2026-09-03: `41` removed after round VI tasks 21+22 closed it, moved to the DONE row above; `47` removed after round VI task 40 closed it, moved to the DONE row above. Round GG's own final review, 2026-09-02: this row previously still listed `35` after §35 moved to the DONE row above — the two rows contradicted each other; corrected here, `35` removed) |
+| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), plus all others not listed in a row above — `38` removed 2026-09-05 after research-31 + round VI task 52 closed it, moved to the DONE row above — see individual entries (2026-09-04: `27` removed — this row still listed it though §27 has been in the DONE row above since round VI's twentieth wave, 2026-09-03; the two rows contradicted each other, same class of staleness this row's own note already flags for `35`/`41`/`47` below, corrected here now that it was independently re-noticed. 2026-09-03: `41` removed after round VI tasks 21+22 closed it, moved to the DONE row above; `47` removed after round VI task 40 closed it, moved to the DONE row above. Round GG's own final review, 2026-09-02: this row previously still listed `35` after §35 moved to the DONE row above — the two rows contradicted each other; corrected here, `35` removed) — **`49`, `50`, `51` added 2026-09-25 (ADR-0148, round `pilot-criteria-bringup`), all NEW-MECHANISM, none blocked on an existing D-number — see their own entries above for done bars and recommended dispatch order (§12.51's stub-only legs first, cheapest)** |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
 this file used to count §12.40 as DONE only for its dominant clause (no model string outside

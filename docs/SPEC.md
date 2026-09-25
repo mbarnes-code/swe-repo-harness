@@ -7789,6 +7789,40 @@ whose exit code is the verdict — no item is satisfied by prose or by a model's
 47. **The registries are stateless, total, and order-independent** (§7.2, ADR-0020/0023). `preconditions_hold` is **abstract on `BaseWorker`** and overridden by every shipped worker — asserted by walking `workers.discover()` and failing on any class inheriting the base implementation, since a worker that silently always-precondition-true is how a resume re-runs a completed phase. Every `discover()` asserts `vars(inst) == {}` for every registered instance across **all five** registries (workers, manifests, ecosystems, contracts, backends). A rule set whose engine names do not all resolve, and a `config/models.yaml` profile naming an unregistered backend, are both **startup** errors with the offending name in the message. Manifest-adapter tie-breaks are deterministic under a **shuffled import order**: the same fixture, imported in 20 random orders, yields a byte-identical `manifests` table. **Corrected 2026-08-28 (round-K repair of `12be741`, lane W4):** **the sentence “*Every `ProcessPoolExecutor` is constructed with an initializer that calls each `discover()`, asserted by inspecting the initializer arguments*” is RETIRED, not deferred** — the retired words are quoted so a sweep for them finds this correction rather than a survival. It could never pass: at `12be741` the token `initializer=` occurs **zero** times in `src/` and `tests/` combined, and the tree's only `ProcessPoolExecutor(` (`orchestrator/budgets.py:947-949`) passes `max_workers=` and `mp_context=` only. **Retired rather than built, and the reason is fail-loud.** `mp_context` is unconditionally `forkserver` (`budgets.py:948`), so a child genuinely does not inherit the parent's registries — but exactly one callable is ever submitted to that pool: `scan_file`, through the tree's only `run_in_executor` (`src/fleet/workers/symbolindex.py:266-268`), and `scan_file`'s body names no registry, no `discover()` and no adapter. An initializer would instead import `anthropic`, `boto3`, `openai` and `google.auth` in every pool child and convert a startup `RuntimeError` naming the missing adapter into a `BrokenProcessPool` — inverting CLAUDE.md Rule 11 to buy a property nothing needs. A reconciler must **not** add `initializer=` to satisfy the retired sentence. `docs/SPEC.md` §7.2, §7.5 and §11.1 still assert the same mechanism in design prose and carry their own markers; `src/fleet/ecosystems/base.py:109`, `:118` (inside a **raised** message) and `:632` still assert it in code and are **outside this lane's ownership** — that is the open leg of `D86` in `docs/INTEGRATION_HONESTY.md`.
 48. **Startup and version refusals happen before any cost.** A database whose `PRAGMA user_version` differs from `SCHEMA_VERSION` makes every command **except `fleet migrate-db`** refuse to start, naming both versions, before a clone or an LLM call; `fleet migrate-db` applies the pending `vNNN_*.py` steps under `BEGIN EXCLUSIVE` and no other code path executes DDL (asserted by an AST test finding no `CREATE`/`ALTER`/`DROP` outside `src/fleet/migrations/` and `state/schema.sql`). A `checkpoints.payload` written under an older schema version is **invalidated and its step re-run**, never raised (§12.16 covers corruption and behaves **identically** — the two differ by trigger, not by outcome; this covers version skew). A second run started against a mirror a live run already owns exits **2** on the `integration:<run_id>` mutex. And `finish_reason == "length"` on an oversized fixture call produces **exactly one** same-target retry at a raised `max_output_tokens`, **zero** `backend_failover` events, and **zero** `CapabilityDrift` findings.
 
+49. **The Harmony path is conformant against a live endpoint** (ADR-0148, D145). **Added 2026-09-25 (ADR-0148, round `pilot-criteria-bringup`) — OPEN, not yet met; meeting this criterion requires live Spark hardware and is explicitly out of scope for the round that added it.** A conformance suite marked `live` (skipped by the default suite) runs against every endpoint in the `pilot` profile. It covers at least:
+    - plain `final` replies;
+    - a single tool call;
+    - the two-round `apply_patch` flow with an `*** Update File` patch against a fenced pre-image produced by the real `render_prompt`;
+    - a prompt of ≥ 64k tokens;
+    - ≥ 32 concurrent requests per endpoint.
+
+    It asserts, per completion:
+    - the first sampled token is `<|channel|>`;
+    - every tool call terminates with `<|call|>`;
+    - every recipient resolves to a declared tool;
+    - tool arguments parse as JSON;
+    - no `analysis`-channel text appears in the parsed final answer.
+
+    Failures are classified into two classes:
+    - **server-corruption signatures:** a wrong first token, or special-token IDs outside the Harmony set;
+    - **model format deviations:** everything else the backend's typed errors already catch.
+
+    Pass means zero server-corruption signatures, and model format deviations at or below a threshold **pre-registered in the ADR before the first live run**. The run writes a report recording, per endpoint: container image digest, vLLM version, launch flags, case counts, and each failure's class. The report is committed under `docs/evidence/`.
+
+50. **The `pilot` profile completes a fixture run end to end, offline at the LLM layer** (ADR-0148). **Added 2026-09-25 (ADR-0148, round `pilot-criteria-bringup`) — OPEN, not yet met; meeting this criterion requires live Spark hardware and is explicitly out of scope for the round that added it.** `--profile pilot` against the live Sparks completes the fixture fleet through `scan → sequence → transform → build → verify → integrate`.
+    - At least one `TRANSFORM_REPAIR` or `ESCALATION` proposal is decoded via `apply_patch` and landed via `git apply`.
+    - The test asserts that every LLM-layer outbound connection targets a configured Spark endpoint.
+    - The Harmony vocabulary loads from a pre-staged path with vocab download impossible (network to the vocab host denied, and the harness sets `TIKTOKEN_ENCODINGS_BASE` / `TIKTOKEN_RS_CACHE_DIR` itself from configuration).
+    - The live run's token streams are recorded as a replay fixture. A non-`live` test replays them through the real backend and pipeline so the default suite verifies the same path without hardware.
+    - The Bazel/registry egress policy in effect during the run is recorded, not asserted; that is a separate future criterion.
+
+51. **Calls distribute across both Spark endpoints with per-repo affinity** (ADR-0148). **Added 2026-09-25 (ADR-0148, round `pilot-criteria-bringup`) — OPEN; clauses (i) and (iii) are default-suite-checkable against local stub endpoints and (i) is also to be measured live — none of the three is met yet, meeting them fully is out of scope for the round that added this criterion.** With two endpoints configured as replicas of one pilot target:
+    - (i) over a fixture run, both endpoints serve calls, and the per-endpoint split is recorded;
+    - (ii) every round trip of one `invoke()`, and every call for one `repo_id` within a phase, hits the same endpoint (stable hash of `repo_id`);
+    - (iii) with one endpoint refusing connections, the run completes on the other, and §12.43's failover accounting is unchanged (`attempts.llm_failovers` counted, never charged to a repo).
+
+    (i) and (iii) are proven against two local stub endpoints in the default suite; (i) is also measured live.
+
 ---
 
 ## 13. Failure Modes & Mitigations
