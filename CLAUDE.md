@@ -77,7 +77,8 @@ Never hide errors. If a build or AST transformation fails after 3 subagent retri
 - **Stop rule — adversarial-only is a boundary, accidentally-reachable is a defect.** Ask whether a normal author would trip the escape a reviewer demonstrated. Escapes requiring a deliberately side-effecting subclass get **documented as a stated boundary and not patched**; patching them buys the appearance of closure while the escapes bypass the mechanism the patch would harden. Fix the accidentally reachable one. Never close a documentary gap with a convention wearing a mechanism's clothes — a fake mechanism is worse than an honest disclosure because it *looks* enforced.
 
 ### Rule 13 — Every Round Ties to the Acceptance Bar, Or Names Its Debt
-`docs/SPEC.md` §12 defines 48 acceptance criteria. For 19 days / 355 commits, `docs/PROGRESS.md`
+`docs/SPEC.md` §12 defines N acceptance criteria (48 when this rule was written; 51 as of the
+2026-09-25 amendment below — ADR-0147/ADR-0148). For 19 days / 355 commits, `docs/PROGRESS.md`
 checkpoints tracked test pass-count and line coverage every round but never §12 itself — coverage
 reached 93% while `12be741` (2026-08-27) found only 1 of 48 criteria actually met, the first time
 anyone had measured §12 directly. Coverage proves a line executed under a test; it does not prove
