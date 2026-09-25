@@ -66,6 +66,21 @@ def _prepend_path(*entries: Path) -> None:
 _prepend_path(TOOLS_BIN, VENV_BIN)
 os.environ.setdefault("BAZELISK_HOME", str(BAZELISK_HOME))
 
+# --------------------------------------------------------------------------------------
+# Harmony tokeniser vocab (offline)
+# --------------------------------------------------------------------------------------
+# `openai_harmony.load_harmony_encoding()` downloads `o200k_base.tiktoken` from OpenAI's CDN on
+# first use; in a sandbox that host does not resolve and the call raises `HarmonyError: error
+# downloading or loading vocab file`. Its loader checks `TIKTOKEN_ENCODINGS_BASE` before reaching
+# for the network: when set, it reads `<dir>/o200k_base.tiktoken` off disk and verifies the file's
+# sha256 itself. Derived from the repo root for the same reason BAZELISK_HOME above is -- a clone
+# at any path wires up identically -- and `setdefault`, so an operator who already exports the var
+# (a shared vocab dir, a different mirror) keeps their own value.
+# Provision with `tools/bin/fetch-harmony-vocab`; the blob is git-ignored, never vendored.
+HARMONY_VOCAB_DIR = REPO_ROOT / "tools" / "harmony-vocab"
+if (HARMONY_VOCAB_DIR / "o200k_base.tiktoken").is_file():
+    os.environ.setdefault("TIKTOKEN_ENCODINGS_BASE", str(HARMONY_VOCAB_DIR))
+
 
 from fleet.bazel.query import registry_args  # noqa: E402
 from fleet.llm.client import CallBudget  # noqa: E402
