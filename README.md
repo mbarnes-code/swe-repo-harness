@@ -139,8 +139,9 @@ for the full flag set of any one of them.
 
 ## Configuration
 
-Three YAML files under `config/` are loaded on startup. Key defaults keep them small, but
-`config/models.yaml` must define the configured `default_profile`.
+Three YAML files under `config/` are loaded on startup. `repos.yaml` and `fleet.yaml` can stay
+minimal with defaults, but `config/models.yaml` must set `default_profile` to a profile that
+exists in `profiles` or startup exits 2.
 
 | File | What it holds |
 |---|---|
