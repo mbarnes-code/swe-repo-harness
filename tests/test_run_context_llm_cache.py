@@ -373,10 +373,17 @@ async def test_the_client_handed_to_a_worker_is_the_one_this_file_drives(
             ),
         )
 
-        assert worker.llm is ctx.model_client, (
-            "a worker must be handed the SAME assembled client this file drives; a second or "
-            "unwrapped client here means the cache is installed on a surface no worker uses"
-        )
+        # ADR-0149 (2026-09-25): the hand-down is now a `for_repo` VIEW of `ctx.model_client`
+        # (bound to the worker's repo for §12.51 replica affinity), so object identity no longer
+        # holds by design. What the identity guarded is restated component-wise: the SAME cache
+        # store and the SAME ladder client state (its breaker), wrapped by the caching layer.
         assert isinstance(worker.llm, CachingModelClient), (
-            "stated separately from the identity above so a failure says which half broke"
+            "a worker must be handed the cache-wrapped client; an unwrapped ladder client here "
+            "means the cache is installed on a surface no worker uses"
         )
+        assert isinstance(ctx.model_client, CachingModelClient)
+        assert worker.llm._store is ctx.model_client._store, (
+            "a worker must be handed a view of the SAME assembled client this file drives, not a "
+            "second client with its own store"
+        )
+        assert worker.llm._inner._health is ctx.model_client._inner._health  # type: ignore[attr-defined]

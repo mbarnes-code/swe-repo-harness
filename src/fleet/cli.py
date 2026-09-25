@@ -105,6 +105,7 @@ from fleet.llm.client import (
     UnknownRole,
     discover,
     registry,
+    scope_to_repo,
 )
 from fleet.llm.roles import LlmRouter, Role, TierNotConfigured, UnknownProfile
 from fleet.manifests.base import ManifestParseError
@@ -14795,7 +14796,7 @@ async def _run_one_revalidation_task(
                     cancel=asyncio.Event(),
                     budget=budget,
                     db=cast(Any, None),
-                    llm=run_ctx.model_client,
+                    llm=scope_to_repo(run_ctx.model_client, repo_id),  # ADR-0149
                     router=run_ctx.llm,
                     limits=cast(Any, None),
                     log=default_logger("fleet.stub-revalidate"),

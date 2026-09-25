@@ -11868,3 +11868,48 @@ already exempted by the grep's own `-v` filter): zero hits.
 - ADR-0146's redaction/`git apply` disclosure was added as a new dated paragraph rather than
   editing the ADR's existing prose in place, per this project's annotate-don't-rewrite convention
   for decision records.
+
+---
+
+## Round B3 of the same owner-approved brief — replica endpoints with per-repo affinity (§12.51, ADR-0149)
+
+**This round does not close §12.51** — it stays `OPEN`. Proven now, in the default (non-`live`)
+suite, against two local loopback stub endpoints: (i)'s stub leg (a real-CLI `fleet scan` drives
+classify calls to both endpoints; the split is recorded on the `llm_call` event's new `base_url`
+field), (ii) (sha256 affinity stable across `PYTHONHASHSEED`s; every call through one repo's view
+and every round trip of one `complete()` hits one endpoint), and (iii) (a refusing replica fails
+over to its peer as an ordinary §11.8 hop — `backend_failover`, `usage.llm_failovers` — both repos
+`SUCCEEDED`, neither charged an extra phase attempt). **Still open:** (i)'s live leg against the two
+real Spark hosts, and any real-host `base_urls` in `config/models.local.yaml` — Round C, hardware.
+Disclosed gap in (iii): `fleet scan` writes no `attempts` rows (measured: empty after the run), so
+`attempts.llm_failovers` is asserted at its source (`usage.llm_failovers`) at client level.
+
+**What landed.** `BackendTarget.base_urls` (XOR `base_url`, >= 2 distinct); `replica_index` /
+`resolve_replicas` / `RepoScopedModelClient` / `scope_to_repo` and `LadderModelClient.for_repo` in
+`llm/client.py`; `CachingModelClient.for_repo` in `llm/cache.py`; the two `WorkerContext` builders
+(`orchestrator/context.py`, `cli.py` stub-revalidation) bind the repo; `BackendHealth._key` now
+includes the endpoint; `settings.py` accepts `base_urls` for the `base_url` requirement and the B2
+overlay treats the two spellings as one field. `config/models.yaml`'s `pilot` template is
+unchanged (single placeholder `base_url`); replicas are an operator overlay. Design and the
+placement ruling vs. this lane's own wiring choices: ADR-0149. SPEC: §5 `BackendTarget` listing,
+§9 `models.local.yaml` section, §9 rule 2. `docs/CRITERIA_PLAN.md` §51 gained a dated progress note.
+
+**Verified.** Rule 12 matrix (6 mutations + a cosmetic control; gate read first) — see ADR-0149.
+§12.40's three greps: identical to `HEAD` (the model-id grep's 2 hits are pre-existing, in
+`src/fleet/vcs/apply_patch.py`, untouched; the URL and SDK-import greps return nothing). B2's
+`models_local_yaml` tests pass unmodified; two new ones added. One existing test changed:
+`tests/test_run_context_llm_cache.py`'s identity assertion, restated component-wise (ADR-0149).
+Suite (whole `tests/`, no `-k`, 2026-09-25, uncommitted tree): 3035 passed, 61 skipped, 21
+failed; `bazel disk` line clean (peak 3.66 GiB, 0 residual). Every failure classified: **pre-existing
+at `HEAD` (re-run with every modified file restored to `HEAD`)** — 10 in `test_build_e2e.py` (real
+Bazel; e.g. `test_build_against_a_real_bazel` fails identically in 5.6 s at `HEAD`),
+`test_eligible_contract_units.py` 1, `test_config_keys_are_read.py` 2 (`llm.harmony_vocab_dir`,
+Round B1's key), `test_lint_gate.py` 2 (jvm.py E501; format dirty-count — this round's changed
+files add no newly-dirty file), `test_integration_honesty_citations.py` 3 (same census, 59, as
+`HEAD`); **caused by this round and fixed** — 4 citation rots from line shifts (`cli.py` +1 import,
+`tasks.py` +22), repointed with dated markers and the `text_mismatch_pins` key updated;
+**precondition-only** — `test_llm_backend_fixture_e2e.py` asserts `src/fleet/` is clean before it
+runs, so it fails on any uncommitted `src/` edit (re-run after commit, below).
+
+**§12 count: 48 of 51** — carried from Round A's checkpoint, NOT re-derived this round (no criterion
+moved unmet → met; §12.51 progressed but its live leg remains).

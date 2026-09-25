@@ -2613,7 +2613,8 @@ a worker bug could actually take.
 
 **Correction, final review, round CC (2026-09-02): a live disclosure from round AA's own final
 review was dropped by this round's rewrite, not annotated — restored here rather than left
-missing.** `RejectedApproach` (`src/fleet/models/tasks.py:213`) has no field capable of holding
+missing.** `RejectedApproach` (`src/fleet/models/tasks.py:235`, repointed +22, 2026-09-25, by ADR-0149's
+`BackendTarget.base_urls` field and validator added above it) has no field capable of holding
 diff text and `reason` is `max_length=280` — still true, re-verified unchanged by this round. So
 on the `EVIDENCE_PLUS_REJECTED_APPROACHES` rung the new per-line sweep is a **tripwire against a
 future schema change**, not a guard against a currently-reachable leak: no worker defect can leak
@@ -3183,7 +3184,8 @@ trigger reading; the literal "already_applied event" sub-phrase — investigated
 vacuous, disclosed rather than silently dropped.** The same test asserts `COUNT(*) = 1` on the
 minted `REVALIDATE` task, then re-invokes `fleet stubs resolve` on the now-`SUPERSEDED` stub and
 asserts zero new `tasks`/`stubs`/`attempts` rows and zero new `migrate/<consumer>` commits.
-`_run_one_revalidation_task` (`cli.py:14477`, repointed +12, 2026-09-16, by ADR-0142's four
+`_run_one_revalidation_task` (`cli.py:14478`, repointed +1, 2026-09-25, by ADR-0149's
+`scope_to_repo` import, superseding the repoint +12, 2026-09-16, by ADR-0142's four
 `max_calls=` arguments added to the `open_budget_ledger` calls above it, superseding the repoint 2026-09-16, +1, by
 `src/fleet/cli.py`'s typer-import fix — `typer._click.exceptions.Abort`/`Exit` stopped existing
 under the already-pinned `typer==0.27.2`, fixed by importing `Abort`/`Exit` from `typer` and
@@ -4396,6 +4398,15 @@ Clauses (i) and (iii) are provable today against local stub endpoints without ha
 stub endpoints need no hardware and are the cheapest of the three new criteria to close first —
 recommended dispatch order: §12.51 (i)+(ii)+(iii) stub-only first, then §12.49, then §12.50 (which
 depends on §12.49's live suite existing), then §12.51 (i)'s live re-measurement last.
+
+**Progress 2026-09-25 (round `pilot-criteria-bringup`, B3, ADR-0149) — still OPEN.** Done-bar items
+1 (stub leg), 2 and 3 are now proven in the default suite (`tests/test_replica_affinity.py`: two
+real loopback stub servers under a real-CLI `fleet scan`; per-endpoint split on the `llm_call`
+event's `base_url`; stable sha256 affinity across `PYTHONHASHSEED`s; a refusing replica fails over
+to its peer as an ordinary §11.8 hop, no repo charged). One disclosed gap in item 3: `fleet scan`
+writes no `attempts` rows, so `attempts.llm_failovers` is asserted at its source
+(`usage.llm_failovers`, client level), not read back from the column. Item 4 (live leg) remains —
+Round C, real hardware.
 
 ---
 

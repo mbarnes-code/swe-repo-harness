@@ -55,6 +55,7 @@ from fleet.llm.client import (
     RoleRouter,
     StreamEvent,
     TierRoute,
+    scope_to_repo,
 )
 from fleet.llm.roles import Role
 from fleet.llm.schemas import response_schema_sha256
@@ -474,6 +475,27 @@ class CachingModelClient:
             template_versions=self._template_versions,
             context_policy=context_policy,
             rejected_approach_digest=rejected_approach_digest,
+            adapter_versions=self._adapter_versions,
+            harness_version=self._harness_version,
+            on_hit=self._on_hit,
+            now=self._now,
+            redact=self._redact,
+        )
+
+    def for_repo(self, repo_id: str) -> CachingModelClient:
+        """ADR-0149: this client with its INNER client bound to `repo_id` (`scope_to_repo`), so
+        replica selection (§12.51) happens where targets are resolved — inside the ladder client
+        — while this layer's cache key, store and rung scoping are carried over unchanged. A
+        `scoped()` view taken afterwards keeps the binding, because `scoped()` reuses `_inner`.
+        An inner client without `for_repo` (a test fake) is carried over as-is."""
+        return CachingModelClient(
+            scope_to_repo(self._inner, repo_id),
+            self._router,
+            self._store,
+            mode=self._mode,
+            template_versions=self._template_versions,
+            context_policy=self._context_policy,
+            rejected_approach_digest=self._rejected_approach_digest,
             adapter_versions=self._adapter_versions,
             harness_version=self._harness_version,
             on_hit=self._on_hit,

@@ -18,6 +18,8 @@ and `RoleRouter` is already a Protocol so `routing.py` plugs in without this fil
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 import pkgutil
 import time
@@ -279,6 +281,10 @@ class LlmCall(BaseModel):
     cost_usd: float
     latency_ms: int
     level: Literal["info", "error"]
+    base_url: str | None = None
+    """ADR-0149/§12.51(i): the ENDPOINT that answered — the resolved replica for a `base_urls`
+    target, the target's own `base_url` otherwise. This is where the per-endpoint split of a run
+    is recorded; `backend`/`model_id` are identical across replicas and cannot show it."""
 
 
 # ---------------------------------------------------------------------------------------------
@@ -359,6 +365,51 @@ class ModelBackend(Protocol):
         never DECIDES anything from `finish_reason`: it reports what the transport said and the
         client acts on it."""
         ...
+
+
+@runtime_checkable
+class RepoScopedModelClient(Protocol):
+    """ADR-0149: a `ModelClient` that can bind the `repo_id` its calls are made for, so replica
+    selection (§12.51) keys on the repo WITHOUT `complete()` growing a parameter every backend and
+    fake would have to care about — the same reasoning, one layer down, as `llm/cache.py`'s
+    `ScopedModelClient`. Named `for_repo`, not `scoped`: `ScopedModelClient` is
+    `@runtime_checkable`, which checks method NAMES only, so a `LadderModelClient.scoped(repo_id)`
+    would satisfy `isinstance(..., ScopedModelClient)` and `rewrite.py::_scoped_client` would call
+    it with `context_policy=` and raise `TypeError` wherever a bare ladder client is `ctx.llm`."""
+
+    def for_repo(self, repo_id: str) -> ModelClient: ...
+
+
+def scope_to_repo(client: ModelClient, repo_id: str) -> ModelClient:
+    """`client.for_repo(repo_id)` when the client supports it, `client` unchanged otherwise — a
+    bare test fake need not grow a method it has no use for (the `ScopedModelClient` rule)."""
+    if isinstance(client, RepoScopedModelClient):
+        return client.for_repo(repo_id)
+    return client
+
+
+def replica_index(repo_id: str, replicas: int) -> int:
+    """§12.51(ii): a STABLE map from `repo_id` to one of `replicas` endpoints. sha256, never the
+    builtin `hash()` — that is salted per process (`PYTHONHASHSEED`), so a resumed run or a second
+    worker process would send the same repo to a different replica."""
+    if replicas < 1:
+        raise ValueError(f"replica_index needs at least one replica, got {replicas}")
+    return int.from_bytes(hashlib.sha256(repo_id.encode("utf-8")).digest()[:8], "big") % replicas
+
+
+def resolve_replicas(target: BackendTarget, repo_id: str | None) -> tuple[BackendTarget, ...]:
+    """ADR-0149: the concrete per-call targets one logical `target` expands to, in call order.
+
+    A target with no `base_urls` is returned as-is. Otherwise one `model_copy` per replica with
+    `base_url` set and `base_urls` cleared — the registered target is never mutated — rotated so
+    the repo's affine replica (`replica_index`) comes first and its peers follow as the in-target
+    failover order. An unbound client (`repo_id is None`) starts at replica 0."""
+    urls = target.base_urls
+    if not urls:
+        return (target,)
+    start = 0 if repo_id is None else replica_index(repo_id, len(urls))
+    ordered = (*urls[start:], *urls[:start])
+    return tuple(target.model_copy(update={"base_url": u, "base_urls": None}) for u in ordered)
 
 
 class TierRoute(BaseModel):
@@ -586,6 +637,16 @@ class LadderModelClient:
             clock=clock,
             on_transition=on_health_transition,
         )
+        self._repo_id: str | None = None
+
+    def for_repo(self, repo_id: str) -> LadderModelClient:
+        """ADR-0149: a view of this client whose calls are made for `repo_id`, which picks the
+        replica of every `base_urls` target (§12.51). A shallow copy on purpose: the router,
+        backends, sinks and — load-bearing — the `BackendHealth` breaker are SHARED, so a replica
+        one repo's call found dead is dead for every repo, exactly as for an ordinary target."""
+        view = copy.copy(self)
+        view._repo_id = repo_id
+        return view
 
     # -- public surface ------------------------------------------------------------------------
 
@@ -603,7 +664,15 @@ class LadderModelClient:
         """See `ModelClient.complete`."""
         route = self._router.resolve(role, tier_override=tier_override)
         schema: dict[str, object] = dict(response_model.model_json_schema())
-        targets = route.targets[: self._policy.max_targets_per_call]
+        # `max_targets_per_call` bounds LOGICAL targets (entries of the tier's list, which is what
+        # the knob has always counted); each then expands to its replicas, the repo's affine one
+        # first (ADR-0149). A replica hop is an ordinary hop of this same loop — health-gated,
+        # `backend_failover`-emitted, and counted in `llm_failovers` — never a separate mechanism.
+        targets = [
+            concrete
+            for logical in route.targets[: self._policy.max_targets_per_call]
+            for concrete in resolve_replicas(logical, self._repo_id)
+        ]
         timeout = self._policy.default_timeout_s if timeout_s is None else timeout_s
         requested = (
             self._policy.default_max_output_tokens
@@ -854,6 +923,7 @@ class LadderModelClient:
                 ),
                 latency_ms=self._elapsed_ms(started),
                 level="error" if reply.finish_reason in ("refusal", "filtered") else "info",
+                base_url=target.base_url,
             ),
         )
 

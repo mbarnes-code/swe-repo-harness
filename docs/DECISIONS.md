@@ -16174,3 +16174,81 @@ D145 exposed (a real defect with no covering criterion) is now covered going for
 of whether any individual future Harmony defect happens to get its own D-number.
 
 ---
+
+## ADR-0149 — Replica endpoints (`BackendTarget.base_urls`) resolved per repo inside `LadderModelClient`, bound through a `for_repo` view rather than a `complete()` parameter
+
+**Date:** 2026-09-25 · **Round:** `pilot-criteria-bringup`, B3 · **Moves:** §12.51 toward met (stub
+legs of (i) and (iii), and (ii)); does **not** close it — (i)'s live leg needs the two real Spark
+hosts (Round C).
+
+**Placement — orchestrator ruling (given in the dispatch brief, not this lane's choice).** Replica
+selection happens where targets are resolved, inside `LadderModelClient`, via a new view-returning
+method on that class that binds `repo_id`; `ModelClient.complete()`'s Protocol signature does not
+grow a `repo_id` parameter. This mirrors `CachingModelClient.scoped()` (`llm/cache.py`) one layer
+down: that method binds cache-key concerns and never reaches `_inner`, so it could not carry
+`repo_id` to where the `base_url` is read before `backend.invoke()`.
+
+**Wiring — Agent Recommendation (this lane's judgment call, Guardrail 1).**
+
+1. **Schema.** `BackendTarget.base_urls: tuple[str, ...] | None`, mutually exclusive with
+   `base_url`, at least two distinct non-empty entries (one endpoint is spelled `base_url`). It is
+   ONE logical target with equal-peer replicas — not ADR-0023's ordered `route.targets` list.
+   Settings: `_REQUIRED_TARGET_FIELDS`'s `base_url` requirement is satisfied by `base_urls`; B2's
+   `config/models.local.yaml` overlay treats the two as one fact, so an override naming either
+   drops the template's other spelling (the committed `pilot` template keeps its single placeholder
+   `base_url`, and an operator lists real replicas as `base_urls` in the untracked file). An
+   override naming both still fails `BackendTarget`'s validator, loudly.
+2. **Selection.** `replica_index(repo_id, n)` = first 8 bytes of `sha256(repo_id)` mod `n` —
+   never builtin `hash()` (salted per process by `PYTHONHASHSEED`). `resolve_replicas(target,
+   repo_id)` returns one `model_copy(update={"base_url": u, "base_urls": None})` per replica,
+   rotated so the affine replica is first; the registered target is never mutated and a backend
+   never sees `base_urls`. Unbound (`repo_id is None`) starts at replica 0.
+3. **Failover.** `complete()` slices `max_targets_per_call` over LOGICAL targets (what the knob
+   has always counted), then expands each to its replicas. A replica hop is therefore an ordinary
+   hop of the existing loop: health-gated, a `backend_failover` event with the unchanged shape
+   (from/to backend and model_id — identical across replicas), and counted in
+   `usage.llm_failovers` → `attempts.llm_failovers`, never `phases.attempts` (§12.43 unchanged).
+4. **Breaker key includes the endpoint.** `BackendHealth._key` was `backend:model_id`, which both
+   replicas share: measured (mutation M4 below), a refusing replica's three failures opened the
+   breaker for its healthy peer and the next call raised `TierUnavailable`. The key is now
+   `backend:model_id@base_url` when a `base_url` is set. This also separates two ordinary targets
+   that share `backend:model_id` behind different `base_url`s (the "legitimate failover pair"
+   `TierRoute`'s docstring names), which previously shared a breaker — a behaviour change,
+   disclosed; no existing test depended on it (full suite, below).
+5. **Method name `for_repo`, not `scoped`.** `ScopedModelClient` is `@runtime_checkable`, which
+   checks method NAMES only; a `LadderModelClient.scoped(repo_id)` would pass
+   `isinstance(..., ScopedModelClient)` and `rewrite.py::_scoped_client` would call it with
+   `context_policy=` → `TypeError` wherever a bare ladder client is `ctx.llm` (some unit tests).
+   A separate `RepoScopedModelClient` Protocol (`for_repo`) plus `scope_to_repo(client, repo_id)`,
+   which degrades to the unchanged client for a fake (the `ScopedModelClient` rule).
+6. **How `repo_id` reaches the ladder from every real call site.** In production `ctx.llm` is
+   always `RunContext.model_client`, a `CachingModelClient` wrapping a `LadderModelClient`
+   (`orchestrator/context.py::__post_init__`); `WorkerContext` is built with it at exactly two
+   `src/` sites (`RunContext.worker_context`, `cli.py`'s stub-revalidation path; the third
+   `WorkerContext(` in `cli.py` passes `llm=cast(Any, None)`). Both now pass
+   `scope_to_repo(model_client, repo_id)`. `CachingModelClient.for_repo` returns a copy whose
+   `_inner` is `_inner.for_repo(repo_id)` (same store, mode, rung scoping), and `scoped()` reuses
+   `_inner`, so `rewrite.py`'s rung views keep the binding. Binding once at context construction,
+   rather than at each worker call site (`classify.py`'s direct `ctx.llm.complete`, the
+   `llm/calls.py` helpers called from buildgen/buildverify/prwriter/rewrite), means no worker changed
+   and no future call site can forget it. `LadderModelClient.for_repo` is a shallow copy, so the
+   router, sinks and — load-bearing — the `BackendHealth` breaker are shared across repos.
+7. **Split recorded.** `LlmCall` (and the `llm_call` event payload) gained `base_url`, the
+   endpoint that answered — the only record that distinguishes replicas.
+   `BackendFailover`/`BackendHealthTransition` payloads were NOT widened (the brief asked to match
+   the existing shape); a replica hop therefore reads as `X→X` there. Disclosed blind spot: the
+   health-transition event cannot say WHICH replica went DOWN.
+
+**Consequence for an existing test.** `tests/test_run_context_llm_cache.py`'s
+`worker.llm is ctx.model_client` identity no longer holds by design (the hand-down is a view);
+restated component-wise (cache-wrapped, same store, same breaker). Its documented discriminating
+mutation (`llm=self.model_client._inner`) is still caught by the `isinstance` half.
+
+**Rule 12 matrix** (`tests/test_replica_affinity.py` + `tests/test_settings.py`; each gated by a
+non-zero `git diff --numstat --no-index` against a backup; run with a `-k` over those two files'
+replica/`base_urls` cases): M1 builtin `hash()` → 4 RED incl. the cross-`PYTHONHASHSEED` test; M2
+per-call re-roll → 3 RED incl. `test_every_call_for_one_repo_hits_one_replica`; M3 no replica
+failover → 3 RED incl. the client-level and CLI refusing-replica tests; M4 breaker keyed without
+the endpoint → 1 RED (client-level refusing-replica test, its unique discriminator); M5 worker
+context left unbound → 2 RED (both CLI arms); M6 override not dropping the template `base_url` → 1
+RED; control (cosmetic reflow of the rotation) → all green.

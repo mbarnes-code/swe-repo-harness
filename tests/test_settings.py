@@ -1317,3 +1317,39 @@ def test_models_local_yaml_is_covered_by_the_secret_material_scan(tmp_path: Path
     )
     with pytest.raises(SecretInConfigError):
         load(config_dir)
+
+
+# --------------------------------------------------------------------------------------
+# B3 (ADR-0149, §12.51) — `base_urls`: replica endpoints of one target, via the B2 override
+# --------------------------------------------------------------------------------------
+
+
+def test_models_local_yaml_base_urls_replaces_the_template_base_url(tmp_path: Path) -> None:
+    """The committed template carries ONE placeholder `base_url`; an override listing the real
+    replicas as `base_urls` replaces it rather than sitting beside it (`BackendTarget` refuses a
+    target carrying both). `openai_compatible` requires `base_url`, and replicas satisfy that."""
+    config_dir = write_config(tmp_path, models=MODELS_YAML + LOCAL_PROFILE_YAML)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  local:\n    HEAVY:\n"
+        "      - { backend: openai_compatible, model_id: local-heavy,\n"
+        "          base_urls: ['http://10.0.0.5/v1', 'http://10.0.0.6/v1'] }\n",
+        encoding="utf-8",
+    )
+    target = load(config_dir).models.profiles["local"]["HEAVY"][0]
+    assert target.base_urls == ("http://10.0.0.5/v1", "http://10.0.0.6/v1")
+    assert target.base_url is None
+    assert target.api_key_env == "LOCAL_LLM_API_KEY"
+
+
+def test_models_local_yaml_naming_both_endpoint_spellings_fails_loud(tmp_path: Path) -> None:
+    """Only the template's OTHER spelling is cleared; an override naming both is ambiguous and
+    must fail at load (Rule 11), not pick one."""
+    config_dir = write_config(tmp_path, models=MODELS_YAML + LOCAL_PROFILE_YAML)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  local:\n    HEAVY:\n"
+        "      - { backend: openai_compatible, model_id: local-heavy, base_url: 'http://x/v1',\n"
+        "          base_urls: ['http://10.0.0.5/v1', 'http://10.0.0.6/v1'] }\n",
+        encoding="utf-8",
+    )
+    with pytest.raises((ConfigValidationError, ValidationError)):
+        load(config_dir)

@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 from fleet.llm.cache import CachingModelClient, SqliteLlmCacheStore
-from fleet.llm.client import CallPolicy, LadderModelClient
+from fleet.llm.client import CallPolicy, LadderModelClient, scope_to_repo
 from fleet.models.base import utcnow
 from fleet.models.enums import Phase, TransformTier
 from fleet.obs.events import EventEmitter, errors_jsonl_path, events_jsonl_path
@@ -332,7 +332,9 @@ class RunContext:
             cancel=cancel,
             budget=budget,
             db=self.repository,
-            llm=self.model_client,
+            # ADR-0149: bound to THIS repo so every call a worker makes — whichever call site —
+            # lands on the repo's affine replica (§12.51). Same store, same breaker; a view.
+            llm=scope_to_repo(self.model_client, repo_id),
             router=self.llm,
             limits=self.limits,
             log=self.log.bind(run_id=str(self.run_id), repo_id=repo_id, phase=int(phase)),

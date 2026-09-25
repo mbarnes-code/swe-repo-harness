@@ -3110,6 +3110,10 @@ class BackendTarget(FleetModel):
     backend: str = Field(min_length=1, description="Must exist in the §7.7 backend registry")
     model_id: str = Field(min_length=1, description="Opaque to the harness; config data only")
     base_url: str | None = None          # required by `openai_compatible`; ignored by others
+    base_urls: tuple[str, ...] | None = None
+    # ADR-0149/§12.51: ONE logical target served by >= 2 distinct equal-peer REPLICA endpoints;
+    # XOR `base_url`. Resolved to one `base_url` per call (stable hash of the bound repo_id) on a
+    # per-call copy — a backend never sees this field.
     api_key_env: str | None = None       # NAME of the env var; never the value (§11.4)
     region: str | None = None            # bedrock / vertex transport selector
     effort: Literal["low", "medium", "high"] | None = None
@@ -6958,6 +6962,17 @@ a loud startup error, never a silently-ignored or silently-misapplied override. 
 — this file carries no secret, only endpoint routing) and never asks an operator to export
 anything into their shell.
 
+**Replica endpoints — `base_urls` (ADR-0149, §12.51).** A target may name `base_urls: [<url>,
+<url>, ...]` (at least two distinct entries) instead of `base_url`: one logical target served by
+equal-peer replicas, distinct from the tier's ordered failover list. Each repo's calls go to one
+replica chosen by a stable hash of its `repo_id` (sha256, never `hash()`), bound once when the
+worker's context is built; if that replica fails at the transport level the call moves to its
+peer as an ordinary §11.8 failover hop (`backend_failover`, `attempts.llm_failovers`, never a
+charged attempt), before the next target in the tier. `llm.max_targets_per_call` counts logical
+targets, not replicas. The `llm_call` event's `base_url` field records which endpoint served each
+call. In `config/models.local.yaml`, naming `base_urls` on an entry replaces the template target's
+`base_url` (and vice versa); naming both is a startup error.
+
 Five rules the loader enforces at startup, before a repo is touched:
 
 1. **Every `roles` value is a `ModelTier` member**, and every tier named by any role has a
@@ -6965,7 +6980,8 @@ Five rules the loader enforces at startup, before a repo is touched:
    error, never a runtime `KeyError` in wave 7.
 2. **Every `backend` resolves** in the §7.7 registry — the adapters that actually imported on
    *this* host, never the four names the harness merely ships (ADR-0078) — and each backend
-   validates its own target fields — `openai_compatible` refuses a target with no `base_url`;
+   validates its own target fields — `openai_compatible` refuses a target with no `base_url`
+   (`base_urls`, ADR-0149, satisfies it);
    `bedrock`/`vertex` refuse one with no `region` (§13 row 36). **Only the SELECTED profile's
    targets are checked**, so a profile naming an optional-extra backend costs an unrelated
    operator nothing and exits 2 — naming `pip install 'fleet[<extra>]'` — for the operator who

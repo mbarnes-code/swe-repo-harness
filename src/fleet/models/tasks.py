@@ -129,6 +129,12 @@ class BackendTarget(FleetModel):
     backend: str = Field(min_length=1, description="Must exist in the §7.7 backend registry")
     model_id: str = Field(min_length=1, description="Opaque to the harness; config data only")
     base_url: str | None = None          # required by `openai_compatible`; ignored by others
+    base_urls: tuple[str, ...] | None = None
+    # ADR-0149/§12.51: ONE logical target served by several equal-peer REPLICA endpoints — not
+    # ADR-0023's ordered failover list (that is the tier's `targets`, each a different entry).
+    # Mutually exclusive with `base_url`; at least two distinct entries. `LadderModelClient`
+    # resolves it to ONE `base_url` per call (stable hash of the bound `repo_id`) on a per-call
+    # `model_copy`, so a backend only ever sees `base_url` and never this field.
     api_key_env: str | None = None       # NAME of the env var; never the value (§11.4)
     region: str | None = None            # bedrock / vertex transport selector
     effort: Literal["low", "medium", "high"] | None = None
@@ -151,6 +157,22 @@ class BackendTarget(FleetModel):
         p = self.price
         if isinstance(p, Price) and not (p.in_per_mtok or p.out_per_mtok):
             raise ValueError("a zero-rate price must be declared as the literal `free` (§9 rule 5)")
+        return self
+
+    @model_validator(mode="after")
+    def _one_endpoint_spelling(self) -> BackendTarget:
+        """ADR-0149: `base_url` XOR `base_urls`. Both set would leave "which endpoint does this
+        target mean" to whichever field the client happened to read first."""
+        urls = self.base_urls
+        if urls is None:
+            return self
+        if self.base_url is not None:
+            raise ValueError("a target declares `base_url` or `base_urls`, never both (ADR-0149)")
+        if len(urls) < 2 or len(set(urls)) != len(urls) or any(not u.strip() for u in urls):
+            raise ValueError(
+                "`base_urls` names at least two distinct, non-empty replica endpoints; a single "
+                "endpoint is `base_url` (ADR-0149)"
+            )
         return self
 
 

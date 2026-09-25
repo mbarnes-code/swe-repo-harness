@@ -158,7 +158,7 @@ own bare identifier is written there. Containment is blind to *which* line insid
 cited; this check is blind to a citation naming *supporting prose* about a symbol rather than the
 symbol's own name (measured, not hypothetical: building this check against
 ``docs/CRITERIA_PLAN.md`` found exactly one such case, ``RejectedApproach``
-(`src/fleet/models/tasks.py:213`), and its pin comment records why it is a correct citation
+(`src/fleet/models/tasks.py:235`), and its pin comment records why it is a correct citation
 rather than a defect). That is the disclosed blind spot; it is closed by a pin
 (``text_mismatch_pins``), ratcheted in both directions exactly like ``pins`` above, not by
 weakening the assertion for every citation.
@@ -741,12 +741,12 @@ _PINNED_UNRESOLVED_CRITERIA_PLAN: tuple[tuple[str, str], ...] = (
 # 208-226 span -- but line 213 is the class's own docstring, not the `class RejectedApproach`
 # line, so the second derivation below (which requires the anchor's own token at the cited line)
 # flags it. Read against source it is a deliberate, correct citation: the doc's claim is "this
-# class has no field that can hold diff text", and line 213 is the docstring sentence stating
+# class has no field that can hold diff text", and line 235 is the docstring sentence stating
 # exactly that -- a citation to *supporting prose*, the same category `INTEGRATION_HONESTY.md`'s
 # `response.usage` pin documents. Pinned rather than repointed, because there is no more-precise
 # line to point it at: the claim is about the class as a whole, not one field.
 _TEXT_MISMATCH_PINS_CRITERIA_PLAN: tuple[tuple[str, str], ...] = (
-    ("RejectedApproach", "src/fleet/models/tasks.py:213"),
+    ("RejectedApproach", "src/fleet/models/tasks.py:235"),
 )
 
 _CRITERIA_PLAN = DocProfile(
@@ -1188,7 +1188,7 @@ def test_a_resolving_anchored_citation_names_its_anchor_at_the_cited_line(
     Disclosed blind spot, found while building this check rather than asserted in the abstract:
     a citation naming a class/function can legitimately point at a SUPPORTING line inside that
     symbol's own body that does not repeat the symbol's name -- `RejectedApproach`
-    (`src/fleet/models/tasks.py:213`) cites the class's own docstring sentence stating the claim
+    (`src/fleet/models/tasks.py:235`) cites the class's own docstring sentence stating the claim
     the doc makes, not the `class RejectedApproach` line itself, and correctly does not contain
     the token `RejectedApproach`. That is not a defect in the citation; it is a defect in
     assuming "names its anchor" is the only way a citation can be right. Such cases are pinned

@@ -1595,6 +1595,16 @@ def _apply_model_overrides(
                         file=overrides_path,
                         key=f"profiles.{profile_name}.{tier_name}",
                     )
+                # ADR-0149: `base_url` and `base_urls` are two spellings of ONE fact (which endpoint
+                # this target is), so an override naming either REPLACES the template's other —
+                # the committed template carries a single placeholder `base_url`, and a local file
+                # listing the real replicas must not leave that placeholder beside them (which
+                # `BackendTarget` would, correctly, refuse as ambiguous). Naming both in the
+                # override itself is not cleared here and fails that same validator, loudly.
+                if "base_urls" in override_target and "base_url" not in override_target:
+                    match.pop("base_url", None)
+                elif "base_url" in override_target and "base_urls" not in override_target:
+                    match.pop("base_urls", None)
                 match.update(override_target)
     return merged
 
@@ -1704,6 +1714,10 @@ def _check_routing(
                 )
             for required in _REQUIRED_TARGET_FIELDS.get(target.backend, ()):
                 value = getattr(target, required)
+                if required == "base_url" and target.base_urls:
+                    # ADR-0149: replicas satisfy `base_url` — `BackendTarget` already refused an
+                    # empty or duplicate entry, and the client resolves one per call.
+                    continue
                 # `base_url: ''` is not a base_url. An `is None` test here let an empty or
                 # whitespace-only string through startup and deferred the failure to the first
                 # call, which §13 row 36 exists to prevent: it must fail HERE, naming the field.
