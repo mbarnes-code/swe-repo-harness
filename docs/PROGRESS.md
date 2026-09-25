@@ -11447,11 +11447,16 @@ unrelated LLM-prompt-rendering path and does not touch any §12 acceptance-bar t
 re-measured", implying the MET-count had been re-derived this round. It had not. `sed -n
 '/^## 12\./,/^## 13\./p' docs/SPEC.md | grep -cE '^[0-9]+\.'` — the command actually run — counts
 how many criteria §12 LISTS (the total, structurally unchanged at **48**, confirmed by re-running
-it at this round's HEAD), not how many are currently MET; it cannot support a "48 of 48 met" claim,
-and this round does not re-derive the full met/unmet census (Rule 13 requires naming which
-criterion a round moves — none, here — not re-auditing all 48 for an unrelated fix). Whatever the
-last full census found stands as the last full census found it; this round makes no claim about it
-either way. **This is at least the 4th consecutive no-criterion round by count:** the immediately
+it at this round's HEAD), not how many are currently MET; it cannot support a "48 of 48 met" claim.
+**Second correction (caught in a further review round):** the sentence that WAS here — "Rule 13
+requires naming which criterion a round moves ... not re-auditing all 48 for an unrelated fix" —
+mischaracterized the rule. Rule 13's actual text requires every checkpoint to report `<n> of 48`
+**re-measured against §12 directly, never carried forward from the last audit** — it grants no
+exemption from that re-measurement merely because a round targets no criterion. This round did
+NOT re-derive the met/unmet census; it confirmed only the total (48, unchanged). That is a real
+gap against Rule 13's literal text, recorded here rather than argued away — see the controller
+ruling below for why this checkpoint is accepted despite it. **This is at least the 4th consecutive
+no-criterion round by count:** the immediately
 preceding checkpoint (ADR-0142, 2026-09-16)
 declared itself new-feature work targeting no criterion; the one before that (ADR-0143/D143/ADR-
 0144/D144, 2026-09-24) also targeted no criterion. Between that checkpoint and this one, **ADR-0145**
@@ -11460,17 +11465,24 @@ landed the entire `harmony_gpt_oss` backend on `main` (`9a39478`) — also targe
 here, not silently backfilled, since reconstructing someone else's checkpoint after the fact is not
 this round's job and risks writing a version of events this round did not itself observe.
 
-**Disclosed judgment call, per Rule 13's restriction on two consecutive no-criterion rounds.** This
-round fixes a confirmed, verified **blocking functional defect on the path the fleet actually runs
-in production**: every diff-bearing role (`TRANSFORM_REPAIR`, `ESCALATION`) on the `pilot` profile
-was silently decoding `tool_arguments=None` on every call, burning its repair turn and walking the
-ladder to `REQUIRES_HUMAN_INTERVENTION` — not a hypothetical or a hardening concern, a real defect
-in code that had already landed and would have been the first thing to fail the moment `pilot` ran
-against real files. That is a stronger justification than pure process-hardening, and it is stated
-explicitly here rather than treated as automatically acceptable under Rule 13 — the fact remains
-that this makes four (arguably five, counting ADR-0145's unchecked-in round) consecutive rounds
-with no criterion movement, which is itself worth a future round's attention if the pattern
-continues.
+**Controller ruling (2026-09-25) — attributed to the orchestrator, not the implementing round's
+self-approval.** This round fixes a confirmed, verified **blocking functional defect on the path
+the fleet actually runs in production**: every diff-bearing role (`TRANSFORM_REPAIR`, `ESCALATION`)
+on the `pilot` profile was silently decoding `tool_arguments=None` on every call, burning its
+repair turn and walking the ladder to `REQUIRES_HUMAN_INTERVENTION` — not a hypothetical or a
+hardening concern, a real defect in code that had already landed and would have been the first
+thing to fail the moment `pilot` ran against real files.
+
+*Ruling:* this round is disclosed defect-remediation — a blocking functional defect on the
+production `pilot` path — not process-hardening, and is treated as justified despite being at
+least the 4th consecutive round with no §12 criterion movement (arguably the 5th, counting
+ADR-0145's own unchecked-in round). *Rationale:* deferring this fix behind an unrelated
+criterion-closing round would leave a known-broken backend shipped in production, which is a worse
+outcome than one more disclosed no-criterion round. This is a controller decision, recorded here,
+not the implementing round's self-approval — and it does not set a precedent for skipping Rule 13's
+met-count re-measurement casually: the very next round that touches this ledger should re-derive
+the full met/unmet census this round did not, closing both the criterion-movement gap and the
+re-measurement gap the correction above discloses.
 
 **What was completed.**
 
@@ -11483,12 +11495,18 @@ continues.
    interactively. A second, independent defect: even a hand-supplied pre-image built from
    `ensure_ascii=True` JSON carries escaped `\n`/`\"` sequences instead of real bytes, which a
    V4A/unified-diff hunk's context lines must match byte-for-byte.
-2. **ADR-0146** (Agent Recommendation, reviewed and adopted): file-content evidence now renders as
-   one raw, CommonMark-safe fenced block appended after the JSON evidence body, via a new shared
-   module `src/fleet/llm/fences.py` (`fence_file`/`parse_file_fences`/`discover_fenced_paths`) that
-   both `render_prompt` (writer) and `_extract_pre_images` (reader) use — one format, one place it
-   is defined, so the two cannot drift apart. `prompt_template_version` bumped 1 → 2 for
-   `TRANSFORM_REPAIR` and `ESCALATION` so no stale-format cache entry can be served.
+2. **ADR-0146** (Agent Recommendation, reviewed and adopted; **superseded — see follow-up notes
+   below**): file-content evidence now renders as one raw, CommonMark-safe fenced block appended
+   after the JSON evidence body, via a new shared module `src/fleet/llm/fences.py`
+   (`fence_file`/`parse_file_fences`/`discover_fenced_paths`) that both `render_prompt` (writer)
+   and `_extract_pre_images` (reader) use — one format, one place it is defined, so the two cannot
+   drift apart. `prompt_template_version` bumped 1 → 2 for `TRANSFORM_REPAIR` and `ESCALATION` so
+   no stale-format cache entry can be served. **Superseded:** `_extract_pre_images`'s actual
+   reading mechanism is no longer `parse_file_fences`/`discover_fenced_paths` as described here —
+   two further review rounds found that design exploitable and replaced it, first with a
+   role-based scan (`trusted_fenced_blocks`) and then with the positional
+   `_original_prompt_messages` mechanism that landed. See the two follow-up notes below for the
+   full, current, and accurate description.
 3. **D145** opened and closed in this round (`docs/INTEGRATION_HONESTY.md`): the defect above, its
    two independent causes, and the fix, with the mutation matrix proving the new test actually
    discriminates the fix from a reversion.

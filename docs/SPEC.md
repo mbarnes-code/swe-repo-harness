@@ -6151,9 +6151,16 @@ pre-image forgery that got past every layer here can still only ever produce a d
 apply — a safe, loud failure, not silent corruption.
 
 **Evidence is untrusted input, and closing code-execution escalation is not the same as closing
-misleading-content influence.** `render_prompt()` (`llm/calls.py:258-290`) embeds an evidence
+misleading-content influence.** `render_prompt()` (`llm/calls.py:264-324`) embeds an evidence
 mapping as one `sort_keys=True` JSON blob under a fixed `_EVIDENCE_HEADER` label, with no reserved
-boundary marker and no framing beyond each role's natural-language `system` prompt. ADR-0008 closes
+boundary marker and no framing beyond each role's natural-language `system` prompt. **Corrected
+2026-09-25 (ADR-0146):** this is no longer true of the WHOLE evidence mapping — a file-content
+field (`current_content`, `TRANSFORM_REPAIR`/`ESCALATION`) is pulled out and rendered as a raw
+fenced block AFTER the JSON blob instead (see this section's injection-safety paragraph above),
+so the JSON-blob framing described in this paragraph now covers every evidence field except that
+one. The threat-model reasoning that follows is otherwise unaffected: a fenced file-content block
+is exactly as untrusted, and exactly as un-instruction-following, as a JSON string value would
+have been. ADR-0008 closes
 exactly one threat model: a model invoked under one of the five sanctioned classes cannot itself
 execute, apply, or verify anything — only code does — so a compromised or merely misleading
 evidence payload cannot escalate to file mutation, a git operation, or a self-graded verdict. It

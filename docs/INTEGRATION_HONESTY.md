@@ -11781,7 +11781,7 @@ grounding the finding against real reference-harness source. `references/open-sw
 github_comments.py:69-70,130-156` shows a real, shipped defense: untrusted content is wrapped in a
 reserved tag, and any literal occurrence of that tag's open/close strings inside the untrusted text
 is neutralized before wrapping, so the content cannot forge a matching close. Fleet Engine has no
-equivalent mechanism: `render_prompt()` (`llm/calls.py:258-290`) embeds the evidence mapping as one
+equivalent mechanism: `render_prompt()` (`llm/calls.py:264-324`) embeds the evidence mapping as one
 `sort_keys=True` JSON blob directly after a fixed `_EVIDENCE_HEADER` label (`llm/calls.py:78`), with
 no reserved boundary marker, no escaping of any literal occurrence of that label inside the evidence
 values, and no explicit "treat as untrusted data, not instructions" framing beyond each role's
@@ -12050,7 +12050,7 @@ written per this file's annotate-in-place convention and is superseded by this p
 for the code as it now stands.
 
 **Second editorial addendum (2026-09-25, same round) — N1: role alone was STILL not enough; the
-`1b85705` mechanism above was itself exploitable, fixed in a further commit.** A second independent
+`1b85705` mechanism above was itself exploitable, fixed in `2ff7d1a`.** A second independent
 review found `1b85705`'s "scan only `system`/`user`-role messages" premise false: `user`-role does
 not imply harness-authored once a repair round exists. `client.py::_repair_turns` builds its
 repair-instruction message as `Message(role="user", content=_REPAIR_INSTRUCTION.format(
@@ -12085,7 +12085,7 @@ is corrected to the positional framing throughout.
 explicitly out of scope for D145's fix
 
 Found during D145/ADR-0146's sweep of which roles are actually diff-shaped and actually reachable,
-before deciding which roles' evidence needed the fenced-block fix. `src/fleet/llm/calls.py:390`
+before deciding which roles' evidence needed the fenced-block fix. `src/fleet/llm/calls.py:424`
 defines `rewrite_api_incompat()`, bound to `Role.API_INCOMPAT_REWRITE` and schema
 `ApiRewriteProposal` (`schemas.py`, extends `LlmPatchProposal` — diff-shaped, same as
 `TRANSFORM_REPAIR`/`ESCALATION`). `grep -rn "rewrite_api_incompat" src/fleet/` and
@@ -12099,7 +12099,7 @@ no caller, not a role that is called and silently fails.
 `TRANSFORM_REPAIR` and `ESCALATION` only, the two roles confirmed to have a real caller. Building
 evidence wiring for a role nothing calls would be speculative generality with no way to verify it
 against real evidence shape (CLAUDE.md's directive against inventing speculative generality beyond
-what can be verified). Whoever wires a caller for `api_incompat_rewrite()` in the future should
+what can be verified). Whoever wires a caller for `rewrite_api_incompat()` in the future should
 confirm at that point whether its evidence carries a file-content key in the same `current_content`
 shape, or a different one, and extend `render_prompt()`'s file-carrier handling accordingly — the
 mechanism (`fleet.llm.fences`) does not need to change, only which evidence key triggers it.
