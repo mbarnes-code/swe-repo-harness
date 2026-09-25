@@ -49,7 +49,7 @@ dev = [
   "hypothesis>=6.115",
   # Exact pin, not a floor: `select` below lists family prefixes, so a future release adding
   # a rule reddens an untouched tree. `tests/test_lint_gate.py` gates and explains it.
-  "ruff==0.16.2",
+  "ruff==0.16.8",
   "mypy>=1.13",
   # ADR-0141 security-scanning toolchain. Exact pins, same reasoning as ruff above — each of
   # these ships its own growing rule/advisory set, so a floor pin would let a future release
@@ -76,7 +76,7 @@ dev = [
   "hypothesis>=6.115",
   # Exact pin, not a floor: `select` below lists family prefixes, so a future release adding
   # a rule reddens an untouched tree. `tests/test_lint_gate.py` gates and explains it.
-  "ruff==0.16.2",
+  "ruff==0.16.8",
   "mypy>=1.13",
   # ADR-0141 security-scanning toolchain — same exact-pin reasoning as ruff above.
   "bandit==1.9.4",
