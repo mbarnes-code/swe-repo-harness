@@ -50,6 +50,9 @@ def _vocab_load_error() -> str | None:
     """
     if not HARMONY_INSTALLED:
         return "requires the openai-harmony extra"
+    vocab_dir = os.environ.get("TIKTOKEN_ENCODINGS_BASE")
+    if not vocab_dir or not (Path(vocab_dir) / "o200k_base.tiktoken").is_file():
+        return "requires a provisioned Harmony tokeniser vocab"
     from openai_harmony import HarmonyEncodingName, load_harmony_encoding
 
     try:
