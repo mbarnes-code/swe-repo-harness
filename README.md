@@ -64,8 +64,9 @@ fleet --help
 ## Quickstart
 
 ```bash
-# 1. Enroll the repos you want migrated.
+# 1. Enroll the repos you want migrated and confirm model profiles.
 $EDITOR config/repos.yaml
+$EDITOR config/models.yaml
 
 # 2. Check the LLM routing resolves and backend registration is valid (`list` is offline).
 fleet models list
