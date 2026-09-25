@@ -1214,16 +1214,19 @@ def test_models_local_yaml_absent_falls_back_to_the_template_value(tmp_path: Pat
 
 
 def test_models_local_yaml_overlays_a_field_onto_the_template_target(tmp_path: Path) -> None:
-    """The override supplies only the field it wants to change; every other field of that same
-    target — `api_key_env`, `price`, `effort` — still comes from the committed template."""
+    """The override names the target by `backend`+`model_id` identity and supplies only the field
+    it wants to change; every other field of that same target — `api_key_env`, `price`, `effort`
+    — still comes from the committed template."""
     config_dir = write_config(tmp_path)
     (config_dir / "models.local.yaml").write_text(
-        "profiles:\n  default:\n    HEAVY:\n      - { model_id: real-heavy-model }\n",
+        "profiles:\n  default:\n    HEAVY:\n"
+        "      - { backend: anthropic, model_id: claude-opus-5, base_url: 'http://10.0.0.5/v1' }\n",
         encoding="utf-8",
     )
     settings = load(config_dir)
     target = settings.models.profiles["default"]["HEAVY"][0]
-    assert target.model_id == "real-heavy-model"
+    assert target.base_url == "http://10.0.0.5/v1"
+    assert target.model_id == "claude-opus-5"
     assert target.api_key_env == "ANTHROPIC_API_KEY"
     assert target.price == Price(in_per_mtok=5.0, out_per_mtok=25.0)
 
@@ -1232,25 +1235,75 @@ def test_models_local_yaml_naming_an_unknown_profile_fails_loud(tmp_path: Path) 
     """A typo'd profile name must not silently mean "no override applied" (Rule 11)."""
     config_dir = write_config(tmp_path)
     (config_dir / "models.local.yaml").write_text(
-        "profiles:\n  nope:\n    HEAVY:\n      - { model_id: x }\n", encoding="utf-8"
+        "profiles:\n  nope:\n    HEAVY:\n      - { backend: anthropic, model_id: x }\n",
+        encoding="utf-8",
     )
     with pytest.raises(ConfigValidationError) as excinfo:
         load(config_dir)
     assert "nope" in str(excinfo.value)
 
 
-def test_models_local_yaml_naming_an_out_of_range_index_fails_loud(tmp_path: Path) -> None:
-    """`profiles.default.HEAVY` has exactly one target in the fixture template; an override naming
-    index 1 names a target the template does not have."""
+def test_models_local_yaml_matches_by_identity_not_list_position(tmp_path: Path) -> None:
+    """Two HEAVY targets; the ONE override entry names the SECOND target by `backend`+`model_id`
+    identity while sitting at override-list index 0 (ADR-0026: "no reference may be a positional
+    integer over a recomputed collection" — written for SQLite rowids, generalizes exactly here).
+    A positional implementation would have silently applied this to the FIRST target instead."""
+    models = (
+        MODELS_HEADER
+        + "    HEAVY:\n"
+        "      - { backend: anthropic, model_id: claude-opus-5, effort: high,\n"
+        "          api_key_env: ANTHROPIC_API_KEY,\n"
+        "          price: { in_per_mtok: 5.0, out_per_mtok: 25.0 } }\n"
+        "      - { backend: anthropic, model_id: claude-opus-5-standby, effort: high,\n"
+        "          api_key_env: ANTHROPIC_API_KEY, weight: 0,\n"
+        "          price: { in_per_mtok: 5.0, out_per_mtok: 25.0 } }\n"
+        + WORKHORSE_TARGET
+        + CHEAP_TARGET
+    )
+    config_dir = write_config(tmp_path, models=models)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  default:\n    HEAVY:\n"
+        "      - { backend: anthropic, model_id: claude-opus-5-standby, effort: low }\n",
+        encoding="utf-8",
+    )
+    settings = load(config_dir)
+    targets = settings.models.profiles["default"]["HEAVY"]
+    assert targets[0].model_id == "claude-opus-5"
+    assert targets[0].effort == "high", "untouched -- the override does not name this target"
+    assert targets[1].model_id == "claude-opus-5-standby"
+    assert targets[1].effort == "low", "the actual match, found by identity, not by list index"
+
+
+def test_models_local_yaml_matching_no_template_target_fails_loud(tmp_path: Path) -> None:
+    """A `backend`+`model_id` pair matching nothing in the tier is a loud, typo-shaped error
+    naming exactly what it failed to match — never a silent no-op."""
     config_dir = write_config(tmp_path)
     (config_dir / "models.local.yaml").write_text(
         "profiles:\n  default:\n    HEAVY:\n"
-        "      - { model_id: first }\n      - { model_id: second }\n",
+        "      - { backend: anthropic, model_id: claude-opus-5-typo, "
+        "base_url: 'http://10.0.0.5/v1' }\n",
         encoding="utf-8",
     )
     with pytest.raises(ConfigValidationError) as excinfo:
         load(config_dir)
-    assert "index 1" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "claude-opus-5-typo" in message
+    assert "anthropic" in message
+
+
+def test_models_local_yaml_override_missing_identity_fields_fails_loud(tmp_path: Path) -> None:
+    """`backend`/`model_id` are the matching key, not optional overlay fields — an entry omitting
+    either has no way to name which template target it means."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  default:\n    HEAVY:\n      - { base_url: 'http://10.0.0.5/v1' }\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(config_dir)
+    message = str(excinfo.value)
+    assert "backend" in message
+    assert "model_id" in message
 
 
 def test_models_local_yaml_is_covered_by_the_secret_material_scan(tmp_path: Path) -> None:

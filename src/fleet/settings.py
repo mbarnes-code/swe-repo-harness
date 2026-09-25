@@ -1514,14 +1514,20 @@ def _apply_model_overrides(
     field overlays applied, BEFORE `_validate_models_config` — B2's untracked-local-override layer
     for real `base_url`/`model_id`/... values §9 rule 4 refuses to let the COMMITTED template carry.
 
-    Shape: `{profiles: {<profile>: {<tier>: [{..fields to overlay..}, ...]}}}`, positionally
-    aligned by index onto the template's own `profiles.<profile>.<tier>` list — the override
-    supplies only the fields it wants to change (`base_url`, `model_id`, ...); every other field
-    of that target comes from the committed template unchanged. A profile, tier or index the
-    override names that the template does not define is a loud startup error (Rule 11): silently
-    ignoring an unresolvable override would make a typo read as "no override applied", which is a
-    misconfigured Spark endpoint discovered in wave 7, exactly what §9's own loader rules exist to
-    front-load to startup.
+    Shape: `{profiles: {<profile>: {<tier>: [{backend, model_id, ..fields to overlay..}, ...]}}}`.
+    Each override entry is matched to a template target by **identity** — its `backend` +
+    `model_id` pair, unique within a tier — never by list position (ADR-0026, `docs/DECISIONS.md`:
+    "no reference may be a positional integer over a recomputed collection"; that rule was written
+    for SQLite rowids, but the rationale generalizes exactly here — an index into
+    `config/models.yaml`'s editable target list silently repoints the moment that list is
+    reordered or grows a second target, misrouting an endpoint with no error at all). The matched
+    target's OTHER fields (`base_url`, ...) are overlaid; `backend`/`model_id` themselves are the
+    lookup key, already equal to what matched. A profile or tier the override names that the
+    template does not define, an override entry missing `backend`/`model_id`, or a `backend` +
+    `model_id` pair matching no template target in that tier, is a loud startup error (Rule 11):
+    silently ignoring an unresolvable override would make a typo read as "no override applied",
+    which is a misconfigured Spark endpoint discovered in wave 7, exactly what §9's own loader
+    rules exist to front-load to startup.
     """
     if not overrides_data:
         return dict(models_data)
@@ -1555,21 +1561,41 @@ def _apply_model_overrides(
                     file=overrides_path,
                     key=f"profiles.{profile_name}.{tier_name}",
                 )
-            for index, override_target in enumerate(
+            for override_target in (
                 override_targets if isinstance(override_targets, list) else []
             ):
                 if not isinstance(override_target, Mapping):
                     continue
-                if index >= len(base_targets):
+                backend = override_target.get("backend")
+                model_id = override_target.get("model_id")
+                if not backend or not model_id:
                     raise ConfigValidationError(
-                        f"names target index {index} of profiles.{profile_name}.{tier_name}, "
-                        f"but config/models.yaml only defines {len(base_targets)} target(s) there",
+                        f"an entry in profiles.{profile_name}.{tier_name} omits `backend` and/or "
+                        "`model_id` — B2 overrides match a template target by that identity pair, "
+                        "never by list position (ADR-0026), so both are required to name which "
+                        "target to overlay",
                         file=overrides_path,
-                        key=f"profiles.{profile_name}.{tier_name}[{index}]",
+                        key=f"profiles.{profile_name}.{tier_name}",
                     )
-                base_target = base_targets[index]
-                if isinstance(base_target, dict):
-                    base_target.update(override_target)
+                match = next(
+                    (
+                        t
+                        for t in base_targets
+                        if isinstance(t, dict)
+                        and t.get("backend") == backend
+                        and t.get("model_id") == model_id
+                    ),
+                    None,
+                )
+                if match is None:
+                    raise ConfigValidationError(
+                        f"names target backend={backend!r} model_id={model_id!r} in "
+                        f"profiles.{profile_name}.{tier_name}, which config/models.yaml does not "
+                        "define (matched by backend+model_id identity, never list position)",
+                        file=overrides_path,
+                        key=f"profiles.{profile_name}.{tier_name}",
+                    )
+                match.update(override_target)
     return merged
 
 

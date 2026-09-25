@@ -11770,6 +11770,24 @@ file is covered by the secret-material scan (a planted `sk-ant-...`-shaped strin
 `SecretInConfigError`). No mutation test was run for this half — the five tests already exercise
 the discriminating branches directly (absent vs. present vs. each of the two error paths).
 
+**Addendum (2026-09-25, same round, post-review fix) — `_apply_model_overrides` matched by LIST
+POSITION originally; review correctly flagged this against ADR-0026 (`docs/DECISIONS.md:1283-1286`,
+"no reference may be a positional integer over a recomputed collection" — written for SQLite
+rowids, but the rationale generalizes exactly here: an index into `config/models.yaml`'s editable
+target list silently repoints to the wrong target the moment that list is reordered or grows a
+second entry, no error at all).** Fixed to match each override entry to a template target by
+**identity** — its `backend` + `model_id` pair, required on every override entry, unique within a
+tier — never by position; a pair matching no template target in that tier is now a loud
+`ConfigValidationError` naming both fields, same as an omitted `backend`/`model_id`. Updated
+`docs/SPEC.md`'s mechanism paragraph and worked example to match (both now show `backend`/
+`model_id` on every override entry). Two tests added to `tests/test_settings.py`: an override
+matching a template target added out of the file's own written order still applies (proving it is
+identity-based, not positional), and an override whose `backend`+`model_id` matches nothing raises
+loud, naming what it failed to match. The old "out-of-range index" test is removed — that failure
+mode no longer exists under identity matching. Full re-run: `tests/test_settings.py` plus the
+other 8 files from this round's original verification pass, all green (see the updated summary
+below); §12.40's greps re-confirmed clean for the files this round touched.
+
 **§12.40 grep confirmation (required by the brief, re-run after all changes):**
 ```
 grep -rnE '\b(claude|gpt|gemini|llama|mistral|qwen|deepseek|phi|mixtral)[-_.][A-Za-z0-9]' src/ --include='*.py' | grep -v '^src/fleet/llm/backends/'

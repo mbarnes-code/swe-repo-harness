@@ -6938,18 +6938,25 @@ and IS committed). An operator with real endpoint values creates `config/models.
 ```yaml
 profiles:
   pilot:
-    HEAVY:    [ { base_url: 'http://10.0.0.5:8000/v1' } ]
-    WORKHORSE: [ { base_url: 'http://10.0.0.5:8000/v1' } ]
-    CHEAP:    [ { base_url: 'http://10.0.0.6:8000/v1' } ]
+    HEAVY:     [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://10.0.0.5:8000/v1' } ]
+    WORKHORSE: [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://10.0.0.5:8000/v1' } ]
+    CHEAP:     [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://10.0.0.6:8000/v1' } ]
 ```
 
-`FleetSettings.load()` reads this file (if present) and overlays each listed field onto the
-COMMITTED template's `profiles.<profile>.<tier>[<index>]` target, positionally by index, before
-`config/models.yaml`'s own validation rules (rules 1–5 below) run — any field the override omits
-comes from the template unchanged. Naming a profile, tier, or index the template does not define
-is a loud startup error, never a silently-ignored typo. This layer is **not** `FLEET_*` env (§9's
-"API keys come from the environment only" is unrelated and unaffected — this file carries no
-secret, only endpoint routing) and never asks an operator to export anything into their shell.
+`FleetSettings.load()` reads this file (if present) and, for each override entry, matches it to a
+COMMITTED template target by **identity** — its `backend` + `model_id` pair, unique within a tier
+— never by list position (ADR-0026: "no reference may be a positional integer over a recomputed
+collection"; an index into this editable list would silently repoint to the wrong target the
+moment `config/models.yaml`'s target list is reordered or grows a second entry, with no error at
+all). Every override entry MUST carry `backend` and `model_id` to name which target it overlays;
+the matched target's other fields (`base_url`, ...) are overlaid before `config/models.yaml`'s own
+validation rules (rules 1–5 below) run, and any field the override omits comes from the template
+unchanged. Naming a profile or tier the template does not define, an entry missing
+`backend`/`model_id`, or a `backend`+`model_id` pair matching no template target in that tier, is
+a loud startup error, never a silently-ignored or silently-misapplied override. This layer is
+**not** `FLEET_*` env (§9's "API keys come from the environment only" is unrelated and unaffected
+— this file carries no secret, only endpoint routing) and never asks an operator to export
+anything into their shell.
 
 Five rules the loader enforces at startup, before a repo is touched:
 
