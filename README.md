@@ -148,9 +148,9 @@ typed defaults, but the files still need to exist at those paths. In `config/mod
 
 | File | What it holds |
 |---|---|
-| `config/repos.yaml` | The fleet manifest. One entry per source repo: `name`, `url`, optional `ref`, `owns`, `dest`, `skip`. Ships empty. |
-| `config/fleet.yaml` | The run's machinery: budgets, concurrency, and per-phase settings for scan, graph, transform, build, stubs, verify, llm, pr and gc. |
-| `config/models.yaml` | LLM routing: each role maps to a capability tier, each profile maps a tier to an ordered list of backend targets. Three profiles ship: `default`, `local`, `pilot`. |
+| `config/repos.yaml` | **Required file.** The fleet manifest. One entry per source repo: `name`, `url`, optional `ref`, `owns`, `dest`, `skip`. Ships empty. |
+| `config/fleet.yaml` | **Required file.** The run's machinery: budgets, concurrency, and per-phase settings for scan, graph, transform, build, stubs, verify, llm, pr and gc. |
+| `config/models.yaml` | **Required file.** LLM routing: each role maps to a capability tier, each profile maps a tier to an ordered list of backend targets. Three profiles ship: `default`, `local`, `pilot`. |
 
 **Precedence:** CLI flags → `FLEET_*` environment variables → the YAML files → built-in defaults.
 
@@ -168,6 +168,8 @@ refuse to load:
 to `budgets.max_host_rss_mb`. The shipped values are `4 × 8192 + 4096 = 36864` MiB. Set
 `budgets.max_host_rss_mb` to your host ceiling (the limit), then reduce the commitment inputs
 (`concurrency.docker`, `verify.container_memory`, `budgets.max_rss_mb`) until that total fits.
+Fleet does not auto-tune these values: it validates the configured numbers and refuses when the
+commitment exceeds the configured or detected host limit.
 
 ## Exit codes
 
