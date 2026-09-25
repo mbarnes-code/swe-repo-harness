@@ -67,6 +67,7 @@ none of it arrives on its own. `new-worktree.sh` provisions all of it.
 | `tools/bazelisk/downloads` (120 MiB) | symlink to primary | pure release-archive cache, safe to share |
 | `tools/bazelisk/output` (353 MiB) | **own empty directory** | it is a live Bazel `--output_user_root` (install base, MD5-keyed output bases, lock files). Sharing it across concurrent worktrees is precisely the collision this setup exists to prevent |
 | `references/*/` | **not provisioned** | read-only citation corpora; read the primary's copy by absolute path |
+| `tools/harmony-vocab/o200k_base.tiktoken` (3.4 MiB) | **hardlink** from primary, skipped (with a notice) if the primary has none | `openai-harmony` does not ship its tokeniser vocab in the wheel and fetches it from a CDN a sandbox cannot reach. Hardlinked rather than re-fetched: a linked worktree shares a filesystem with the primary, and the primary's copy is already sha256-verified. Without it, 29 of `tests/test_llm_backend_harmony_gpt_oss.py`'s 48 items SKIP — run `tools/bin/fetch-harmony-vocab` (needs network) in either tree. See ADR-0147 / D147 |
 
 Note the symlink shape: the *parent* is a real directory and only the children are symlinks.
 `.gitignore` says `tools/go/`, and a trailing-slash pattern matches only real directories — git
