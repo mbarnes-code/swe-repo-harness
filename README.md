@@ -166,7 +166,7 @@ refuse to load:
 `concurrency.docker` × `verify.container_memory` + `budgets.max_rss_mb` must be less than or equal
 to `budgets.max_host_rss_mb`. The shipped values are `4 × 8192 + 4096 = 36864` MiB. On a smaller
 host, reduce the commitment inputs (`concurrency.docker`, `verify.container_memory`,
-`budgets.max_rss_mb`), then set `budgets.max_host_rss_mb` at or above the resulting commitment.
+`budgets.max_rss_mb`) until that total is within your host-specific `budgets.max_host_rss_mb`.
 
 ## Exit codes
 
