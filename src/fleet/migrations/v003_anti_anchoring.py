@@ -48,8 +48,10 @@ _STATEMENTS: Final[tuple[str, ...]] = (
     "ALTER TABLE attempts  ADD COLUMN context_policy TEXT",
     "ALTER TABLE attempts  ADD COLUMN approach_signature TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE llm_cache ADD COLUMN context_policy TEXT",
-    "ALTER TABLE llm_cache ADD COLUMN rejected_approach_digest TEXT NOT NULL "
-    f"DEFAULT '{_SHA256_OF_EMPTY}'",
+    (
+        "ALTER TABLE llm_cache ADD COLUMN rejected_approach_digest TEXT NOT NULL "
+        f"DEFAULT '{_SHA256_OF_EMPTY}'"
+    ),
     _REJECTED_APPROACHES_DDL,
 )
 

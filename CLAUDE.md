@@ -127,6 +127,7 @@ legitimate closure.
 - A command-line `--repository_cache` **overrides** a `.bazelrc` `common` line. A real-bazel test that omits it re-downloads ~206 MB / 9,241 files (179 s vs 17 s).
 - A repository-cache keep-ceiling breach fails the session and **keeps the bytes**. Prune with the `rm -rf` path the failure names; never code around the ceiling.
 - `ast-grep` exits **0 on a missing file** — always probe an absolute path. Detect parse failure with `kind: ERROR` + `severity: error` and read the **exit code**, not `--json` (`stdout_tail` truncates at 32 KiB).
+- **Suppress a ruff finding with inline `# noqa: RULE`, never `[tool.ruff.lint.per-file-ignores]`, for an individual exception.** `per-file-ignores` silences a rule for the *entire* file — adding it for one violation silently exempts every future violation of that rule anywhere else in the same file. Inline `# noqa` is precise to the line, self-documenting, and keeps the rest of the file covered. Reserve `per-file-ignores` for **categorical** policy that applies to a whole class of files (this repo's own `"tests/**" = ["S101", "ANN", "S311"]` is that shape: tests use bare `assert` as pytest's own idiom (`S101`), don't carry the same annotation coverage as `src/` (`ANN`), and use `random` for test-data generation, not a security decision (`S311`) — not an exception, a different rule for a different context). Add a comment justifying any inline `# noqa`; one with no justification is probably code smell, not a suppression.
 
 ## Architectural & Subagent Guardrails
 

@@ -9084,8 +9084,8 @@ async def test_build_sink_persists_overwritten_bazel_files_as_a_finding(tmp_path
                     output=BuildOutput(
                         repo_id="acme-commons",
                         overwritten_bazel_files=[
-                            "libs/widget/BUILD.bazel: replaced a pre-existing hand-written "
-                            "Bazel file"
+                            ("libs/widget/BUILD.bazel: replaced a pre-existing hand-written "
+                            "Bazel file")
                         ],
                     ),
                 ),
@@ -9230,8 +9230,8 @@ async def test_pr_candidates_carries_overwrite_notes_from_a_real_build_sink_find
                     output=BuildOutput(
                         repo_id="acme-commons",
                         overwritten_bazel_files=[
-                            "libs/widget/BUILD.bazel: replaced a pre-existing hand-written "
-                            "Bazel file"
+                            ("libs/widget/BUILD.bazel: replaced a pre-existing hand-written "
+                            "Bazel file")
                         ],
                     ),
                 ),

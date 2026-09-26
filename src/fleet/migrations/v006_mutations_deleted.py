@@ -32,8 +32,10 @@ _STATEMENTS: Final[tuple[str, ...]] = (
     "ALTER TABLE attempts ADD COLUMN commit_sha      TEXT",
     "ALTER TABLE attempts ADD COLUMN already_applied INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE phases   ADD COLUMN base_ref        TEXT",
-    "UPDATE phases SET base_ref = 'refs/fleet/' || run_id || '/' || repo_id "
-    "|| '/phase-' || phase || '/base' WHERE pre_commit_sha IS NOT NULL",
+    (
+        "UPDATE phases SET base_ref = 'refs/fleet/' || run_id || '/' || repo_id "
+        "|| '/phase-' || phase || '/base' WHERE pre_commit_sha IS NOT NULL"
+    ),
     "DROP INDEX IF EXISTS ix_mutations_open",
     "DROP INDEX IF EXISTS ux_mutations_patch",
     "DROP TABLE IF EXISTS mutations",

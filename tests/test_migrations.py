@@ -248,8 +248,8 @@ _ROWS: tuple[tuple[str, tuple[object, ...]], ...] = (
         ("repo-b", "beta", "git@x/beta.git", 2, NOW),
     ),
     (
-        "INSERT INTO edges (run_id, src_id, dst_id, dst_coord_key, kind, base_confidence, "
-        "confidence, evidence_path, evidence_line, detected_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("INSERT INTO edges (run_id, src_id, dst_id, dst_coord_key, kind, base_confidence, "
+        "confidence, evidence_path, evidence_line, detected_at) VALUES (?,?,?,?,?,?,?,?,?,?)"),
         (RUN, "repo-a", "repo-b", "npm::beta", "RUNTIME_DEP", 0.9, 0.95, "package.json", 12, NOW),
     ),
     ("INSERT INTO waves (run_id, wave_index, computed_at) VALUES (?,?,?)", (RUN, 0, NOW)),
@@ -262,32 +262,32 @@ _ROWS: tuple[tuple[str, tuple[object, ...]], ...] = (
         (RUN, 0, "REPO", "repo-b"),
     ),
     (
-        "INSERT INTO phases (run_id, repo_id, phase, status, attempts, scc_id, owner_pid, "
-        "pre_commit_sha, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ("INSERT INTO phases (run_id, repo_id, phase, status, attempts, scc_id, owner_pid, "
+        "pre_commit_sha, updated_at) VALUES (?,?,?,?,?,?,?,?,?)"),
         (RUN, "repo-a", 2, "FAILED", 3, 42, 31337, COMMIT_SHA, NOW),
     ),
     (
-        "INSERT INTO phases (run_id, repo_id, phase, status, attempts, updated_at) "
-        "VALUES (?,?,?,?,?,?)",
+        ("INSERT INTO phases (run_id, repo_id, phase, status, attempts, updated_at) "
+        "VALUES (?,?,?,?,?,?)"),
         (RUN, "repo-b", 1, "SUCCEEDED", 1, NOW),
     ),
     (
-        "INSERT INTO tasks (task_id, run_id, repo_id, phase, kind, dest_path, created_at) "
-        "VALUES (?,?,?,?,?,?,?)",
+        ("INSERT INTO tasks (task_id, run_id, repo_id, phase, kind, dest_path, created_at) "
+        "VALUES (?,?,?,?,?,?,?)"),
         (TASK, RUN, "repo-a", 2, "MIGRATE", "libs/alpha", NOW),
     ),
     (
-        "INSERT INTO attempts (attempt_id, run_id, repo_id, task_id, phase, attempt, command, "
+        ("INSERT INTO attempts (attempt_id, run_id, repo_id, task_id, phase, attempt, command, "
         "exit_code, cost_usd, patch_id, commit_sha, started_at, finished_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"),
         (
             "att-1", RUN, "repo-a", TASK, 2, 3, '["bazel", "build", "//..."]',
             1, 0.75, PATCH_ID, COMMIT_SHA, NOW, NOW,
         ),
     ),
     (
-        "INSERT INTO llm_cache (cache_key, role, model_id, effort, prompt_sha256, "
-        "response_schema_sha256, response_json, hit_count, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ("INSERT INTO llm_cache (cache_key, role, model_id, effort, prompt_sha256, "
+        "response_schema_sha256, response_json, hit_count, created_at) VALUES (?,?,?,?,?,?,?,?,?)"),
         ("key-1", "PLANNER", "claude-x", "high", "p" * 64, "s" * 64, "{}", 4, NOW),
     ),
     (
@@ -295,19 +295,19 @@ _ROWS: tuple[tuple[str, tuple[object, ...]], ...] = (
         (RUN, 12.5, 500.0, NOW),
     ),
     (
-        "INSERT INTO repo_ledger (run_id, repo_id, spent_usd, max_usd, updated_at) "
-        "VALUES (?,?,?,?,?)",
+        ("INSERT INTO repo_ledger (run_id, repo_id, spent_usd, max_usd, updated_at) "
+        "VALUES (?,?,?,?,?)"),
         (RUN, "repo-a", 3.25, 50.0, NOW),
     ),
     (
         # consumer_repo_id == repo_id is the v004 back-fill, already applied at v6
-        "INSERT INTO stubs (run_id, repo_id, stub_coord_key, consumer_repo_id, provider_repo_id, "
-        "pinned_version, bazel_label, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        ("INSERT INTO stubs (run_id, repo_id, stub_coord_key, consumer_repo_id, provider_repo_id, "
+        "pinned_version, bazel_label, created_at) VALUES (?,?,?,?,?,?,?,?)"),
         (RUN, "repo-a", "npm::beta", "repo-a", "repo-b", "1.2.3", "//third_party/stubs:beta", NOW),
     ),
     (
-        "INSERT INTO rejected_approaches (run_id, task_id, approach_signature, reason, "
-        "failure_class, attempt, tier, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        ("INSERT INTO rejected_approaches (run_id, task_id, approach_signature, reason, "
+        "failure_class, attempt, tier, created_at) VALUES (?,?,?,?,?,?,?,?)"),
         (RUN, TASK, SIG, "renamed the target instead of the package", "BUILD", 3, "WORKHORSE", NOW),
     ),
     (

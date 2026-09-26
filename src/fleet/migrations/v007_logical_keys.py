@@ -113,10 +113,14 @@ _BACKFILLS: Final[tuple[str, ...]] = (
     "UPDATE llm_cache SET last_hit_at = created_at WHERE last_hit_at = ''",
     # One stub is shared by every consumer row of it, so the id is keyed on the stub's own
     # identity — (run, provider, coordinate) — never on the consumer that happens to hold the row.
-    "UPDATE stubs SET stub_id = fleet_sha256_nul(run_id, provider_repo_id, stub_coord_key) "
-    "WHERE stub_id = ''",
-    "UPDATE stubs SET state_changed_at = COALESCE(resolved_at, created_at) "
-    "WHERE state_changed_at = ''",
+    (
+        "UPDATE stubs SET stub_id = fleet_sha256_nul(run_id, provider_repo_id, stub_coord_key) "
+        "WHERE stub_id = ''"
+    ),
+    (
+        "UPDATE stubs SET state_changed_at = COALESCE(resolved_at, created_at) "
+        "WHERE state_changed_at = ''"
+    ),
     # BEFORE the phases rebuild: 'FAILED' is not a §5.1 RepoStatus member and the new CHECK
     # would reject every pre-7 exhausted row (CLAUDE.md Rule 11 — the terminal state is RHI).
     "UPDATE phases SET status = 'REQUIRES_HUMAN_INTERVENTION' WHERE status = 'FAILED'",

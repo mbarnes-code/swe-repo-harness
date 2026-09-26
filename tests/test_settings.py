@@ -217,8 +217,8 @@ def test_minimal_config_lands_every_documented_default(tmp_path: Path) -> None:
 # real-Bazel tests in `test_bazel.py` re-measure both claims live; this offline copy exists so the
 # fast suite still catches a pin walked backwards on a host with no network.
 _LOWEST_WORKING: dict[str, tuple[tuple[int, ...], str]] = {
-    "aspect_rules_js": ((3, 0, 0), "rules_nodejs 6.3.x: rule() got unexpected keyword argument "
-                                   "'incompatible_use_toolchain_transition'"),
+    "aspect_rules_js": ((3, 0, 0), ("rules_nodejs 6.3.x: rule() got unexpected keyword argument "
+                                   "'incompatible_use_toolchain_transition'")),
     "rules_rust": ((0, 65, 0), "The CcInfo symbol has been removed (rust/private/rustdoc_test)"),
     "rules_go": ((0, 61, 1), "The CcInfo symbol has been removed (go/private/rules/cross.bzl)"),
     "gazelle": ((0, 52, 2), "The CcInfo symbol has been removed, through rules_go"),

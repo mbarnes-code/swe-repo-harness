@@ -248,10 +248,10 @@ FAKE_LOCKS: dict[str, tuple[str, str]] = {
     ),
     "pnpm": (
         "pnpm-lock.yaml",
-        "lockfileVersion: '9.0'\n\n"
+        ("lockfileVersion: '9.0'\n\n"
         "importers:\n\n  .:\n    dependencies:\n      left-pad:\n"
         "        specifier: ^1.3.0\n        version: 1.3.0\n\n"
-        "packages:\n\n  left-pad@1.3.0:\n    resolution: {integrity: sha512-fake}\n",
+        "packages:\n\n  left-pad@1.3.0:\n    resolution: {integrity: sha512-fake}\n"),
     ),
     #: `go mod download all`, and every part of this shape was measured against real Go rather
     #: than composed (ADR-0050). Both hash KINDS are here — the `h1:` module-zip hash and the
@@ -261,12 +261,12 @@ FAKE_LOCKS: dict[str, tuple[str, str]] = {
     #: names it, so it can only be here because a resolver walked the transitive closure.
     "go": (
         "go.sum",
-        "github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=\n"
+        ("github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=\n"
         "github.com/davecgh/go-spew v1.1.1/go.mod "
         "h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=\n"
         "github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=\n"
         "github.com/stretchr/testify v1.9.0/go.mod "
-        "h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=\n",
+        "h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=\n"),
     ),
 }
 
@@ -8858,16 +8858,16 @@ _C_COMPILER_BASENAME = re.compile(r"(?:^|-)(?:cc|gcc|g\+\+|c\+\+|cpp|clang|clang
 #: `@@<module>+<extension>+<repo>` spelling and is asserted in full, because "something about cc
 #: failed" is precisely the diagnosis this test exists to replace.
 NO_C_COMPILER_REFUSALS: tuple[str, ...] = (
-    "Auto-Configuration Error: Cannot find gcc or CC; either correct your path or set the CC "
-    "environment variable",
+    ("Auto-Configuration Error: Cannot find gcc or CC; either correct your path or set the CC "
+    "environment variable"),
     "no such package '@@rules_cc++cc_configure_extension+local_config_cc//'",
     # The two edges that make this a GO problem and not a C problem, quoted from the build below:
     # the Go standard library itself wants a C++ toolchain, and so therefore does a pure-Go
     # `go_library` that imports nothing but the standard library.
-    "@@rules_go+//:stdlib depends on "
-    "@@rules_cc++cc_configure_extension+local_config_cc//:cc-compiler-k8",
-    "//go/digest:digest depends on "
-    "@@rules_cc++cc_configure_extension+local_config_cc//:cc-compiler-k8",
+    ("@@rules_go+//:stdlib depends on "
+    "@@rules_cc++cc_configure_extension+local_config_cc//:cc-compiler-k8"),
+    ("//go/digest:digest depends on "
+    "@@rules_cc++cc_configure_extension+local_config_cc//:cc-compiler-k8"),
 )
 
 

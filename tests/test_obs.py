@@ -568,7 +568,7 @@ async def test_a_naive_now_fails_the_build_step_and_is_reported_without_raising(
     every other test in this file unnoticed while `emit()` stopped being exception-safe for a
     caller that ever passes a naive `now` (or any other value `_build_row` cannot handle)."""
     emitter = EventEmitter(run_id=RUN, jsonl_path=tmp_path / "logs" / "e.jsonl")
-    naive = datetime(2026, 8, 9, 12, 0, 0)  # deliberately no tzinfo
+    naive = datetime(2026, 8, 9, 12, 0, 0)  # noqa: DTZ001 - deliberately no tzinfo, testing rejection
 
     result = await emitter.emit("llm_call", payload={}, now=naive)
 
