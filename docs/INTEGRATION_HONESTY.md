@@ -12115,3 +12115,55 @@ what can be verified). Whoever wires a caller for `rewrite_api_incompat()` in th
 confirm at that point whether its evidence carries a file-content key in the same `current_content`
 shape, or a different one, and extend `render_prompt()`'s file-carrier handling accordingly — the
 mechanism (`fleet.llm.fences`) does not need to change, only which evidence key triggers it.
+
+## D147 — FIXED, LANDED (this entry lands in the same commit as the fix). 29 of 48 Harmony backend tests could not run without network, and failed rather than saying so
+
+**Verdict for the Harmony tokeniser, as a named input of the `LLM backends (Anthropic /
+OpenAI-compatible)` row above: it was UNPROVEN-by-accident on any sandboxed host — the tests that
+exercise it existed and could not run — and is now REAL where `tools/bin/fetch-harmony-vocab` has
+run, an explicit SKIP where it has not. This does NOT move that row's own verdict, which is about
+whether a request ever leaves the process: it still does not.**
+
+`openai_harmony.load_harmony_encoding()` downloads `o200k_base.tiktoken` from
+`https://openaipublic.blob.core.windows.net/encodings/` on first use — the wheel does not carry it.
+On a host where that name does not resolve, the SDK imports fine and every encode/decode raises
+`HarmonyError: error downloading or loading vocab file`. Measured on the pre-fix tree at
+`openai-harmony` 0.0.8, `pytest tests/test_llm_backend_harmony_gpt_oss.py` with no vocab available:
+**29 failed, 19 passed**. A whole-file sweep of the twelve other `openai`/harmony-touching test
+files under the same condition: **313 passed** — this file was the only one affected.
+
+**Why this belongs in this document rather than in a bug tracker.** The 29 included
+`test_a_planted_secret_never_reaches_the_transport_token_ids` — the check that a redacted secret
+never reaches the transport's token ids for an operator running GPT-OSS-120B locally. So on a
+sandboxed host the harness had no working check on its own no-leak guarantee for that backend, and
+the way it told you was 29 stack traces that read like a harness defect, not like a missing input.
+That is this document's own thesis in both directions at once: an unrunnable check that neither
+runs nor announces itself as unrun.
+
+**What changed.** `tests/test_llm_backend_harmony_gpt_oss.py` had one gate, `HARMONY_INSTALLED`,
+for two requirements. It now has two: `requires_harmony` (the SDK imports — 15 sites) and
+`requires_harmony_vocab` (the SDK can also load its tokeniser — 27 function sites, 29 items). The
+second mark's predicate is an attempted `load_harmony_encoding()` at module import, i.e. the real
+thing, not a directory or network probe that could certify a corrupt file or an unparsed CDN.
+`tools/bin/fetch-harmony-vocab` provisions the vocab (sha256-checked against `openai-harmony`'s
+own `446a9538…b1a2d`, mirror-overridable via `HARMONY_VOCAB_URL`, atomic, idempotent) and
+`tests/conftest.py` points `TIKTOKEN_ENCODINGS_BASE` at it — the SDK's own documented offline load
+path, which hash-verifies what it reads. See ADR-0150 for the rejected alternatives
+(`TIKTOKEN_RS_CACHE_DIR` seeding; vendoring the blob).
+
+**Measured, post-fix, same host:**
+
+| Condition | Result |
+| --- | --- |
+| vocab provisioned (`tools/bin/fetch-harmony-vocab`, conftest wires the env var) | **48 passed** |
+| vocab absent (`TIKTOKEN_ENCODINGS_BASE` pointed at an empty directory) | **19 passed, 29 skipped**, each skip naming the SDK's verbatim error and the script that fixes it |
+
+**What is still not proven, stated plainly.** A skip is not a pass. On a host with no vocab the
+no-leak test still does not run — it now *says* it did not run, and names the one command that
+would let it. Nothing in this change makes an unprovisioned host prove anything it did not prove
+before; it makes the gap legible instead of noisy. And the vocab makes the *tokeniser* real, not
+the endpoint: `_VllmCompletionsTransport`'s wire contract against a live vLLM server remains
+unverified exactly as `harmony_gpt_oss.py`'s own `_VllmCompletionsTransport` docstring says, and
+the `LLM backends (Anthropic / OpenAI-compatible)` row's **FAKE, correctly** verdict is untouched
+by this entry.
+

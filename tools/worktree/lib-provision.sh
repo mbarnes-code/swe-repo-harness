@@ -65,15 +65,34 @@ provision_worktree() {
   # references/*/ (third-party citation corpora) are deliberately NOT linked here: read-only
   # material, cited by absolute path into the primary checkout when needed.
 
+  # tools/harmony-vocab: `openai-harmony`'s o200k_base.tiktoken, which `tests/conftest.py` points
+  # TIKTOKEN_ENCODINGS_BASE at. Git-ignored, so `git worktree add` never carries it, and without it
+  # 29 of tests/test_llm_backend_harmony_gpt_oss.py's 48 items skip (ADR-0150, D147). Hardlinked
+  # from the primary rather than re-fetched: a linked worktree shares a filesystem with the primary
+  # by construction, and the primary's copy is already sha256-verified. If the primary has none,
+  # this is not an error -- run tools/bin/fetch-harmony-vocab (which needs network) in either tree.
+  if [ -f "$primary/tools/harmony-vocab/o200k_base.tiktoken" ] &&
+     [ ! -f "$wt/tools/harmony-vocab/o200k_base.tiktoken" ]; then
+    mkdir -p "$wt/tools/harmony-vocab"
+    cp -l "$primary/tools/harmony-vocab/o200k_base.tiktoken" \
+          "$wt/tools/harmony-vocab/o200k_base.tiktoken"
+    say "link tools/harmony-vocab/o200k_base.tiktoken"
+  elif [ ! -f "$primary/tools/harmony-vocab/o200k_base.tiktoken" ]; then
+    say "no tools/harmony-vocab in primary -- Harmony vocab tests will SKIP (tools/bin/fetch-harmony-vocab)"
+  fi
+
   # .venv: hardlink copy of the primary's, then rewrite the absolute paths it bakes in.
   # NOT symlinked -- .venv/lib/python3.12/site-packages/_editable_impl_fleet.pth is a bare
   # absolute path to the PRIMARY's src/. A symlinked venv would still pass pytest (pyproject.toml
   # sets pythonpath=["src"] and tests/conftest.py inserts REPO_ROOT/src, both worktree-relative)
   # but `.venv/bin/fleet` and any plain `python -c "import fleet"` would silently import the
   # primary's source, not this worktree's.
-  # NOT `uv sync` -- there is no uv.lock in this repo and every pin in pyproject.toml is a floor
-  # (`>=`), so a fresh resolve is a network operation that can drift from what the primary is
-  # tested against, and `uv` is not on PATH outside `.venv/bin/uv` on this host anyway.
+  # NOT `uv sync` -- `uv` is not on PATH outside `.venv/bin/uv` on this host, and a fresh resolve
+  # is a network operation that can drift from what the primary is tested against. (Corrected
+  # 2026-09-25: the original reason given here opened with "there is no uv.lock in this repo",
+  # which `uv.lock` being tracked at HEAD has falsified. The decision is unchanged -- a hardlink
+  # copy of the primary's `.venv` is the only offline path that guarantees byte-identical
+  # versions -- and the falsified clause is removed rather than the whole reason rewritten.)
   if [ -d "$wt/.venv" ]; then
     say ".venv already present, not re-cloned (rm -rf \"$wt/.venv\" first to force a re-clone)"
   else

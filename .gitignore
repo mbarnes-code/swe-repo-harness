@@ -65,6 +65,7 @@ tools/go/
 tools/rust/
 tools/bin/*
 !tools/bin/cargo
+!tools/bin/fetch-harmony-vocab
 !tools/bin/gazelle
 !tools/bin/go
 !tools/bin/rustc
@@ -108,3 +109,10 @@ references/*/
 
 # ---- Claude Code per-user local overrides (machine- and session-specific) ----
 .claude/settings.local.json
+
+# ---- Harmony tokeniser vocab (openai-harmony's o200k_base.tiktoken, ~3.6 MB) ----
+# NOT vendored: it is a third-party data blob with its own provenance, and `openai-harmony`
+# verifies its sha256 itself. `tools/bin/fetch-harmony-vocab` fetches and hash-checks it into
+# this directory; `tests/conftest.py` points TIKTOKEN_ENCODINGS_BASE here when it is present, and
+# `tests/test_llm_backend_harmony_gpt_oss.py` skips (loudly, naming the script) when it is not.
+tools/harmony-vocab/*.tiktoken

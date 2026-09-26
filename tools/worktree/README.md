@@ -67,6 +67,7 @@ none of it arrives on its own. `new-worktree.sh` provisions all of it.
 | `tools/bazelisk/downloads` (120 MiB) | symlink to primary | pure release-archive cache, safe to share |
 | `tools/bazelisk/output` (353 MiB) | **own empty directory** | it is a live Bazel `--output_user_root` (install base, MD5-keyed output bases, lock files). Sharing it across concurrent worktrees is precisely the collision this setup exists to prevent |
 | `references/*/` | **not provisioned** | read-only citation corpora; read the primary's copy by absolute path |
+| `tools/harmony-vocab/o200k_base.tiktoken` (3.4 MiB) | **hardlink** from primary, skipped (with a notice) if the primary has none | `openai-harmony` does not ship its tokeniser vocab in the wheel and fetches it from a CDN a sandbox cannot reach. Hardlinked rather than re-fetched: a linked worktree shares a filesystem with the primary, and the primary's copy is already sha256-verified. Without it, 29 of `tests/test_llm_backend_harmony_gpt_oss.py`'s 48 items SKIP — run `tools/bin/fetch-harmony-vocab` (needs network) in either tree. See ADR-0150 / D147 |
 
 Note the symlink shape: the *parent* is a real directory and only the children are symlinks.
 `.gitignore` says `tools/go/`, and a trailing-slash pattern matches only real directories — git
@@ -85,14 +86,9 @@ line: `/home/redmage/swe repo harness/src`. Under a symlinked venv:
   `src/`. An agent would edit its own worktree and exercise someone else's code, with nothing
   visible to say so. That is a worse failure than the one being fixed.
 
-**Not `uv sync`.** Two facts, both checked in this repo:
-
-* **there is no `uv.lock`** (contrary to a common assumption — `ls uv.lock` → no such file), and
-* every pin in `pyproject.toml` is a floor (`pydantic>=2.11`, `pytest>=8.3`, …).
-
-So a fresh resolve is a *network* operation that can legitimately install different versions than
-the primary is tested against — lanes would drift from the trunk and from each other. Note also
-that `uv` is not on `PATH` at all on this host; the only copy is `.venv/bin/uv`.
+**Not `uv sync`.** Even with `uv.lock` tracked, provisioning here needs an offline,
+byte-identical environment copied from the primary; a fresh resolve remains a network operation
+and can drift from what the primary is tested against if indexes/caches differ between runs.
 
 The hardlink copy is offline, ~2 seconds, byte-identical to the primary, and — because `sed -i`
 writes a temp file and renames — the rewritten files get fresh inodes rather than corrupting the

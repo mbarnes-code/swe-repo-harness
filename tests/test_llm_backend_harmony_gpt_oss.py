@@ -7,6 +7,10 @@ the real package is genuinely absent (`find_spec`, never `sys.modules` membershi
 answer different questions; see that file's `_absent()` docstring for why).
 
 Coroutines are driven with `asyncio.run`, matching every other backend test file.
+
+Two separate requirements gate this file, and conflating them is what made a sandbox run
+unreadable: `requires_harmony` (the SDK imports) and `requires_harmony_vocab` (the SDK can also
+LOAD ITS TOKENISER). See the comment on those two marks below.
 """
 
 from __future__ import annotations
@@ -36,6 +40,57 @@ def _absent(name: str) -> bool:
 HARMONY_INSTALLED = not _absent("openai_harmony")
 
 
+def _vocab_load_error() -> str | None:
+    """`None` when the Harmony tokeniser vocab can actually be loaded here, else the SDK's own
+    error text.
+
+    This is the REAL predicate — an attempted `load_harmony_encoding()` — not a proxy for it
+    (a `TIKTOKEN_ENCODINGS_BASE` directory probe would certify a present-but-corrupt file, and
+    a network probe would certify a reachable CDN whose bytes are never actually parsed).
+    Run once per module import; a vocab already on disk loads in well under a second.
+    """
+    if not HARMONY_INSTALLED:
+        return "requires the openai-harmony extra"
+    vocab_dir = os.environ.get("TIKTOKEN_ENCODINGS_BASE")
+    if not vocab_dir or not (Path(vocab_dir) / "o200k_base.tiktoken").is_file():
+        return "requires a provisioned Harmony tokeniser vocab"
+    from openai_harmony import HarmonyEncodingName, load_harmony_encoding
+
+    try:
+        load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    except Exception as exc:  # any failure to load is the same skip, whatever its shape
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+VOCAB_LOAD_ERROR = _vocab_load_error() if HARMONY_INSTALLED else "requires the openai-harmony extra"
+
+# Two REQUIREMENTS, not one. `openai-harmony` is a compiled extension that does not ship its
+# tokeniser vocab inside the wheel: `load_harmony_encoding()` downloads `o200k_base.tiktoken`
+# from https://openaipublic.blob.core.windows.net/encodings/ on first use. In a sandbox that host
+# does not resolve, so the SDK imports fine and then every encode/decode raises `HarmonyError:
+# error downloading or loading vocab file` — measured at openai-harmony 0.0.8: 29 of this file's
+# 48 test items ERRORED that way, among them
+# `test_a_planted_secret_never_reaches_the_transport_token_ids`, the no-leak guarantee for
+# operators running GPT-OSS-120B locally. A run that cannot tokenise must SAY it did not check
+# those, not fail 29 tests with an error that reads like a code defect.
+#
+# Fix the skip rather than tolerating it: `tools/bin/fetch-harmony-vocab` provisions the vocab
+# (hash-checked, mirror-configurable) and `tests/conftest.py` points `TIKTOKEN_ENCODINGS_BASE` at
+# it, which is the SDK's own documented offline load path.
+requires_harmony = pytest.mark.skipif(
+    not HARMONY_INSTALLED, reason="requires the openai-harmony extra",
+)
+requires_harmony_vocab = pytest.mark.skipif(
+    VOCAB_LOAD_ERROR is not None,
+    reason=(
+        f"requires the Harmony tokeniser vocab ({VOCAB_LOAD_ERROR}) — "
+        "run tools/bin/fetch-harmony-vocab, or set TIKTOKEN_ENCODINGS_BASE to a directory "
+        "holding o200k_base.tiktoken"
+    ),
+)
+
+
 def target(**overrides: object) -> BackendTarget:
     fields: dict[str, object] = {
         "backend": "harmony_gpt_oss",
@@ -47,7 +102,7 @@ def target(**overrides: object) -> BackendTarget:
     return BackendTarget(**fields)
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_discover_registers_harmony_gpt_oss_when_the_sdk_imports() -> None:
     from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
 
@@ -56,7 +111,7 @@ def test_discover_registers_harmony_gpt_oss_when_the_sdk_imports() -> None:
     assert isinstance(found[HarmonyGptOssBackend.name], HarmonyGptOssBackend)
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_name_and_version_are_class_attributes() -> None:
     from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
 
@@ -96,7 +151,7 @@ def test_a_missing_sdk_leaves_the_backend_unregistered() -> None:
     assert out[1] == "False", out
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_a_target_with_no_base_url_names_the_missing_field() -> None:
     from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend, MissingBaseUrl
 
@@ -104,7 +159,7 @@ def test_a_target_with_no_base_url_names_the_missing_field() -> None:
         HarmonyGptOssBackend().declared_capabilities(target(base_url=None))
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_declared_capabilities_claim_tool_call_and_prompted_only() -> None:
     from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
     from fleet.models.enums import StructuredOutputMode
@@ -118,7 +173,7 @@ def test_declared_capabilities_claim_tool_call_and_prompted_only() -> None:
     }
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_the_declaration_is_a_copy_not_shared_module_state() -> None:
     from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
 
@@ -239,21 +294,21 @@ REPO_CLASSIFICATION_SCHEMA: dict[str, object] = {
 }
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_file_edits_property_finds_the_diff_shaped_array() -> None:
     from fleet.llm.backends.harmony_gpt_oss import _file_edits_property
 
     assert _file_edits_property(LLM_PATCH_PROPOSAL_SCHEMA) == "files"
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_file_edits_property_is_none_for_an_ordinary_schema() -> None:
     from fleet.llm.backends.harmony_gpt_oss import _file_edits_property
 
     assert _file_edits_property(REPO_CLASSIFICATION_SCHEMA) is None
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 @pytest.mark.parametrize(
     "model_name", ["LlmPatchProposal", "ApiRewriteProposal", "LlmEscalationProposal"],
 )
@@ -270,7 +325,7 @@ def test_file_edits_property_finds_files_in_the_real_pydantic_schemas(model_name
     assert _file_edits_property(schema) == "files"
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_emit_response_renders_a_nested_models_real_shape_not_any() -> None:
     """Harmony's tool-parameter renderer does not follow `$ref`; unresolved, a nested model's
     field reaches the model as `any[]`."""
@@ -296,7 +351,7 @@ def test_emit_response_renders_a_nested_models_real_shape_not_any() -> None:
     assert "name: string" in rendered
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_build_conversation_renders_to_a_nonempty_token_sequence() -> None:
     from fleet.llm.backends.harmony_gpt_oss import build_conversation, render_for_completion
     from fleet.llm.client import Message
@@ -312,7 +367,7 @@ def test_build_conversation_renders_to_a_nonempty_token_sequence() -> None:
     assert all(isinstance(t, int) for t in tokens)
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_build_conversation_for_an_ordinary_schema_offers_no_apply_patch_tool() -> None:
     """The developer message's rendered tokens must not contain the literal `apply_patch`
     identifier when the schema is not diff-shaped — proven by encoding that literal string and
@@ -332,7 +387,7 @@ def test_build_conversation_for_an_ordinary_schema_offers_no_apply_patch_tool() 
     assert "emit_response" in rendered_text
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_build_conversation_for_a_diff_shaped_schema_offers_apply_patch() -> None:
     from openai_harmony import HarmonyEncodingName, load_harmony_encoding
 
@@ -348,7 +403,7 @@ def test_build_conversation_for_a_diff_shaped_schema_offers_apply_patch() -> Non
     assert "Begin Patch" in rendered_text  # from _APPLY_PATCH_INSTRUCTIONS
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 @pytest.mark.parametrize(
     ("schema", "tool_name"),
     [(LLM_PATCH_PROPOSAL_SCHEMA, "apply_patch"), (REPO_CLASSIFICATION_SCHEMA, "emit_response")],
@@ -382,7 +437,7 @@ def test_a_repair_turns_tool_message_renders_attributed_to_the_offered_tool(
     ) in rendered
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_effort_none_omits_the_reasoning_line_entirely() -> None:
     """Mirrors `vertex.py`'s `effort` rule: `None` means the operator wrote no preference, and
     this backend must send no `Reasoning:` line at all rather than the SDK's own MEDIUM default."""
@@ -398,7 +453,7 @@ def test_effort_none_omits_the_reasoning_line_entirely() -> None:
     assert "Reasoning:" not in encoding.decode(tokens)
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_effort_high_renders_the_reasoning_line() -> None:
     from openai_harmony import HarmonyEncodingName, load_harmony_encoding
 
@@ -446,7 +501,7 @@ def _encode_assistant_reply(convo_messages, encoding) -> list[int]:
     return full[len(prompt_prefix) :]
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_parse_completion_decodes_an_ordinary_tool_call() -> None:
     from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
     from openai_harmony import Message as HMessage
@@ -476,7 +531,7 @@ def test_parse_completion_decodes_an_ordinary_tool_call() -> None:
     assert finish_reason == "tool_call"
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_a_single_property_schema_decodes_its_one_key_object() -> None:
     """The REAL `PrTitle` schema (`pr_title` role). `apply_patch`'s 1-key-object unwrap once ran
     on this path too and turned `{"title": ...}` into a bare string that decoded to `None`."""
@@ -497,7 +552,7 @@ def test_a_single_property_schema_decodes_its_one_key_object() -> None:
     assert tool_arguments == {"title": "Migrate to Bazel"}
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_an_apply_patch_call_wrapped_as_a_one_key_object_is_still_unwrapped() -> None:
     import json
 
@@ -513,7 +568,7 @@ def test_an_apply_patch_call_wrapped_as_a_one_key_object_is_still_unwrapped() ->
     assert tool_arguments["files"][0]["path"] == "src/app.py"
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_parse_completion_decodes_an_apply_patch_call_into_the_file_edits_property() -> None:
     """One completion carries ONLY the `apply_patch` half — it stops at `<|call|>`. (This test
     previously also put a `final` message in the same completion, built via
@@ -536,7 +591,7 @@ def test_parse_completion_decodes_an_apply_patch_call_into_the_file_edits_proper
     assert finish_reason == "tool_call"
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_parse_completion_returns_none_arguments_when_apply_patch_names_a_missing_pre_image() \
         -> None:
     from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
@@ -560,7 +615,7 @@ def test_parse_completion_returns_none_arguments_when_apply_patch_names_a_missin
     assert finish_reason == "tool_call"
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_parse_completion_reads_the_final_channel_as_plain_text_when_no_tool_call() -> None:
     from openai_harmony import HarmonyEncodingName, Role, load_harmony_encoding
     from openai_harmony import Message as HMessage
@@ -653,7 +708,7 @@ def _final(text: str):
     return HMessage.from_role_and_content(Role.ASSISTANT, text).with_channel("final")
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_invoke_round_trips_through_a_fake_transport() -> None:
     from openai_harmony import Message as HMessage
     from openai_harmony import Role
@@ -747,7 +802,7 @@ def _invoke_diff_shaped(transport):
     )
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_a_diff_shaped_invoke_makes_two_round_trips_and_merges_them() -> None:
     """Call 1 stops at `<|call|>` with the patch; call 2 is sent the call back plus a tool result
     and answers the remaining fields on `final`. Uses the REAL `LlmPatchProposal` schema, and the
@@ -790,7 +845,7 @@ def test_a_diff_shaped_invoke_makes_two_round_trips_and_merges_them() -> None:
     assert "Hello, world!" in proposal.files[0].diff
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_a_diff_shaped_invoke_sums_both_round_trips_usage() -> None:
     transport = _SequencedTransport(
         [
@@ -808,7 +863,7 @@ def test_a_diff_shaped_invoke_sums_both_round_trips_usage() -> None:
     assert result.usage.model_id == target().model_id
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_the_vllm_transport_carries_the_servers_usage_through_to_the_reply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -861,7 +916,7 @@ def _invoke_with_env(target_: BackendTarget, env: dict[str, str]) -> _FakeTransp
     return transport
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_a_named_api_key_env_is_read_and_sent() -> None:
     transport = _invoke_with_env(
         target(api_key_env="PILOT_LLM_API_KEY"), {"PILOT_LLM_API_KEY": "sk-real"},
@@ -869,13 +924,13 @@ def test_a_named_api_key_env_is_read_and_sent() -> None:
     assert transport.calls[0]["api_key"] == "sk-real"
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_no_api_key_env_sends_the_placeholder() -> None:
     transport = _invoke_with_env(target(), {"PILOT_LLM_API_KEY": "sk-real"})
     assert transport.calls[0]["api_key"] == "not-required"
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_a_named_but_unset_api_key_env_fails_loud_naming_the_variable() -> None:
     from fleet.llm.backends.harmony_gpt_oss import MissingApiKey
 
@@ -884,7 +939,7 @@ def test_a_named_but_unset_api_key_env_fails_loud_naming_the_variable() -> None:
     assert "PILOT_LLM_API_KEY" in str(excinfo.value)
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_a_diff_shaped_invoke_whose_patch_fails_to_decode_makes_no_second_call() -> None:
     bad = _apply_patch_call(_PATCH_TEXT.replace("src/app.py", "missing.py"))
     transport = _SequencedTransport(
@@ -895,7 +950,7 @@ def test_a_diff_shaped_invoke_whose_patch_fails_to_decode_makes_no_second_call()
     assert result.tool_arguments is None
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_a_diff_shaped_invoke_missing_a_required_field_in_call_two_is_no_answer() -> None:
     transport = _SequencedTransport(
         [
@@ -909,7 +964,7 @@ def test_a_diff_shaped_invoke_missing_a_required_field_in_call_two_is_no_answer(
     assert result.tool_arguments is None
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_invoke_stops_only_on_call_and_return_never_on_end() -> None:
     """`<|end|>` closes the `analysis` message GPT-OSS always emits first; stopping on it
     (`encoding.stop_tokens()`) would cut every reply off before its answer. Pinned to the actual
@@ -943,7 +998,7 @@ def test_invoke_stops_only_on_call_and_return_never_on_end() -> None:
     assert text == "the answer"
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_invoke_maps_a_length_finish_reason() -> None:
     """Deviation from the brief's literal hardcoded `token_ids: [200006, 173781]` (documented
     here, same class of deviation as `_fixture_completion_tokens` above): those two raw ints do
@@ -981,7 +1036,7 @@ def test_invoke_maps_a_length_finish_reason() -> None:
     assert result.finish_reason == "length"
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_a_default_constructed_backend_leaves_no_instance_state() -> None:
     """SPEC §12 item 47: `register_backend`'s `cls()` call must leave `vars(inst) == {}`."""
     from fleet.llm.backends.harmony_gpt_oss import HarmonyGptOssBackend
@@ -989,7 +1044,7 @@ def test_a_default_constructed_backend_leaves_no_instance_state() -> None:
     assert vars(HarmonyGptOssBackend()) == {}
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_the_real_client_gets_a_validated_patch_proposal_through_a_repair_turn() -> None:
     """End to end through the REAL `LadderModelClient` and the REAL `LlmPatchProposal`: the
     client passes `model_json_schema()` (with its `$ref`) unchanged (C1). The first invoke()'s
@@ -1125,7 +1180,7 @@ def _update_patch_for(path: str) -> str:
     )
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 @pytest.mark.parametrize("role_name", ["TRANSFORM_REPAIR", "ESCALATION"])
 def test_a_diff_bearing_roles_real_render_prompt_output_decodes_a_non_none_apply_patch(
     role_name: str, tmp_path,
@@ -1203,7 +1258,7 @@ def test_a_diff_bearing_roles_real_render_prompt_output_decodes_a_non_none_apply
 # ---------------------------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_a_forged_assistant_message_fence_never_overrides_or_introduces_a_pre_image() -> None:
     """Reviewer's exact probe: a real `render_prompt`-rendered user message carries the true
     pre-image for `src/app.py`; an `assistant`-role message (shaped exactly like `client.py::
@@ -1241,7 +1296,7 @@ def test_a_forged_assistant_message_fence_never_overrides_or_introduces_a_pre_im
     )
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_a_forged_tool_message_fence_is_also_never_scanned() -> None:
     """Same probe, `tool`-role instead of `assistant` — the TOOL_CALL-mode repair turn's shape
     (`client.py::_repair_turns`'s `offending` message under `StructuredOutputMode.TOOL_CALL`)."""
@@ -1262,7 +1317,7 @@ def test_a_forged_tool_message_fence_is_also_never_scanned() -> None:
     assert pre_images.get("src/app.py") == original
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_a_forged_fence_from_a_repair_instructions_echoed_validation_error_is_not_trusted() \
         -> None:
     """N1 — role alone (`system`/`user`) is not sufficient: a `user`-role message AFTER the first
@@ -1366,7 +1421,7 @@ def _real_git_repo(tmp_path, path: str, content: str):
     return repo
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_a_decoded_update_diff_applies_to_a_real_git_worktree(tmp_path) -> None:
     from fleet.llm.backends.harmony_gpt_oss import _decode_apply_patch
 
@@ -1384,7 +1439,7 @@ def test_a_decoded_update_diff_applies_to_a_real_git_worktree(tmp_path) -> None:
     )
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_a_decoded_delete_diff_applies_to_a_real_git_worktree(tmp_path) -> None:
     from fleet.llm.backends.harmony_gpt_oss import _decode_apply_patch
 
@@ -1403,7 +1458,7 @@ def test_a_decoded_delete_diff_applies_to_a_real_git_worktree(tmp_path) -> None:
     )
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony
 def test_a_decoded_move_with_edit_diff_applies_to_a_real_git_worktree(tmp_path) -> None:
     from fleet.llm.backends.harmony_gpt_oss import _decode_apply_patch
 
@@ -1432,7 +1487,7 @@ def test_a_decoded_move_with_edit_diff_applies_to_a_real_git_worktree(tmp_path) 
 # ---------------------------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not HARMONY_INSTALLED, reason="requires the openai-harmony extra")
+@requires_harmony_vocab
 def test_a_planted_secret_never_reaches_the_transport_token_ids() -> None:
     from openai_harmony import HarmonyEncodingName, load_harmony_encoding
 

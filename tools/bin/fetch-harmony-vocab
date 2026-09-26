@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Provisions `openai-harmony`'s tokeniser vocab (o200k_base.tiktoken, ~3.6 MB) into
+# tools/harmony-vocab/, which `tests/conftest.py` points TIKTOKEN_ENCODINGS_BASE at. The wheel
+# does not ship the vocab and downloads it from OpenAI's CDN on first use; in a sandbox that host
+# does not resolve and every encode/decode raises `HarmonyError: error downloading or loading
+# vocab file`, skipping 29 of tests/test_llm_backend_harmony_gpt_oss.py's 48 items. See ADR-0150.
+#
+# The blob is git-ignored, never vendored (.gitignore: tools/harmony-vocab/*.tiktoken): it is a
+# third-party data file with its own provenance, and the sha256 below -- `openai-harmony`'s own
+# `expected_hash()` for O200kBase/O200kHarmony, which its loader re-verifies on every offline
+# read -- is what makes a copy trustworthy, not this repository's possession of it.
+#
+# Idempotent: a present file that hashes right is left alone; a present file that hashes WRONG is
+# reported and NOT overwritten (Rule 11 -- fail loud, never silently replace). Needs network.
+#
+# Usage: tools/bin/fetch-harmony-vocab
+#   HARMONY_VOCAB_URL=<url>   override the source (safe: the bytes are hash-checked either way)
+set -euo pipefail
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+
+url=${HARMONY_VOCAB_URL:-https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken}
+expected=446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d
+dest_dir=$repo_root/tools/harmony-vocab
+dest=$dest_dir/o200k_base.tiktoken
+
+sha256_of() {
+  sha256sum "$1" | cut -d' ' -f1
+}
+
+if [ -f "$dest" ]; then
+  actual=$(sha256_of "$dest")
+  if [ "$actual" = "$expected" ]; then
+    echo "$dest already present and sha256-verified; nothing to do"
+    exit 0
+  fi
+  echo "ERROR: $dest is present but hashes wrong" >&2
+  echo "  expected $expected" >&2
+  echo "  actual   $actual" >&2
+  echo "Refusing to overwrite it. Inspect the file, then remove it and re-run." >&2
+  exit 1
+fi
+
+mkdir -p "$dest_dir"
+tmp=$(mktemp "$dest_dir/.o200k_base.tiktoken.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+
+echo "fetching $url"
+if ! curl --fail --location --silent --show-error --output "$tmp" "$url"; then
+  echo "ERROR: download failed (this script needs network access to $url)" >&2
+  exit 1
+fi
+
+actual=$(sha256_of "$tmp")
+if [ "$actual" != "$expected" ]; then
+  echo "ERROR: downloaded bytes do not match openai-harmony's expected sha256" >&2
+  echo "  expected $expected" >&2
+  echo "  actual   $actual" >&2
+  echo "  source   $url" >&2
+  exit 1
+fi
+
+chmod 644 "$tmp"
+mv -f "$tmp" "$dest"
+trap - EXIT
+echo "installed $dest (sha256 $expected)"

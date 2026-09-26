@@ -11948,3 +11948,69 @@ gaps or duplicates). No met-count is claimed. The 48 criteria previously recorde
 were NOT re-verified in Round B — permitted under the orchestrator's ruling above, but stated
 plainly so nobody reads this checkpoint as having re-derived them. §12.49–51 remain `OPEN`; §12.51
 progressed (stub legs of (i) and (iii), and (ii)) without closing.
+
+---
+
+## Checkpoint — 2026-09-25 — Harmony tokeniser vocab provisioned; `openai` 3.17.0 adjudicated (ADR-0150, D147)
+
+**Renumbered on merge (2026-09-26).** Authored on `github/main` citing ADR-0147; renumbered to
+ADR-0150 here and in `docs/DECISIONS.md` to resolve a collision with a concurrently-numbered,
+unrelated ADR-0147 on `main` (Rule 13's all-criteria-met state). D147 is unaffected — no D-number
+collision existed. Body otherwise verbatim from the original checkpoint.
+
+**What was completed.** Two things, in dependency order — the second was unmeasurable until the
+first was fixed.
+
+1. `openai-harmony`'s tokeniser vocab is now a provisioned, hash-verified test input rather than a
+   silent network dependency. New `tools/bin/fetch-harmony-vocab` (sha256 `446a9538…b1a2d`, the
+   SDK's own `expected_hash()`; `HARMONY_VOCAB_URL` mirror override; atomic; idempotent; refuses to
+   overwrite a wrong-hash file rather than replacing it). `tests/conftest.py` points
+   `TIKTOKEN_ENCODINGS_BASE` at `tools/harmony-vocab/` when the file is present — `setdefault`,
+   `REPO_ROOT`-derived, same shape as the `BAZELISK_HOME` line in the same block. The blob is
+   git-ignored, never vendored. `tests/test_llm_backend_harmony_gpt_oss.py`'s single
+   `HARMONY_INSTALLED` gate is split into `requires_harmony` (15 sites) and
+   `requires_harmony_vocab` (27 function sites / 29 items).
+2. `openai` 3.5.0 → 3.17.0 adjudicated: **no Harmony formatting regression, so 3.5.0 is NOT
+   pinned.** `pyproject.toml` keeps `openai>=1.60`; no upper bound added; `uv.lock` untouched.
+
+**What was verified.** Every number below was measured on this host this round, not carried
+forward.
+
+| Measurement | Pre-fix | Post-fix |
+| --- | --- | --- |
+| `pytest tests/test_llm_backend_harmony_gpt_oss.py`, no vocab reachable | **29 failed, 19 passed** | **29 skipped, 19 passed** (each skip names the SDK error and `tools/bin/fetch-harmony-vocab`) |
+| same file, vocab provisioned | n/a (could not run) | **48 passed** |
+| 12 other `openai`/harmony-touching test files, no vocab | 313 passed (file was the only one affected) | unchanged |
+| 13 `openai`/harmony-touching files, whole files, no `-k`, `openai==3.5.0` | — | **361 passed** |
+| same 13 files, `openai==3.17.0` | — | **361 passed** |
+
+Two further derivations, both validated against a synthetic fault before their clean result was
+believed (Guardrail 6): a **wire-level differential** (real SDK + `httpx.MockTransport`, capturing
+POST URL / headers / request JSON / transport return) came out **byte-identical** across the two
+`openai` versions, and moved when `skip_special_tokens` was flipped in a source copy; an
+**error-taxonomy differential** over seven cases (HTTP 500/503/429/400/404, connect error, read
+timeout) mapped **identically** under both versions, and moved when the `>= 500` threshold was
+mutated to `>= 599`. That second probe exists because no test in the suite drives a real SDK
+error — a renamed exception class would otherwise have turned a retryable transport fault into a
+raw SDK exception with nothing to notice.
+
+Both probes ran under `env -i` with `PYTHONPATH` pinned at the tree under test and separate venvs
+per `openai` version, so neither version's `site-packages` could leak into the other's run.
+
+**Rule 13 — §12 criteria movement: NONE, and this round does not claim any.** This is a
+defect-fix-plus-adjudication round (D147, ADR-0150), not a criteria-closing one. It is also
+**not** re-measuring the `<n> of 48` count: doing that honestly means walking all 48 criteria, and
+emitting a number carried forward from the last audit is exactly what Rule 13 forbids. Recorded
+here as disclosed debt — per Rule 13 the next round must be a criteria-closing one, and a
+re-measured `<n> of 48` belongs in its checkpoint. What this round *does* strengthen, without
+closing it, is §12.3's "no network" property for the one test file that silently violated it.
+
+**Not done, disclosed rather than silently skipped.** The two pre-existing `tests/test_lint_gate.py`
+failures are still pre-existing and still not this round's to fix — re-measured at a pristine
+detached worktree of `HEAD` this round to confirm they are not mine: `ruff check` reports the same
+single `src/fleet/ecosystems/jvm.py:30 E501`, and `ruff format --check` reports the same **121**
+dirty files against the pinned baseline of 117. `ruff check` is clean on both files this round
+touched.
+
+**Next subagent task.** A criteria-closing round against `docs/CRITERIA_PLAN.md`, opening with a
+direct re-measurement of §12 (`<n> of 48`), per the Rule 13 debt disclosed above.
