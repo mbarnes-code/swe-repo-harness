@@ -3110,6 +3110,10 @@ class BackendTarget(FleetModel):
     backend: str = Field(min_length=1, description="Must exist in the §7.7 backend registry")
     model_id: str = Field(min_length=1, description="Opaque to the harness; config data only")
     base_url: str | None = None          # required by `openai_compatible`; ignored by others
+    base_urls: tuple[str, ...] | None = None
+    # ADR-0149/§12.51: ONE logical target served by >= 2 distinct equal-peer REPLICA endpoints;
+    # XOR `base_url`. Resolved to one `base_url` per call (stable hash of the bound repo_id) on a
+    # per-call copy — a backend never sees this field.
     api_key_env: str | None = None       # NAME of the env var; never the value (§11.4)
     region: str | None = None            # bedrock / vertex transport selector
     effort: Literal["low", "medium", "high"] | None = None
@@ -6110,10 +6114,57 @@ silently downgraded past what the profile promised:
   message, which is the one transformation the negotiator is allowed to perform on content, and it
   is recorded in the prompt hash like any other rendering decision (§11.6).
 
+**File content is rendered as a raw fenced block, not folded into the JSON evidence blob
+(ADR-0146).** `render_prompt()` (`llm/calls.py::render_prompt`) serialises evidence with
+`ensure_ascii=True`, which is correct for structured fields but wrong for a diff's context lines: a
+JSON string escapes a real newline/quote byte to a literal two-character `\n`/`\"`, and a
+V4A/unified-diff hunk's context has to match the real file byte-for-byte. So the one evidence key
+verified to carry a literal file's on-disk content (`current_content`, alongside a sibling `"path"`
+key — `workers/rewrite.py::_evidence`, `TRANSFORM_REPAIR`/`ESCALATION`) is pulled out of the
+mapping AFTER redaction but BEFORE JSON serialisation and appended as one raw fenced block instead,
+via `fleet.llm.fences.fence_file` — the ONE shared module both `render_prompt()` (writer) and
+`llm/backends/harmony_gpt_oss.py::_extract_pre_images` (reader) use, so the two can never drift out
+of sync. The fence is CommonMark-safe (a backtick run one longer than the longest run inside the
+content, minimum 3) and the round trip is exact for any content, including embedded backtick runs,
+CRLF, a missing or extra trailing newline, and non-ASCII UTF-8 (`fleet.llm.fences` module
+docstring; property-tested in `tests/test_llm_fences.py`). Redaction is unaffected — the fenced
+content is read off the ALREADY-`redact_mapping()`-ed evidence, exactly like every other field.
+
+**Injection-safety trust boundary (corrected TWICE, 2026-09-25, after independent review found each
+prior version exploitable — role alone is not enough, only POSITION is).** A real file's content
+can itself contain text shaped like a fenced block naming an arbitrary path — this repository's own
+source is exactly such content — and a `user`-role message is not always harness-authored either:
+`llm/client.py::_repair_turns` builds a repair round's instruction message as `Message(role="user",
+content=_REPAIR_INSTRUCTION.format(error=detail))` where `detail = str(exc)` is a Pydantic
+`ValidationError`, and `FleetModel`'s `extra="forbid"` means an unexpected key in a malformed model
+reply is quoted VERBATIM into that error text — backticks and newlines included. The trust boundary
+`_extract_pre_images` actually relies on is POSITIONAL: only the messages that exist strictly
+BEFORE the first `assistant`/`tool`-role message — `render_prompt()`'s own ORIGINAL prompt output,
+before any model reply exists anywhere in the conversation — are guaranteed to predate any model
+influence (`harmony_gpt_oss.py::_original_prompt_messages`). `_extract_pre_images` scans only that
+prefix and trusts every top-level block a sequential, non-overlapping scan finds inside one
+(`fleet.llm.fences.trusted_fenced_blocks`); nothing at or after the first `assistant`/`tool` turn is
+scanned, `user`-role messages included. Two earlier, narrower mechanisms were tried and both proved
+exploitable: deriving an "allowlist" by re-scanning the same text about to be trusted (restricts
+nothing), and later, scanning every `system`/`user`-role message regardless of POSITION (a later
+repair-turn `user` message can echo the model's own prior reply and is not reliably
+harness-authored). `fleet.llm.fences.parse_file_fences`/`discover_fenced_paths` remain available
+for a caller with a genuinely independent per-path allowlist sourced from somewhere other than the
+conversation itself; `git apply` remains the harness's sole worktree writer regardless, so any
+pre-image forgery that got past every layer here can still only ever produce a diff that fails to
+apply — a safe, loud failure, not silent corruption.
+
 **Evidence is untrusted input, and closing code-execution escalation is not the same as closing
-misleading-content influence.** `render_prompt()` (`llm/calls.py:258-290`) embeds an evidence
+misleading-content influence.** `render_prompt()` (`llm/calls.py:264-324`) embeds an evidence
 mapping as one `sort_keys=True` JSON blob under a fixed `_EVIDENCE_HEADER` label, with no reserved
-boundary marker and no framing beyond each role's natural-language `system` prompt. ADR-0008 closes
+boundary marker and no framing beyond each role's natural-language `system` prompt. **Corrected
+2026-09-25 (ADR-0146):** this is no longer true of the WHOLE evidence mapping — a file-content
+field (`current_content`, `TRANSFORM_REPAIR`/`ESCALATION`) is pulled out and rendered as a raw
+fenced block AFTER the JSON blob instead (see this section's injection-safety paragraph above),
+so the JSON-blob framing described in this paragraph now covers every evidence field except that
+one. The threat-model reasoning that follows is otherwise unaffected: a fenced file-content block
+is exactly as untrusted, and exactly as un-instruction-following, as a JSON string value would
+have been. ADR-0008 closes
 exactly one threat model: a model invoked under one of the five sanctioned classes cannot itself
 execute, apply, or verify anything — only code does — so a compromised or merely misleading
 evidence payload cannot escalate to file mutation, a git operation, or a self-graded verdict. It
@@ -6350,6 +6401,8 @@ config/
   repos.yaml                  # the fleet manifest: 250 repos
   models.yaml                 # ADR-0023: named profiles; role → tier → [BackendTarget]. The ONLY
                               #   place a model id or a base_url may appear (§12.40)
+  models.local.yaml           # OPTIONAL, gitignored (B2, §9): untracked real `pilot` endpoint
+                              #   values, overlaid onto models.yaml's committed template at load
   rules/*.yml                 # ast-grep RewriteRule definitions
   rules/secrets.txt           # git-filter-repo --replace-text list (§11.4)
 
@@ -6681,6 +6734,16 @@ llm:                          # ADR-0023. WHICH models answer is config/models.y
                               # Deliberately NOT a quality assertion — the harness cannot measure
                               #   that. It is the one mechanical precondition tier-1 work has:
                               #   a repo's evidence bundle must fit. See §13 row 38.
+  harmony_vocab_dir: null     # ADR-0148/§12.50 (offline-vocab half). A local directory holding
+                              #   the Harmony/tiktoken `o200k_base.tiktoken` vocab file. When set,
+                              #   `FleetSettings.load()` points the `openai-harmony` SDK's own
+                              #   `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR` env vars at it
+                              #   itself, before any `load_harmony_encoding()` call in the
+                              #   process — an operator never exports these — and fails loud HERE,
+                              #   at settings load, naming the path and the missing piece, if the
+                              #   directory or its vocab file is absent. `null` (the default)
+                              #   leaves both env vars untouched: the SDK falls back to its own
+                              #   default (network-fetched, cached) behaviour.
 
 pr:
   base: integration
@@ -6864,6 +6927,56 @@ profiles:
           api_key_env: ANTHROPIC_API_KEY, price: { in_per_mtok: 1.0, out_per_mtok: 5.0 } }
 ```
 
+A fifth profile, `pilot` (§15.2, ADR-0145/ADR-0148), routes all three tiers to one dedicated Spark
+host serving GPT-OSS-120b over Harmony via the `harmony_gpt_oss` backend; not shown above because
+it is illustrative-profile-listing noise here, not a second worked example — see
+`config/models.yaml` itself for its exact, current targets.
+
+**`config/models.local.yaml` — an untracked, gitignored local override (B2, round
+`pilot-criteria-bringup`).** This repo is public on GitHub, so a real Spark `base_url`
+may never be committed to `config/models.yaml`; the committed `pilot` profile carries a placeholder
+`base_url` for exactly this reason (the real served model name, `gpt-oss-120b`, is not sensitive
+and IS committed). An operator with real endpoint values creates `config/models.local.yaml`
+(`.gitignore`d; absent by default, so a fresh clone needs none) shaped as:
+
+```yaml
+profiles:
+  pilot:
+    HEAVY:     [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://10.0.0.5:8000/v1' } ]
+    WORKHORSE: [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://10.0.0.5:8000/v1' } ]
+    CHEAP:     [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://10.0.0.6:8000/v1' } ]
+```
+
+`FleetSettings.load()` reads this file (if present) and, for each override entry, matches it to a
+COMMITTED template target by **identity** — its `backend` + `model_id` pair, unique within a tier
+— never by list position (ADR-0026: "no reference may be a positional integer over a recomputed
+collection"; an index into this editable list would silently repoint to the wrong target the
+moment `config/models.yaml`'s target list is reordered or grows a second entry, with no error at
+all). Every override entry MUST carry `backend` and `model_id` to name which target it overlays;
+the matched target's other fields (`base_url`/`base_urls`, `api_key_env`, ...) are overlaid —
+`backend` and `model_id` are the match key and are therefore **not** overridable here (an entry
+naming a different `model_id` names a different target) — before `config/models.yaml`'s own
+validation rules (rules 1–5 below) run, and any field the override omits comes from the template
+unchanged. Naming a profile or tier the template does not define, an entry missing
+`backend`/`model_id`, a `backend`+`model_id` pair matching no template target in that tier or
+matching more than one (a same-model failover pair is ambiguous), or any malformed shape (a
+top-level key other than `profiles`, a non-mapping profile, a non-list tier, a non-mapping entry),
+is a loud startup error, never a silently-ignored or silently-misapplied override. This layer is
+**not** `FLEET_*` env (§9's "API keys come from the environment only" is unrelated and unaffected
+— this file carries no secret, only endpoint routing) and never asks an operator to export
+anything into their shell.
+
+**Replica endpoints — `base_urls` (ADR-0149, §12.51).** A target may name `base_urls: [<url>,
+<url>, ...]` (at least two distinct entries) instead of `base_url`: one logical target served by
+equal-peer replicas, distinct from the tier's ordered failover list. Each repo's calls go to one
+replica chosen by a stable hash of its `repo_id` (sha256, never `hash()`), bound once when the
+worker's context is built; if that replica fails at the transport level the call moves to its
+peer as an ordinary §11.8 failover hop (`backend_failover`, `attempts.llm_failovers`, never a
+charged attempt), before the next target in the tier. `llm.max_targets_per_call` counts logical
+targets, not replicas. The `llm_call` event's `base_url` field records which endpoint served each
+call. In `config/models.local.yaml`, naming `base_urls` on an entry replaces the template target's
+`base_url` (and vice versa); naming both is a startup error.
+
 Five rules the loader enforces at startup, before a repo is touched:
 
 1. **Every `roles` value is a `ModelTier` member**, and every tier named by any role has a
@@ -6871,7 +6984,8 @@ Five rules the loader enforces at startup, before a repo is touched:
    error, never a runtime `KeyError` in wave 7.
 2. **Every `backend` resolves** in the §7.7 registry — the adapters that actually imported on
    *this* host, never the four names the harness merely ships (ADR-0078) — and each backend
-   validates its own target fields — `openai_compatible` refuses a target with no `base_url`;
+   validates its own target fields — `openai_compatible` refuses a target with no `base_url`
+   (`base_urls`, ADR-0149, satisfies it);
    `bedrock`/`vertex` refuse one with no `region` (§13 row 36). **Only the SELECTED profile's
    targets are checked**, so a profile naming an optional-extra backend costs an unrelated
    operator nothing and exits 2 — naming `pip install 'fleet[<extra>]'` — for the operator who
@@ -7741,6 +7855,40 @@ whose exit code is the verdict — no item is satisfied by prose or by a model's
 46. **The model layer's own invariants, as assertions rather than as prose.** (i) Every model in `src/fleet/models/` survives `model_dump_json()` → `model_validate_json()` **with computed fields dropped** — a round-trip that re-supplies a computed field is a schema bug, asserted by comparing `model_fields` against the re-parsed instance rather than by comparing objects. (ii) An illegal `RepoStatus` transition raises; an abandoned repo is re-openable **only** through the audited `OPERATOR_REOPEN` map, and a test that drives every automatic sweep — the reaper, `fleet resume`, `stub_reconcile`, `blocked_by` recomputation — finds none of them able to move a repo out of `REQUIRES_HUMAN_INTERVENTION`, **nor to clear a `blocked_by` entry naming a repo that `fleet quarantine` set to `SKIPPED` under an audited `OperatorQuarantine` finding, nor one naming a repo that is `SKIPPED` for any other reason — a `SKIPPED` repo has not landed, so what excluded it does not bear on whether its dependents may migrate — nor to clear one naming a string it cannot resolve to a repo at all (a `contract_id`, or a name written by one of the three triggers of §3.5's propagation rule that have zero producers today — §3.1's failed SCC members, §3.4's `pr.merge_wait_timeout_s` breach, and §3.5's failed-contract descendants). Those three are additions, not restatements: the quantity the clause before them watches — whether a sweep moves a repo *out of* `REQUIRES_HUMAN_INTERVENTION` — is left *unchanged* by all three, so the recompute must remove only what it positively shows is no longer blocking (`orchestrator.reentry.still_blocking`, whose polarity ADR-0090 §2.4 rules R2-CLOSED), and this criterion must not be narrowed back to the RHI question to make it match a narrower predicate.** (iii) A write carrying a stale `lease_fence` is **rejected**, and a `WorkerResult` returning under a reclaimed lease is **discarded, not merged** (asserted by reaping a lease mid-worker and finding the late result absent from `phases`). (iv) An oversized `stderr` is **truncated** to 32 KiB and stored, never rejected — a build that fails with 8 MB of output must still record why. (v) `edges.edge_key` is byte-stable across a full graph rebuild for an unchanged fixture (§12.23's row counts plus key-by-key equality). (vi) Two concurrent claims of one `(repo, phase)` yield exactly one winner and one `rowcount == 0` loser. (vii) A `partial` `WorkerResult` resumed from its checkpoint adds **zero** duplicate commits and replays no `completed_unit`.
 47. **The registries are stateless, total, and order-independent** (§7.2, ADR-0020/0023). `preconditions_hold` is **abstract on `BaseWorker`** and overridden by every shipped worker — asserted by walking `workers.discover()` and failing on any class inheriting the base implementation, since a worker that silently always-precondition-true is how a resume re-runs a completed phase. Every `discover()` asserts `vars(inst) == {}` for every registered instance across **all five** registries (workers, manifests, ecosystems, contracts, backends). A rule set whose engine names do not all resolve, and a `config/models.yaml` profile naming an unregistered backend, are both **startup** errors with the offending name in the message. Manifest-adapter tie-breaks are deterministic under a **shuffled import order**: the same fixture, imported in 20 random orders, yields a byte-identical `manifests` table. **Corrected 2026-08-28 (round-K repair of `12be741`, lane W4):** **the sentence “*Every `ProcessPoolExecutor` is constructed with an initializer that calls each `discover()`, asserted by inspecting the initializer arguments*” is RETIRED, not deferred** — the retired words are quoted so a sweep for them finds this correction rather than a survival. It could never pass: at `12be741` the token `initializer=` occurs **zero** times in `src/` and `tests/` combined, and the tree's only `ProcessPoolExecutor(` (`orchestrator/budgets.py:947-949`) passes `max_workers=` and `mp_context=` only. **Retired rather than built, and the reason is fail-loud.** `mp_context` is unconditionally `forkserver` (`budgets.py:948`), so a child genuinely does not inherit the parent's registries — but exactly one callable is ever submitted to that pool: `scan_file`, through the tree's only `run_in_executor` (`src/fleet/workers/symbolindex.py:266-268`), and `scan_file`'s body names no registry, no `discover()` and no adapter. An initializer would instead import `anthropic`, `boto3`, `openai` and `google.auth` in every pool child and convert a startup `RuntimeError` naming the missing adapter into a `BrokenProcessPool` — inverting CLAUDE.md Rule 11 to buy a property nothing needs. A reconciler must **not** add `initializer=` to satisfy the retired sentence. `docs/SPEC.md` §7.2, §7.5 and §11.1 still assert the same mechanism in design prose and carry their own markers; `src/fleet/ecosystems/base.py:109`, `:118` (inside a **raised** message) and `:632` still assert it in code and are **outside this lane's ownership** — that is the open leg of `D86` in `docs/INTEGRATION_HONESTY.md`.
 48. **Startup and version refusals happen before any cost.** A database whose `PRAGMA user_version` differs from `SCHEMA_VERSION` makes every command **except `fleet migrate-db`** refuse to start, naming both versions, before a clone or an LLM call; `fleet migrate-db` applies the pending `vNNN_*.py` steps under `BEGIN EXCLUSIVE` and no other code path executes DDL (asserted by an AST test finding no `CREATE`/`ALTER`/`DROP` outside `src/fleet/migrations/` and `state/schema.sql`). A `checkpoints.payload` written under an older schema version is **invalidated and its step re-run**, never raised (§12.16 covers corruption and behaves **identically** — the two differ by trigger, not by outcome; this covers version skew). A second run started against a mirror a live run already owns exits **2** on the `integration:<run_id>` mutex. And `finish_reason == "length"` on an oversized fixture call produces **exactly one** same-target retry at a raised `max_output_tokens`, **zero** `backend_failover` events, and **zero** `CapabilityDrift` findings.
+
+49. **The Harmony path is conformant against a live endpoint** (ADR-0148, D145). **Added 2026-09-25 (ADR-0148, round `pilot-criteria-bringup`) — OPEN, not yet met; meeting this criterion requires live Spark hardware and is explicitly out of scope for the round that added it.** A conformance suite marked `live` (skipped by the default suite) runs against every endpoint in the `pilot` profile. It covers at least:
+    - plain `final` replies;
+    - a single tool call;
+    - the two-round `apply_patch` flow with an `*** Update File` patch against a fenced pre-image produced by the real `render_prompt`;
+    - a prompt of ≥ 64k tokens;
+    - ≥ 32 concurrent requests per endpoint.
+
+    It asserts, per completion:
+    - the first sampled token is `<|channel|>`;
+    - every tool call terminates with `<|call|>`;
+    - every recipient resolves to a declared tool;
+    - tool arguments parse as JSON;
+    - no `analysis`-channel text appears in the parsed final answer.
+
+    Failures are classified into two classes:
+    - **server-corruption signatures:** a wrong first token, or special-token IDs outside the Harmony set;
+    - **model format deviations:** everything else the backend's typed errors already catch.
+
+    Pass means zero server-corruption signatures, and model format deviations at or below a threshold **pre-registered in the ADR before the first live run**. The run writes a report recording, per endpoint: container image digest, vLLM version, launch flags, case counts, and each failure's class. The report is committed under `docs/evidence/`.
+
+50. **The `pilot` profile completes a fixture run end to end, offline at the LLM layer** (ADR-0148). **Added 2026-09-25 (ADR-0148, round `pilot-criteria-bringup`) — OPEN, not yet met; meeting this criterion requires live Spark hardware and is explicitly out of scope for the round that added it.** `--profile pilot` against the live Sparks completes the fixture fleet through `scan → sequence → transform → build → verify → integrate`.
+    - At least one `TRANSFORM_REPAIR` or `ESCALATION` proposal is decoded via `apply_patch` and landed via `git apply`.
+    - The test asserts that every LLM-layer outbound connection targets a configured Spark endpoint.
+    - The Harmony vocabulary loads from a pre-staged path with vocab download impossible (network to the vocab host denied, and the harness sets `TIKTOKEN_ENCODINGS_BASE` / `TIKTOKEN_RS_CACHE_DIR` itself from configuration).
+    - The live run's token streams are recorded as a replay fixture. A non-`live` test replays them through the real backend and pipeline so the default suite verifies the same path without hardware.
+    - The Bazel/registry egress policy in effect during the run is recorded, not asserted; that is a separate future criterion.
+
+51. **Calls distribute across both Spark endpoints with per-repo affinity** (ADR-0148). **Added 2026-09-25 (ADR-0148, round `pilot-criteria-bringup`) — OPEN; clauses (i) and (iii) are default-suite-checkable against local stub endpoints and (i) is also to be measured live — none of the three is met yet, meeting them fully is out of scope for the round that added this criterion.** With two endpoints configured as replicas of one pilot target:
+    - (i) over a fixture run, both endpoints serve calls, and the per-endpoint split is recorded;
+    - (ii) every round trip of one `invoke()`, and every call for one `repo_id` within a phase, hits the same endpoint (stable hash of `repo_id`);
+    - (iii) with one endpoint refusing connections, the run completes on the other, and §12.43's failover accounting is unchanged (`attempts.llm_failovers` counted, never charged to a repo).
+
+    (i) and (iii) are proven against two local stub endpoints in the default suite; (i) is also measured live.
 
 ---
 

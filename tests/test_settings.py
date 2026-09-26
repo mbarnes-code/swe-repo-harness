@@ -19,6 +19,7 @@ Every test here answers "why does this matter", not "does this line run":
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -204,6 +205,7 @@ def test_minimal_config_lands_every_documented_default(tmp_path: Path) -> None:
     assert cfg.llm.rate_limit.defaults.rpm == 0              # 0 = unlimited
     assert cfg.llm.failover.on_tier_exhausted == "halt"      # fail closed, exit 8
     assert cfg.llm.require_capabilities[ModelTier.HEAVY].min_context == 100_000
+    assert cfg.llm.harmony_vocab_dir is None                 # ADR-0148/§12.50, B1: opt-in only
     assert cfg.pr.merge_wait_timeout_s == 172_800            # 48 h
     assert cfg.gc.cache_max_age == "30d"
     assert cfg.gc.cache_max_age_s() == 30 * 86_400
@@ -559,6 +561,24 @@ def test_openai_compatible_target_without_base_url_is_refused(tmp_path: Path) ->
     assert "base_url" in str(excinfo.value)
 
 
+def test_harmony_gpt_oss_target_without_base_url_is_refused_at_startup(tmp_path: Path) -> None:
+    """§13 row 36: `harmony_gpt_oss` has no vendor default endpoint either. Missing from
+    `_REQUIRED_TARGET_FIELDS`, a `pilot` target with no `base_url` loaded with `base_url: None`
+    and failed only at the first call."""
+    models = MODELS_YAML.replace(
+        CHEAP_TARGET,
+        "    CHEAP:\n"
+        "      - { backend: harmony_gpt_oss, model_id: gpt-oss-120b, effort: low,\n"
+        "          price: free }\n",
+    )
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(
+            write_config(tmp_path, models=models),
+            known_backends=("anthropic", "openai_compatible", "harmony_gpt_oss"),
+        )
+    assert "profiles.default.CHEAP[0].base_url" in str(excinfo.value)
+
+
 def _cheap_openai_target(base_url: str) -> str:
     return (
         "    CHEAP:\n"
@@ -636,6 +656,25 @@ def test_an_uninstalled_backend_extra_is_named_in_the_message(tmp_path: Path) ->
 
     message = str(excinfo.value)
     assert "fleet[bedrock]" in message               # the extra, not just "an extra"
+    assert "not installed" in message
+
+
+def test_an_uninstalled_harmony_extra_is_named_in_the_message(tmp_path: Path) -> None:
+    """Mirrors `test_an_uninstalled_backend_extra_is_named_in_the_message` for the new backend."""
+    models = MODELS_YAML.replace(
+        CHEAP_TARGET,
+        "    CHEAP:\n"
+        "      - { backend: harmony_gpt_oss, model_id: gpt-oss-120b, price: free,\n"
+        "          base_url: 'http://pilot-spark.internal:8000/v1' }\n",
+    )
+    with pytest.raises(UnresolvedReferenceError) as excinfo:
+        load(
+            write_config(tmp_path, models=models),
+            known_backends=("anthropic", "openai_compatible"),
+        )
+
+    message = str(excinfo.value)
+    assert "fleet[harmony]" in message
     assert "not installed" in message
 
 
@@ -1082,3 +1121,296 @@ def test_price_helper_matches_the_11_2_formula() -> None:
     assert target_price_usd(target, in_tokens=200_000, out_tokens=40_000) == pytest.approx(
         (5.0 * 200_000 + 25.0 * 40_000) / 1e6
     )
+
+
+# --------------------------------------------------------------------------------------
+# B1 (round `pilot-criteria-bringup`) — `llm.harmony_vocab_dir`: offline Harmony vocab (§12.50)
+# --------------------------------------------------------------------------------------
+
+
+def _clear_tiktoken_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TIKTOKEN_ENCODINGS_BASE", raising=False)
+    monkeypatch.delenv("TIKTOKEN_RS_CACHE_DIR", raising=False)
+
+
+def test_harmony_vocab_dir_unset_touches_neither_tiktoken_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default (`None`) must be a true no-op: an operator who never touches this key gets the
+    SDK's own default (network-fetched, cached) behaviour, unchanged."""
+    _clear_tiktoken_env(monkeypatch)
+    load(write_config(tmp_path))
+    assert "TIKTOKEN_ENCODINGS_BASE" not in os.environ
+    assert "TIKTOKEN_RS_CACHE_DIR" not in os.environ
+
+
+def test_harmony_vocab_dir_points_tiktoken_env_vars_at_the_configured_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.50 offline-vocab half: the HARNESS sets `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR`
+    itself from `llm.harmony_vocab_dir` — an operator never exports either into their shell."""
+    _clear_tiktoken_env(monkeypatch)
+    vocab_dir = tmp_path / "vocab"
+    vocab_dir.mkdir()
+    (vocab_dir / "o200k_base.tiktoken").write_text("stub vocab content\n", encoding="utf-8")
+    fleet = f"""\
+        llm:
+          harmony_vocab_dir: {vocab_dir}
+    """
+    load(write_config(tmp_path, fleet=fleet))
+    assert os.environ["TIKTOKEN_ENCODINGS_BASE"] == str(vocab_dir)
+    assert os.environ["TIKTOKEN_RS_CACHE_DIR"] == str(vocab_dir)
+
+
+def test_harmony_vocab_dir_missing_directory_fails_loud_at_settings_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 11: a missing vocab dir is `ConfigValidationError` (exit 2) AT SETTINGS LOAD, naming the
+    path — never a lazy `HarmonyError` surfacing at the backend's first `load_harmony_encoding()`
+    call, waves into a run."""
+    _clear_tiktoken_env(monkeypatch)
+    missing = tmp_path / "does-not-exist"
+    fleet = f"""\
+        llm:
+          harmony_vocab_dir: {missing}
+    """
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(write_config(tmp_path, fleet=fleet))
+    assert str(missing) in str(excinfo.value)
+    assert "TIKTOKEN_ENCODINGS_BASE" not in os.environ, "never set on a failed validation"
+
+
+def test_harmony_vocab_dir_missing_vocab_file_fails_loud_naming_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The directory existing is not enough: the message names both the configured path and the
+    specific missing file, per this round's brief."""
+    _clear_tiktoken_env(monkeypatch)
+    vocab_dir = tmp_path / "vocab"
+    vocab_dir.mkdir()
+    fleet = f"""\
+        llm:
+          harmony_vocab_dir: {vocab_dir}
+    """
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(write_config(tmp_path, fleet=fleet))
+    message = str(excinfo.value)
+    assert str(vocab_dir) in message
+    assert "o200k_base.tiktoken" in message
+    assert "TIKTOKEN_ENCODINGS_BASE" not in os.environ
+
+
+# --------------------------------------------------------------------------------------
+# B2 (round `pilot-criteria-bringup`) — `config/models.local.yaml`: untracked endpoint overrides
+# --------------------------------------------------------------------------------------
+
+
+def test_models_local_yaml_absent_falls_back_to_the_template_value(tmp_path: Path) -> None:
+    """No override file (the common case — most clones never create one): the committed
+    template's own values resolve, unchanged."""
+    settings = load(write_config(tmp_path))
+    target = settings.models.profiles["default"]["HEAVY"][0]
+    assert target.model_id == "claude-opus-5"
+
+
+def test_models_local_yaml_overlays_a_field_onto_the_template_target(tmp_path: Path) -> None:
+    """The override names the target by `backend`+`model_id` identity and supplies only the field
+    it wants to change; every other field of that same target — `api_key_env`, `price`, `effort`
+    — still comes from the committed template."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  default:\n    HEAVY:\n"
+        "      - { backend: anthropic, model_id: claude-opus-5, base_url: 'http://10.0.0.5/v1' }\n",
+        encoding="utf-8",
+    )
+    settings = load(config_dir)
+    target = settings.models.profiles["default"]["HEAVY"][0]
+    assert target.base_url == "http://10.0.0.5/v1"
+    assert target.model_id == "claude-opus-5"
+    assert target.api_key_env == "ANTHROPIC_API_KEY"
+    assert target.price == Price(in_per_mtok=5.0, out_per_mtok=25.0)
+
+
+def test_models_local_yaml_naming_an_unknown_profile_fails_loud(tmp_path: Path) -> None:
+    """A typo'd profile name must not silently mean "no override applied" (Rule 11)."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  nope:\n    HEAVY:\n      - { backend: anthropic, model_id: x }\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(config_dir)
+    assert "nope" in str(excinfo.value)
+
+
+def test_models_local_yaml_matches_by_identity_not_list_position(tmp_path: Path) -> None:
+    """Two HEAVY targets; the ONE override entry names the SECOND target by `backend`+`model_id`
+    identity while sitting at override-list index 0 (ADR-0026: "no reference may be a positional
+    integer over a recomputed collection" — written for SQLite rowids, generalizes exactly here).
+    A positional implementation would have silently applied this to the FIRST target instead."""
+    models = (
+        MODELS_HEADER
+        + "    HEAVY:\n"
+        "      - { backend: anthropic, model_id: claude-opus-5, effort: high,\n"
+        "          api_key_env: ANTHROPIC_API_KEY,\n"
+        "          price: { in_per_mtok: 5.0, out_per_mtok: 25.0 } }\n"
+        "      - { backend: anthropic, model_id: claude-opus-5-standby, effort: high,\n"
+        "          api_key_env: ANTHROPIC_API_KEY, weight: 0,\n"
+        "          price: { in_per_mtok: 5.0, out_per_mtok: 25.0 } }\n"
+        + WORKHORSE_TARGET
+        + CHEAP_TARGET
+    )
+    config_dir = write_config(tmp_path, models=models)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  default:\n    HEAVY:\n"
+        "      - { backend: anthropic, model_id: claude-opus-5-standby, effort: low }\n",
+        encoding="utf-8",
+    )
+    settings = load(config_dir)
+    targets = settings.models.profiles["default"]["HEAVY"]
+    assert targets[0].model_id == "claude-opus-5"
+    assert targets[0].effort == "high", "untouched -- the override does not name this target"
+    assert targets[1].model_id == "claude-opus-5-standby"
+    assert targets[1].effort == "low", "the actual match, found by identity, not by list index"
+
+
+def test_models_local_yaml_matching_no_template_target_fails_loud(tmp_path: Path) -> None:
+    """A `backend`+`model_id` pair matching nothing in the tier is a loud, typo-shaped error
+    naming exactly what it failed to match — never a silent no-op."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  default:\n    HEAVY:\n"
+        "      - { backend: anthropic, model_id: claude-opus-5-typo, "
+        "base_url: 'http://10.0.0.5/v1' }\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(config_dir)
+    message = str(excinfo.value)
+    assert "claude-opus-5-typo" in message
+    assert "anthropic" in message
+
+
+def test_models_local_yaml_override_missing_identity_fields_fails_loud(tmp_path: Path) -> None:
+    """`backend`/`model_id` are the matching key, not optional overlay fields — an entry omitting
+    either has no way to name which template target it means."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  default:\n    HEAVY:\n      - { base_url: 'http://10.0.0.5/v1' }\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(config_dir)
+    message = str(excinfo.value)
+    assert "backend" in message
+    assert "model_id" in message
+
+
+def test_models_local_yaml_is_covered_by_the_secret_material_scan(tmp_path: Path) -> None:
+    """§9 rule 4 applies to this file too, not only to the committed three — an override file is
+    still config an operator could accidentally paste a real key into."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  default:\n    HEAVY:\n"
+        "      - { api_key_env: sk-ant-api03-" + "A" * 40 + " }\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(SecretInConfigError):
+        load(config_dir)
+
+
+# --------------------------------------------------------------------------------------
+# B3 (ADR-0149, §12.51) — `base_urls`: replica endpoints of one target, via the B2 override
+# --------------------------------------------------------------------------------------
+
+
+def test_models_local_yaml_base_urls_replaces_the_template_base_url(tmp_path: Path) -> None:
+    """The committed template carries ONE placeholder `base_url`; an override listing the real
+    replicas as `base_urls` replaces it rather than sitting beside it (`BackendTarget` refuses a
+    target carrying both). `openai_compatible` requires `base_url`, and replicas satisfy that."""
+    config_dir = write_config(tmp_path, models=MODELS_YAML + LOCAL_PROFILE_YAML)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  local:\n    HEAVY:\n"
+        "      - { backend: openai_compatible, model_id: local-heavy,\n"
+        "          base_urls: ['http://10.0.0.5/v1', 'http://10.0.0.6/v1'] }\n",
+        encoding="utf-8",
+    )
+    target = load(config_dir).models.profiles["local"]["HEAVY"][0]
+    assert target.base_urls == ("http://10.0.0.5/v1", "http://10.0.0.6/v1")
+    assert target.base_url is None
+    assert target.api_key_env == "LOCAL_LLM_API_KEY"
+
+
+def test_models_local_yaml_naming_both_endpoint_spellings_fails_loud(tmp_path: Path) -> None:
+    """Only the template's OTHER spelling is cleared; an override naming both is ambiguous and
+    must fail at load (Rule 11), not pick one."""
+    config_dir = write_config(tmp_path, models=MODELS_YAML + LOCAL_PROFILE_YAML)
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  local:\n    HEAVY:\n"
+        "      - { backend: openai_compatible, model_id: local-heavy, base_url: 'http://x/v1',\n"
+        "          base_urls: ['http://10.0.0.5/v1', 'http://10.0.0.6/v1'] }\n",
+        encoding="utf-8",
+    )
+    with pytest.raises((ConfigValidationError, ValidationError)):
+        load(config_dir)
+
+
+@pytest.mark.parametrize(
+    ("override", "names"),
+    [
+        # a misspelled top-level key: previously returned with no override applied
+        ("profile:\n  default:\n    HEAVY: []\n", "profile"),
+        # `profiles` as a list, not a mapping
+        ("profiles:\n  - default\n", "profiles"),
+        # a profile given as a list, not a mapping of tiers
+        ("profiles:\n  default:\n    - HEAVY\n", "profiles.default"),
+        # a tier given as a mapping, not a list
+        (
+            "profiles:\n  default:\n    HEAVY:\n      backend: anthropic\n"
+            "      model_id: claude-opus-5\n",
+            "profiles.default.HEAVY",
+        ),
+        # a non-mapping entry in the tier's list
+        ("profiles:\n  default:\n    HEAVY:\n      - just-a-string\n", "profiles.default.HEAVY[0]"),
+    ],
+)
+def test_models_local_yaml_malformed_shapes_fail_loud(
+    tmp_path: Path, override: str, names: str
+) -> None:
+    """Every malformed shape is a startup error naming where, never a silent "no override
+    applied" that leaves the committed placeholder endpoint in use (Rule 11)."""
+    config_dir = write_config(tmp_path)
+    (config_dir / "models.local.yaml").write_text(override, encoding="utf-8")
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(config_dir)
+    assert names in str(excinfo.value)
+
+
+def test_models_local_yaml_ambiguous_identity_fails_loud(tmp_path: Path) -> None:
+    """Two template targets sharing `backend`+`model_id` behind different `base_url`s (a legal
+    ADR-0023 failover pair): an override naming that identity cannot say which it means, and
+    overlaying only the first would be a silent partial override — so it is refused."""
+    pair = """\
+  pair:
+    HEAVY:
+      - { backend: openai_compatible, model_id: twin, effort: high, price: free,
+          base_url: 'http://localhost:8001/v1' }
+      - { backend: openai_compatible, model_id: twin, effort: high, price: free,
+          base_url: 'http://localhost:8002/v1' }
+    WORKHORSE:
+      - { backend: openai_compatible, model_id: twin, effort: high, price: free,
+          base_url: 'http://localhost:8001/v1' }
+    CHEAP:
+      - { backend: openai_compatible, model_id: twin, effort: high, price: free,
+          base_url: 'http://localhost:8001/v1' }
+"""
+    config_dir = write_config(tmp_path, models=MODELS_YAML + pair)
+    assert load(config_dir).models.profiles["pair"]["HEAVY"][1].base_url.endswith("8002/v1")  # type: ignore[union-attr]
+    (config_dir / "models.local.yaml").write_text(
+        "profiles:\n  pair:\n    HEAVY:\n"
+        "      - { backend: openai_compatible, model_id: twin, base_url: 'http://10.0.0.5/v1' }\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(config_dir)
+    assert "2 times" in str(excinfo.value)

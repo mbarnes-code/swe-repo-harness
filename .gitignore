@@ -43,6 +43,12 @@ migration_state.json
 !.env.example
 config/secrets.*
 
+# B2 (round `pilot-criteria-bringup`): real `pilot`-profile endpoint values (Spark base_url /
+# base_urls; backend+model_id only NAME the target, they are not overridden) never committed — this repo is public on GitHub. `FleetSettings.load()`
+# overlays this file's per-target field overrides onto the committed `config/models.yaml`
+# template at load time; see docs/SPEC.md's `config/models.yaml` section for the file's format.
+config/models.local.yaml
+
 # ---- Editors / OS ----
 .idea/
 .vscode/

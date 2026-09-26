@@ -65,6 +65,11 @@ dev = [
 # routes a tier through them.
 bedrock = ["boto3>=1.35"]
 vertex = ["google-cloud-aiplatform>=1.70"]
+# ADR-0145: the pilot profile's GPT-OSS-over-Harmony transport. Version floor matches the
+# vendored reference crate's own version (references/harmony/Cargo.toml:3, 0.0.8) — the earliest
+# version this plan's design was verified against; raise it once a newer PyPI release is
+# confirmed compatible with the real Spark endpoint.
+harmony = ["openai-harmony>=0.0.8"]
 dev = [
   "pytest>=8.3",
   "pytest-asyncio>=0.24",
@@ -226,11 +231,15 @@ disallow_untyped_defs = false
 # a genuinely missing import in some future first-party dependency. `requests` is here because it
 # is a hard dependency of `google.auth.transport.requests` and `vertex.py` imports its exception
 # base — it travels with the extra and is never a separate install.
+#
+# ADR-0145: `openai_harmony` is the `harmony` EXTRA — same pattern, same reasoning. Imported at
+# module scope in `llm/backends/harmony_gpt_oss.py` only.
 [[tool.mypy.overrides]]
 module = [
   "boto3", "boto3.*", "botocore", "botocore.*",
   "google", "google.auth", "google.auth.*",
   "requests", "requests.*",
+  "openai_harmony", "openai_harmony.*",
 ]
 ignore_missing_imports = true
 

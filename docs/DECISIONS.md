@@ -16025,3 +16025,238 @@ This affects **all ~33 Cargo-touching repos** in the local Gitea corpus (not a l
 **Alternatives rejected.** Leaving the default public and relying on operators to notice — rejected because nothing in this codebase currently audits generated visibility at all, so the risk would remain silent and undiscovered until an actual unintended cross-repo dependency shipped. Scoping every target to a `package_group` of its actual known consumers, rather than a blanket public/private choice — rejected as unwarranted precision: Phase 3's DAG (`cli._unit_deps`) only ever wires a dependency edge at the unit level, never at the sub-target level, so a consumer of a package's dependency-surface target is never known more narrowly than "every unit whose DAG edge points here" — which public visibility already states honestly, and a `package_group` would just be a manually-maintained restatement of the same DAG with no independent enforcement value.
 
 ---
+
+## ADR-0145 — `profiles.pilot`'s model is confirmed GPT-OSS-120b: a new `harmony_gpt_oss` `ModelBackend` (Harmony wire format, token-id transport) and an `apply_patch`-to-unified-diff decode step inside it, not a new patch representation threaded through the client
+
+**Decision (2026-09-24).** The Spark host `config/models.yaml`'s `pilot` profile targets (`config/models.yaml:131-143`, currently a placeholder `nvidia/nemotron-3-super-120b-a12b` routed through `openai_compatible`) is now confirmed to serve **GPT-OSS-120b**. Two freshly vendored, read-only reference repos — `references/harmony/` (`openai/harmony`) and `references/gpt-oss/` (`openai/gpt-oss`) — were reviewed in full (two parallel subagent research passes; findings below are cited to specific files in those clones) to determine what this requires of Fleet's `ModelClient`/`ModelBackend` layer (`src/fleet/llm/client.py:289-361`, §7.7). Two things are required, both additive:
+
+1. A **new `ModelBackend` implementation**, `src/fleet/llm/backends/harmony_gpt_oss.py` (registry key `harmony_gpt_oss`), for the `pilot` profile's three tiers in place of `openai_compatible`. GPT-OSS models are trained on OpenAI's Harmony envelope (`<|start|>{role}<|channel|>{name}<|message|>{content}<|end|>`, special tokens `<|start|>`/`<|end|>`/`<|channel|>`/`<|return|>`/`<|call|>`, `references/harmony/docs/format.md:5-233`) and Harmony's Python SDK (`openai-harmony` on PyPI, `references/harmony/pyproject.toml`) renders a `Conversation` straight to **token ids** via its own BPE (`o200k_harmony`, `references/harmony/src/registry.rs:12-66`) — it does not go through a chat-completions JSON body or a generic chat template at all. `openai_compatible.py`'s existing `_SdkTransport` (module docstring, `src/fleet/llm/backends/openai_compatible.py:11-17`) speaks OpenAI's chat-completions JSON shape; that is a different wire protocol than "post a token-id array to vLLM's completions endpoint and decode the token ids that come back," not a `base_url`/model-id variation of the same one. §7.2's own rule for this ("a new provider is ONE file under `llm/backends/` + one `@register_backend`", `src/fleet/llm/client.py:339`) is exactly the shape this is: the `ModelBackend` Protocol itself (`declared_capabilities`/`invoke`, `client.py:344-361`) needs no change — only a new adapter that happens to do token-id encode/decode instead of JSON marshalling inside its `invoke()`.
+2. Inside that one new file, **decode a GPT-OSS `apply_patch` tool call into the existing `FilePatch.diff` unified-diff string** (`src/fleet/models/tasks.py:198-204`) before returning `BackendReply`, rather than adding a second patch representation anywhere else in the harness.
+
+**Why decode inside the backend rather than add a second `FilePatch` representation.** GPT-OSS is RL-trained to emit code edits as a single string argument to one function tool, `apply_patch`, whose payload is OpenAI's own patch language (`*** Begin Patch` / `*** Add File:` / `*** Update File:` [+ optional `*** Move to:`] / `*** Delete File:` / `@@`-hunks / `*** End Patch` — verbatim example at `references/gpt-oss/gpt_oss/tools/apply_patch.md:15-59`), registered on the Harmony DEVELOPER message (`references/gpt-oss/gpt_oss/chat.py:105-126`) — not as a generic function matching an arbitrary target schema, the way `openai_compatible.py`'s TOOL_CALL rung uses one `emit_response(...)` function for any `response_model` (`_TOOL_NAME`, `openai_compatible.py:72`). Asking GPT-OSS to instead call a generic `emit_response(diff: str)` tool and hand-author a unified diff inside it is possible but is asking the model to imitate a format it was not specifically trained on, which is the reliability problem the operator raised in requesting this review. But `git.py:435` states plainly that "`git apply` is the ONLY writer into a worktree (SPEC §3.2 step 6.6)" and `FilePatch.diff`'s own field description says unified diff is "the ONLY accepted patch representation" (`tasks.py:204`, ADR-0024's boundary) — both are load-bearing, cross-referenced invariants, not incidental defaults, and changing either to admit a second wire format would touch `rewrite.py`'s apply path, `vcs/git.py`, `vcs/commits.apply_and_commit`, and SPEC §3.2 step 6.6's own text, for every backend, not just this one. gpt-oss ships a complete, dependency-free reference parser for its own format (`references/gpt-oss/gpt_oss/tools/apply_patch.py`, stdlib-only — `pathlib`/`dataclasses`/`enum`/`typing` — with I/O injected via three callables, `apply_patch()`/`apply_commit()` at lines 459/497) that turns `(patch text, {path: pre-image})` into concrete post-image file contents; running that pure-Python transform inside the new backend and diffing pre- against post-image (`difflib.unified_diff` or a `git diff --no-index` shell-out — implementation detail, not decided here) yields exactly a `FilePatch.diff` string with zero change to any file outside `llm/backends/harmony_gpt_oss.py` plus the vendored parser module. Vendoring lands at `src/fleet/vcs/apply_patch.py` (a decoder, not a VCS writer — the name mirrors where `git.py` already lives since both operate on patch text against file contents) — `references/gpt-oss` itself remains untouched per §5's read-only rule; only its parser's logic is copied into `src/`, the same as any other reference-repo-derived implementation in this project.
+
+**Is this a "backend decides something" violation of `ModelBackend.invoke`'s contract?** `invoke()`'s docstring (`client.py:356-360`) says a backend "NEVER validates, never retries a schema failure, and never picks its own mode" and "returns the raw turn — text or tool arguments." Decoding Harmony's token stream into text, and decoding this backend's own `apply_patch` wire format into the equivalent unified-diff string, is the same category of work `openai_compatible.py` already does when it decodes an SSE/JSON tool-call-arguments string into a `BackendReply` mapping — a transport reshaping its own bytes into the harness's canonical argument shape. It is NOT validating that shape against `response_model`'s Pydantic schema (the client still does that, unchanged) and it is NOT retrying, choosing a rung, or reading `finish_reason` to decide anything (those stay the client's job, unchanged). This is an **Agent Recommendation**, not a directive found in `docs/SPEC.md` — flagged per the Guardrails' directive-authority rule for the next review to confirm or overrule before implementation lands.
+
+**Also required, not yet done here (this ADR is a design decision, not the implementation).** `config/models.yaml:131-143`'s `pilot` profile `model_id` (currently the nemotron placeholder) and `backend` (currently `openai_compatible`) both need updating once the Spark host's actual served model identifier is known — left as the same kind of `base_url` placeholder the block's own comment already flags (`config/models.yaml:120`), not invented here. `pyproject.toml:63-67`'s `[project.optional-dependencies]` needs a fourth extra, `harmony = ["openai-harmony>=<version>"]`, following the `bedrock`/`vertex` precedent (`pyproject.toml:66-67`) rather than a core dependency — the `pilot` profile is one optional deployment shape, not every host's, matching `discover()`'s "an uninstalled SDK leaves the backend unregistered, `settings.py` reports it at startup" contract (`openai_compatible.py:11-17`) that the existing three backends already rely on. Which §7.7 capability rung (`ModelCapabilities`) this backend should declare — PROMPTED, TOOL_CALL, or JSON_SCHEMA-equivalent, since Harmony's `<|constrain|>json` content type can express more than bare prompting — is deliberately left unmeasured here rather than guessed (CLAUDE.md's measurement-discipline guardrail): it should be set from the honest declared floor (`openai_compatible.py`'s own precedent, item 2 of that file's module docstring) and revisited only against real pilot behavior, not assumed from the spec.
+
+**Editorial update (2026-09-24, implementation round).** The sentence above is superseded, not deleted: the implementation plan's Task 3 resolved this open question during build, and its task review independently fact-checked the resolution before landing. `HarmonyGptOssBackend.declared_capabilities` declares `structured_output_modes=(TOOL_CALL, PROMPTED)` **unconditionally**, not from the "honest opaque floor" precedent this ADR named — the reviewed rationale (see `src/fleet/llm/backends/harmony_gpt_oss.py`'s module docstring and `declared_capabilities`'s own docstring) is that `harmony_gpt_oss`, unlike `openai_compatible`'s arbitrary `base_url`, names a fixed, known model family (GPT-OSS) that is verifiably RL-trained on Harmony's function-tool mechanism (`references/harmony/docs/format.md:340-461`, `references/gpt-oss/gpt_oss/chat.py:105-126`) — the same fixed-model-family reasoning `vertex.py` already uses to declare `TOOL_CALL` unconditionally for its own backend, cited and reused rather than invented. This is a stronger claim than "declared but unmeasured," and the final whole-branch review of the completed implementation (round of 2026-09-24) did not dispute it. What the final review DID find is that this rung is currently unreachable in production for the three diff-shaped roles for unrelated reasons (schema `$ref` resolution, real stop-token set, tool-repair-turn rendering, and a same-completion tool-call/final-JSON merge that cannot survive a real sampler) — tracked as a fix wave on top of this same round, not a re-opening of the capability-rung question itself.
+
+**Terminology correction.** The operator's request referred to this as "V4A" format. Neither vendored repo uses that term anywhere in its own content (a repo-wide grep of `references/gpt-oss/` turned up zero hits outside base64-encoded PNG bytes in unrelated SVGs) — "V4A" is external Codex-CLI terminology not present in `openai/gpt-oss` or `openai/harmony`. This project has no vendored copy of `openai/codex`; `references/openai-harness-engineering-codex-agent-first-world.md` is a prose article about Codex, not its source, and does not define the format either. What is actually vendored and authoritative here is gpt-oss's own `apply_patch` tool and its patch-format spec (`references/gpt-oss/gpt_oss/tools/apply_patch.md`), cited throughout this ADR by that name.
+
+**Alternatives rejected.** *Ask GPT-OSS to fill `FilePatch.diff` directly via a generic `emit_response`-style tool, same as every other backend* — rejected per the reliability rationale above; this is the status quo `openai_compatible` already provides for the placeholder nemotron target, and the operator's request was specifically to move off it. *Add a second `FilePatch` representation (e.g. a `patch_format: Literal["unified_diff", "apply_patch"]` discriminant, or a sibling field) and teach `rewrite.py`/`vcs/git.py` to branch on it* — rejected as the more invasive change: it threads a single backend's wire format up through the client's schema layer and the worktree-writer invariant (`git.py:435`) for every future backend to keep considering, where confining the decode to one backend file keeps `git apply` as Fleet's sole worktree writer and `FilePatch.diff` as its sole patch representation, unchanged, for every existing and future backend. *Wait for real Spark hardware access before writing any ADR* — rejected under CLAUDE.md's zero-blocking-decisions mandate: the architectural shape of the integration (Harmony transport, apply_patch decode boundary) does not depend on which host serves the model, only the `base_url`/`model_id` values do, and those are already deferred as an explicit placeholder rather than blocked on.
+
+**Editorial update (2026-09-24, final-review fix wave).** The implementation plan's own final whole-branch review found four Critical, cross-cutting defects that no single task-scoped review could see, each hidden behind a hand-built test fixture that didn't match a real sampler or real Pydantic schema output: (1) diff-shaped schema detection didn't resolve Pydantic's `$ref`/`$defs` indirection, so the `apply_patch` path was dead code in production; (2) `invoke()` sent the wrong Harmony stop-token set, truncating every call right after the model's own reasoning; (3) a schema-repair turn rendered as an unattributed Harmony tool message, which the real SDK refuses (`HarmonyError: Tools should have a name!`) — an uncaught, wrongly-typed exception escaping `LadderModelClient`; (4) the design of getting an `apply_patch` tool call and the schema's other required fields from ONE completion cannot work with a real sampler, because a tool call and a final answer each end in their own stop token — one completion can contain at most one.
+
+All four, plus five Important findings (a single-property-schema decode bug; a missing §13 row 36 startup check; a stateless-registry-sweep gap; discarded token usage; an ignored `api_key_env`), were fixed in a follow-up round and independently re-verified with real mutation testing against the actual `openai-harmony` SDK (each fix has a test that provably fails before it and passes after, not merely "green"). The (4) fix restructures `HarmonyGptOssBackend.invoke()` to make an internal SECOND transport call for a diff-shaped role when the first call successfully decodes an `apply_patch` tool call — building a continuation conversation (original messages + the assistant's own tool-call turn, kept as `<|call|>` per Harmony's own documented multi-turn tool-calling convention, `references/harmony/docs/format.md:338,458,461` — NOT normalized to `<|end|>`, correcting this ADR's own earlier assumption to the contrary — plus a tool-result message and the prior turn's reasoning/analysis content, which format.md:338 explicitly says must travel forward for a tool-calling continuation) and decoding the remaining schema fields from a second completion. **Disclosed, deliberately not hidden:** this makes a diff-shaped `invoke()` cost up to 2 real transport calls per harness-visible "one call" — token usage is summed across both into the single `TokenUsage` returned, but the harness's call-count ceiling (`run_max_llm_calls`, ADR-0142) counts this as exactly 1 call regardless, an acknowledged undercount versus real model-call volume for this one backend's diff-shaped roles. Revisit if call-count budget accuracy for the pilot turns out to matter in practice; not fixed here, since ADR-0142's ceiling is a different ADR's mechanism and widening it to count internal sub-calls is out of scope for this fix wave.
+
+---
+
+## ADR-0146 — File-content evidence renders as a raw fenced block, not JSON; one shared module owns both the write and the read
+
+**Decision (2026-09-25).** A confirmed, verified production defect: on the `pilot` profile, every `apply_patch` tool call from `HarmonyGptOssBackend` that updates or deletes an existing file decoded to `tool_arguments=None`. Two independent causes, one fix. First, `_decode_apply_patch` needs a `pre_images` mapping of `{path: current file text}` to resolve the model's patch hunks against, and the only producer of that mapping, `_extract_pre_images`, scraped `` ```path:<p>\n<content>``` `` fences out of message text — but `render_prompt()` (`llm/calls.py`) never emitted any such fence; it serialised ALL evidence, `current_content` included, as one `json.dumps(..., ensure_ascii=True, ...)` blob. `_extract_pre_images` always returned `{}` against real output, confirmed by tracing `render_prompt`'s actual call sites, not by reading its docstring. Second, and independent of the first: even where a pre-image was supplied by hand (the test fixtures), `ensure_ascii=True` JSON escapes a real newline/quote byte to the literal two-character sequence `\n`/`\"`. A V4A/unified-diff hunk's context lines must match the real file byte-for-byte, so a model reading escaped JSON has to mentally un-escape before it can write a matching context line — a second, independent source of decode failure that fixing only the missing-fence problem would not have touched.
+
+The fix separates file content from the JSON evidence body and renders it as a raw fenced block appended after the JSON, via one new shared module, `src/fleet/llm/fences.py`, exposing `fence_file(path, content) -> str` plus two readers: `parse_file_fences(text, allowed_paths) -> dict[str, str]` (a caller-supplied allowlist) and `trusted_fenced_blocks(text) -> dict[str, str]` (no allowlist parameter, for a caller that already knows `text` is entirely harness-authored — see the corrected mechanism below for why `harmony_gpt_oss.py` uses this one). This is the whole reason the module exists as a third file rather than as two independent implementations in the writer and the reader: a shared format is only actually shared if there is exactly one place that knows what it looks like. The fence itself follows CommonMark's own rule for fenced code blocks — a backtick run one longer than the longest run inside the content, minimum 3 — so no backtick run occurring naturally inside real source code, Markdown, or a docstring quoting a fence can ever be mistaken for the delimiter. The round trip is made exact (not best-effort) by construction: `fence_file` always inserts exactly one separator newline between content and the closing fence line, and `parse_file_fences` locates the close with a literal `"\n" + fence` substring search rather than guessing from the content's own trailing-newline state — because the fence is provably longer than any backtick run genuinely inside the content, that exact substring cannot occur inside the content, so the first occurrence found is always the true close. Verified by a `hypothesis` property test (`tests/test_llm_fences.py`) over backtick runs of length 0–10, arbitrary Unicode, CRLF, a missing or extra trailing newline, and non-ASCII UTF-8, plus fixed cases for each.
+
+**Injection safety was a required part of this design, not an afterthought — and the first cut of it was wrong, caught by independent review before this branch was considered done.** A real file's own content can contain text shaped exactly like a fenced block — this repository's own source, or a Markdown file, both do. Block discovery in `fences.py` closes the EMBEDDING case: it is sequential and non-overlapping — a block's whole span (header through its own close) is consumed before the next header is searched for, so a forged header embedded inside one block's own content is never independently discovered as a second, top-level block. `parse_file_fences(text, allowed_paths)` additionally checks every discovered path against a caller-supplied allowlist, for a caller with an independent source of truth for which paths are legitimate.
+
+The first version of `harmony_gpt_oss.py::_extract_pre_images` had neither an independent allowlist nor a restriction on which messages it scanned: it called `parse_file_fences(text, discover_fenced_paths(text))` — deriving the "allowlist" by re-scanning the SAME text being parsed, which restricts nothing at all — over EVERY message in the conversation regardless of role, including `assistant`/`tool` messages that carry the model's OWN prior reply during a repair turn (`client.py::_repair_turns`). An independent review proved this exploitable, not merely imprecise: a model that echoed a forged `` ```path:<real path>\n<forged content>``` `` block in its own reply had that block silently override the real pre-image (`dict.update`, last-scanned wins), and a second probe introduced a path the harness had never rendered at all (e.g. `/etc/x`).
+
+**Corrected mechanism (2026-09-25, same round, before this branch's own review completed).** The real trust boundary is not "which paths does the text claim" — it is "who wrote this message". `render_prompt()`'s `fence_file` calls only ever land inside a `system` or `user` message (its own output, or `client.py`'s system-folding/repair-instruction template); the model never writes into either role. `_extract_pre_images` now scans ONLY `system`/`user`-role messages — `assistant` and `tool` are excluded unconditionally, by role, never by content — and trusts every top-level block a sequential scan finds inside one (`fences.trusted_fenced_blocks`, one pass, no separate allowlist needed, since the scanned text is 100% harness-authored by construction). `parse_file_fences`/`discover_fenced_paths` remain in `fences.py` as general-purpose primitives for a caller that DOES have an independent per-path allowlist; `harmony_gpt_oss.py` no longer uses them, because message-role filtering is the correct and sufficient mechanism for this one caller. A regression test reproducing the reviewer's exact probe (forged `assistant`/`tool` message, both the same-path-override and the new-path-injection shapes) is red against the original code and green after this correction (`tests/test_llm_backend_harmony_gpt_oss.py::test_a_forged_assistant_message_fence_never_overrides_or_introduces_a_pre_image`, `::test_a_forged_tool_message_fence_is_also_never_scanned`).
+
+Even a forged pre-image that somehow got through this — for instance a nested forgery inside a real file's OWN content, which layer 1's sequential scan still guards against but has no second layer behind it once a message is trusted — could only ever produce a wrong `diff` for `text_to_patch`/`commit_to_file_edits` to emit, and `git apply` remains the harness's sole worktree writer (`vcs/git.py:435`): a wrong pre-image makes `git apply` fail loudly, not silently corrupt a file. This is a disclosed, accepted residual risk, not a new mechanism introduced to close it further — closing it completely would mean threading a typed pre-image channel through `ModelBackend.invoke()`, which is the rejected alternative below.
+
+**Correction (2026-09-25, same round, before this branch's own review completed) — the "Corrected mechanism" paragraph above (the one describing `system`/`user`-role scanning as the fix) is superseded, not deleted (this project's annotate-in-place convention); the residual-risk paragraph immediately before it is unaffected and still holds: "which paths did the harness render" is not fully answered by role alone.** A second independent review found that `_extract_pre_images` scanning EVERY `system`/`user`-role message is still exploitable: `client.py::_repair_turns` builds its repair-instruction message as `Message(role="user", content=_REPAIR_INSTRUCTION.format(error=detail))` where `detail = str(exc)` is a Pydantic `ValidationError`, and `FleetModel`'s `extra="forbid"` means an unexpected key in a malformed model reply is quoted VERBATIM into that error text — backticks and newlines included. A model reply carrying a bogus key shaped like a fenced block therefore reaches a LATER `user`-role message with no `assistant`/`tool` message in between it and the harness's own template text, reproduced end to end through the real `_validate` → `_repair_turns` → `_extract_pre_images` path (no mocks). The property that is actually true is narrower than "system/user role": pre-images never change mid-conversation, so ONLY the messages that exist strictly BEFORE the first `assistant`/`tool` turn — the ORIGINAL prompt `render_prompt()` produced — are guaranteed to predate any model output; a LATER `user`-role message (a repair round's instruction turn) is not reliably harness-authored, because it can itself quote the model's own prior reply back into its own text. `harmony_gpt_oss.py::_extract_pre_images` now scans only `_original_prompt_messages(messages)` — the POSITIONAL prefix up to the first non-`system`/`user` message — never any message after that boundary regardless of its own role. A regression test reproducing this exact probe (`tests/test_llm_backend_harmony_gpt_oss.py::test_a_forged_fence_from_a_repair_instructions_echoed_validation_error_is_not_trusted`) is red against the role-only version and green after this correction.
+
+**Cache invalidation.** `prompt_template_version` (the `llm_cache` cache-key component §6 defines for exactly this purpose) is bumped from 1 to 2 for `Role.TRANSFORM_REPAIR` and `Role.ESCALATION` — the two roles confirmed to render `current_content` — in the `PROMPTS` table (`llm/calls.py`), so no cached answer keyed on the old JSON-only byte layout can be served against the new fenced-block prompt bytes.
+
+**Determinism preserved.** `render_prompt()`'s existing guarantees (redaction before serialisation, `sort_keys=True`, `ensure_ascii=True` for everything still JSON, `PYTHONHASHSEED`-independence) are unchanged for every evidence field except the one pulled out for fencing; the fenced block is appended deterministically (one evidence key, one block) after the JSON body. Verified by running the renderer in two subprocesses under `PYTHONHASHSEED=0` and `PYTHONHASHSEED=1` and asserting byte-identical output.
+
+**Rejected alternative: a typed side channel passing pre-images to `invoke()` as structured data.** Architecturally cleaner — nothing scraped back out of prompt text — but it changes the `ModelBackend` Protocol and therefore every backend and every fixture backend that implements it, which breaks `docs/SPEC.md` §12 item 42's own acceptance bar ("a new provider costs one file and one registry line," proven by a `git diff --stat` scoped to `src/fleet/`). It also does not fix the `ensure_ascii` escaping defect for any OTHER backend that might one day render diff-bearing evidence — that defect lives in `render_prompt()`'s JSON serialisation, not in how `harmony_gpt_oss.py` happens to read pre-images. Rejected in favor of fixing `render_prompt()` itself, which fixes both problems for every current and future backend at once.
+
+**Scope.** `Role.API_INCOMPAT_REWRITE` (`ApiRewriteProposal`) is diff-shaped by schema but has zero callers anywhere in `src/fleet` — confirmed by grep — so it is not wired into this fix; see D146.
+
+**Disclosed consequence (2026-09-25, round `pilot-criteria-bringup`, B4): redaction can make a correct patch fail `git apply` — loud, not silent, and an accepted tradeoff, not a bug.** `render_prompt()` fences the ALREADY-redacted mapping (this ADR's "Determinism preserved" paragraph, above), so a secret-shaped substring inside `current_content` is replaced with `redaction.patterns`' `replacement` token (`«redacted:{kind}:{fp8}»`) before the model ever sees that line. If the model's `apply_patch` hunk carries that line as unchanged CONTEXT (not a `-`/`+` line it is actively editing), the context it wrote no longer matches the real, un-redacted file byte-for-byte — `text_to_patch`/`commit_to_file_edits` decode the hunk fine (they only see the model's own text), but the resulting diff's context line disagrees with the real file, and `git apply` (the harness's sole worktree writer, `vcs/git.py:435`) refuses it with a context-mismatch error. This is the same failure shape ADR-0146's "residual risk" paragraph already names for a forged pre-image — a wrong `diff` makes `git apply` fail loud, never corrupt a file silently — applied to a new cause (redaction, not forgery). No fix is proposed: the alternative is showing the model its own un-redacted secret so it can echo a byte-exact context line, which is the exact leak §11.4 exists to prevent. A repo whose rewrite target happens to have a secret-shaped literal on an UNCHANGED line adjacent to genuine edits is expected to occasionally burn a repair-ladder rung on `git apply --check` failure this way; this is disclosed here rather than filed as a defect, because closing it would require reintroducing the leak.
+
+---
+
+## ADR-0147 — Rule 13 gets an explicit satisfaction path for the all-criteria-met state
+
+**Decision (2026-09-25).** §12 reached 48 of 48 on 2026-09-10 (Round VI, thirty-ninth wave, `docs/PROGRESS.md` —
+*corrected 2026-09-25, final review: this read "round VIII", which the cited record does not say*).
+Rule 13's operative clause ("before dispatching a round, name which §12 criterion number(s) it is
+expected to move from unmet to met... may not be followed by a second such [no-criterion] round
+without an intervening criteria-closing round") presupposes an unmet criterion always exists to
+name. Once none did, every round became a "no-criterion" round by the rule's own literal text,
+and the no-two-consecutive prohibition became permanently un-satisfiable without either (a) a
+fresh criterion to close — none existed — or (b) a controller ruling issued fresh each time.
+Several consecutive checkpoint rounds after 2026-09-10 hit exactly this: each was declared
+"no-criterion" in its own checkpoint and each needed an ad-hoc controller ruling to avoid tripping
+the prohibition (see `docs/PROGRESS.md`'s post-2026-09-10 checkpoints, e.g. the round citing "this
+round closes NO §12 criterion... Rule 13's restriction on two consecutive no-criterion rounds").
+Ad-hoc rulings issued round over round are exactly the undisclosed-adjudication failure mode Rule
+14 exists to prevent for criterion wording — the same discipline was missing here for the rule
+that measures against that wording.
+
+**The fix.** CLAUDE.md's Rule 13 gains an explicit paragraph for the all-criteria-met case: a round
+satisfies the rule by (a) adding or amending criteria through Rule 14's disclosed adjudication,
+(b) closing a criterion added under (a), or (c) re-verifying one or more existing criteria against
+fresh evidence at the round's HEAD, named by number and recorded as actually run. The
+no-two-consecutive-no-movement prohibition is explicitly preserved — it now reads "none of (a)–(c)"
+in place of "no criterion moved from unmet to met" — so a round still cannot coast on pure
+process-hardening indefinitely; it must add, close, or re-verify something nameable. The
+checkpoint's `<n> of N` is re-measured as MET-status-per-criterion, never carried forward as the
+structural total, and N is no longer pinned at 48 — it is whatever §12 currently contains,
+re-derived at the moment a round names it (mirroring this project's existing "measured, not
+carried forward" discipline for D-number censuses and citation sweeps elsewhere in CLAUDE.md).
+
+**Why not just declare 48/48 the terminal state and drop Rule 13 once satisfied.** §12's own
+history (39 → 48, `docs/PROGRESS.md:33` vs. 2026-08-27) shows the criteria set is not fixed for
+the life of the project — the D145 gap this same round's ADR-0148 closes is direct proof a
+"complete" acceptance bar can still miss a real production defect class. Retiring Rule 13 at
+48/48 would have removed the only mechanism forcing a future gap like D145 to become a *named,
+tracked* criterion rather than a defect fixed and never re-tied to the bar.
+
+**Scope.** This ADR amends CLAUDE.md's process rule only; it adds no §12 criteria itself — that is
+ADR-0148, a separate, disclosed decision per Rule 14.
+
+---
+
+## ADR-0148 — Three new §12 criteria close the `pilot`/Harmony live-conformance gap D145 exposed
+
+**Decision (2026-09-25).** §12 reached 48 of 48 on 2026-09-10, but D145 (fixed `669220a`, disclosed
+in `docs/INTEGRATION_HONESTY.md`) is direct proof the acceptance bar had a real gap: the `pilot`
+profile could not decode a single existing-file `apply_patch` — every diff-bearing role burned its
+repair turn and the repo walked the ladder to `REQUIRES_HUMAN_INTERVENTION` — and no §12 criterion
+would have caught it before it shipped. §12.41 only exercises `--profile local` against a stub
+OpenAI-compatible server; nothing in §12 drives `pilot` → `render_prompt` → `HarmonyGptOssBackend`
+→ a real endpoint, and nothing checks that work is actually spread across the two Spark endpoints
+this fleet will use in production. Per Rule 14, a scope addition to §12 is a decision, not a
+bugfix, and is recorded here rather than folded silently into D145's fix commit.
+
+**The fix.** Three criteria are added to `docs/SPEC.md` §12 (48 → 51; the 48 already met are
+unaffected, re-derived per criterion under amended Rule 13/ADR-0147, not carried forward):
+
+- **§12.49 — Harmony conformance against a live endpoint.** A `live`-marked suite (skipped by
+  default) exercises every endpoint in the `pilot` profile against plain replies, a tool call, the
+  two-round `apply_patch` flow, a ≥64k-token prompt, and ≥32 concurrent requests per endpoint, with
+  token-level assertions (first token `<|channel|>`, every tool call terminates `<|call|>`, every
+  recipient resolves, arguments parse as JSON, no `analysis`-channel leakage into the final
+  answer). Failures classify as server-corruption signatures (fail the criterion) versus model
+  format deviations (pass under a threshold pre-registered before the first live run, to avoid
+  post-hoc threshold-shopping). A report is committed under `docs/evidence/`.
+- **§12.50 — `pilot` completes a fixture run end to end, offline at the LLM layer.** Proves the
+  live path lands a real `apply_patch`-decoded fix via `git apply`, that every outbound LLM call
+  targets a configured Spark endpoint, that the Harmony vocabulary loads without network access to
+  a vocab host, and that the live run's token streams are captured as a replay fixture so the
+  default (non-`live`) suite can verify the same decode path without hardware.
+- **§12.51 — calls distribute across both Spark endpoints with per-repo affinity.** Both endpoints
+  serve calls over a fixture run with the split recorded; one `repo_id`'s calls within a phase
+  stick to one endpoint (stable hash); losing one endpoint fails over to the other without
+  charging the repo (mirrors §12.43's existing failover-accounting invariant). Clauses (i) and
+  (iii) are provable against local stub endpoints in the default suite today; (i) is also to be
+  measured live.
+
+**This round adds the criteria; it does not meet them.** Meeting §12.49–51 requires access to live
+Spark hardware (both endpoints), which this round does not have — that is deliberately a later,
+separate round's work. All three are recorded `OPEN` in `docs/CRITERIA_PLAN.md` with their own
+done bars, per Rule 14's "kept current in the same commit" requirement.
+
+**Why three criteria and not one.** §12.49 is a conformance property of the backend in isolation
+(does Harmony decode correctly against a real model), §12.50 is an end-to-end pipeline property
+(does a real fix land through the full six-phase flow, and can the default suite replay it without
+hardware), and §12.51 is a fleet-operations property (is load actually spread across the hardware
+this project owns, with correct affinity and failover). A single combined criterion would let a
+future round claim partial credit by conflating "the backend can decode a patch" with "the fleet
+correctly uses both machines," which is exactly the kind of narrowing Rule 14 exists to prevent.
+
+**D145 disposition.** D145 itself is already `FIXED, LANDED` (`669220a`) per
+`docs/INTEGRATION_HONESTY.md` — this ADR does not reopen it. §12.49–51 exist so the *class* of gap
+D145 exposed (a real defect with no covering criterion) is now covered going forward, independent
+of whether any individual future Harmony defect happens to get its own D-number.
+
+---
+
+## ADR-0149 — Replica endpoints (`BackendTarget.base_urls`) resolved per repo inside `LadderModelClient`, bound through a `for_repo` view rather than a `complete()` parameter
+
+**Date:** 2026-09-25 · **Round:** `pilot-criteria-bringup`, B3 · **Moves:** §12.51 toward met (stub
+legs of (i) and (iii), and (ii)); does **not** close it — (i)'s live leg needs the two real Spark
+hosts (Round C).
+
+**Placement — orchestrator ruling (given in the dispatch brief, not this lane's choice).** Replica
+selection happens where targets are resolved, inside `LadderModelClient`, via a new view-returning
+method on that class that binds `repo_id`; `ModelClient.complete()`'s Protocol signature does not
+grow a `repo_id` parameter. This mirrors `CachingModelClient.scoped()` (`llm/cache.py`) one layer
+down: that method binds cache-key concerns and never reaches `_inner`, so it could not carry
+`repo_id` to where the `base_url` is read before `backend.invoke()`.
+
+**Wiring — Agent Recommendation (this lane's judgment call, Guardrail 1).**
+
+1. **Schema.** `BackendTarget.base_urls: tuple[str, ...] | None`, mutually exclusive with
+   `base_url`, at least two distinct non-empty entries (one endpoint is spelled `base_url`). It is
+   ONE logical target with equal-peer replicas — not ADR-0023's ordered `route.targets` list.
+   Settings: `_REQUIRED_TARGET_FIELDS`'s `base_url` requirement is satisfied by `base_urls`; B2's
+   `config/models.local.yaml` overlay treats the two as one fact, so an override naming either
+   drops the template's other spelling (the committed `pilot` template keeps its single placeholder
+   `base_url`, and an operator lists real replicas as `base_urls` in the untracked file). An
+   override naming both still fails `BackendTarget`'s validator, loudly.
+2. **Selection.** `replica_index(repo_id, n)` = first 8 bytes of `sha256(repo_id)` mod `n` —
+   never builtin `hash()` (salted per process by `PYTHONHASHSEED`). `resolve_replicas(target,
+   repo_id)` returns one `model_copy(update={"base_url": u, "base_urls": None})` per replica,
+   rotated so the affine replica is first; the registered target is never mutated and a backend
+   never sees `base_urls`. Unbound (`repo_id is None`) starts at replica 0.
+3. **Failover.** `complete()` slices `max_targets_per_call` over LOGICAL targets (what the knob
+   has always counted), then expands each to its replicas. A replica hop is therefore an ordinary
+   hop of the existing loop: health-gated, a `backend_failover` event with the unchanged shape
+   (from/to backend and model_id — identical across replicas), and counted in
+   `usage.llm_failovers` → `attempts.llm_failovers`, never `phases.attempts` (§12.43 unchanged).
+4. **Breaker key includes the endpoint.** `BackendHealth._key` was `backend:model_id`, which both
+   replicas share. Measured (mutation M4 below, re-measured by the review and again by this lane
+   with a pinned-interpreter probe: 5 sequential calls, a dead affine replica): the breaker NEVER
+   opens — each call's refusal on the dead replica is followed by its peer's `record_success` on
+   the same key, which resets the failure count, so the dead replica is dialled on every call (5
+   of 5, not 3) and every affected call pays its refusal/timeout first. No call raised.
+   *Corrected 2026-09-25 after review:* this sentence first claimed the shared key "opened the
+   breaker for its healthy peer and the next call raised `TierUnavailable`" — unmeasured, and
+   false for sequential calls; that outcome would need concurrent in-flight calls landing in a
+   particular order, which nothing here measures. The key is now
+   `backend:model_id@base_url` when a `base_url` is set. This also separates two ordinary targets
+   that share `backend:model_id` behind different `base_url`s (the "legitimate failover pair"
+   `TierRoute`'s docstring names), which previously shared a breaker — a behaviour change,
+   disclosed; no existing test depended on it (full suite, below).
+5. **Method name `for_repo`, not `scoped`.** `ScopedModelClient` is `@runtime_checkable`, which
+   checks method NAMES only; a `LadderModelClient.scoped(repo_id)` would pass
+   `isinstance(..., ScopedModelClient)` and `rewrite.py::_scoped_client` would call it with
+   `context_policy=` → `TypeError` wherever a bare ladder client is `ctx.llm` (some unit tests).
+   A separate `RepoScopedModelClient` Protocol (`for_repo`) plus `scope_to_repo(client, repo_id)`,
+   which degrades to the unchanged client for a fake (the `ScopedModelClient` rule).
+6. **How `repo_id` reaches the ladder from every real call site.** In production `ctx.llm` is
+   always `RunContext.model_client`, a `CachingModelClient` wrapping a `LadderModelClient`
+   (`orchestrator/context.py::__post_init__`); `WorkerContext` is built with it at exactly two
+   `src/` sites (`RunContext.worker_context`, `cli.py`'s stub-revalidation path; the third
+   `WorkerContext(` in `cli.py` passes `llm=cast(Any, None)`). Both now pass
+   `scope_to_repo(model_client, repo_id)`. `CachingModelClient.for_repo` returns a copy whose
+   `_inner` is `_inner.for_repo(repo_id)` (same store, mode, rung scoping), and `scoped()` reuses
+   `_inner`, so `rewrite.py`'s rung views keep the binding. Binding once at context construction,
+   rather than at each worker call site (`classify.py`'s direct `ctx.llm.complete`, the
+   `llm/calls.py` helpers called from buildgen/buildverify/prwriter/rewrite), means no worker changed
+   and no future call site can forget it. `LadderModelClient.for_repo` is a shallow copy, so the
+   router, sinks and — load-bearing — the `BackendHealth` breaker are shared across repos.
+7. **Split recorded.** `LlmCall` (and the `llm_call` event payload) gained `base_url`, the
+   endpoint that answered — the only record that distinguishes replicas.
+   `BackendFailover`/`BackendHealthTransition` payloads were NOT widened (the brief asked to match
+   the existing shape); a replica hop therefore reads as `X→X` there. Disclosed blind spot: the
+   health-transition event cannot say WHICH replica went DOWN.
+
+**Consequence for an existing test.** `tests/test_run_context_llm_cache.py`'s
+`worker.llm is ctx.model_client` identity no longer holds by design (the hand-down is a view);
+restated component-wise (cache-wrapped, same store, same breaker). Its documented discriminating
+mutation (`llm=self.model_client._inner`) is still caught by the `isinstance` half.
+
+**Rule 12 matrix** (`tests/test_replica_affinity.py` + `tests/test_settings.py`; each gated by a
+non-zero `git diff --numstat --no-index` against a backup; run with a `-k` over those two files'
+replica/`base_urls` cases): M1 builtin `hash()` → 4 RED incl. the cross-`PYTHONHASHSEED` test; M2
+per-call re-roll → 3 RED incl. `test_every_call_for_one_repo_hits_one_replica`; M3 no replica
+failover → 3 RED incl. the client-level and CLI refusing-replica tests; M4 breaker keyed without
+the endpoint → 1 RED (client-level refusing-replica test, its unique discriminator); M5 worker
+context left unbound → 2 RED (both CLI arms); M6 override not dropping the template `base_url` → 1
+RED; control (cosmetic reflow of the rotation) → all green.

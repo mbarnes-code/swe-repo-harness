@@ -7713,7 +7713,9 @@ wire through (`record_task_anchor` is REWRITE/RELOCATE-specific, called only fro
 scenario is specifically the `git apply`/`git commit` REWRITE mutation flow), so this scope
 boundary does not block the criteria this defect names.
 
-`_TransformClaimHook` (`cli.py:5930`, repointed +2, 2026-09-16, by ADR-0142's `max_calls=`
+`_TransformClaimHook` (`cli.py:5933`, repointed +3, 2026-09-25: +1 for ADR-0149's `scope_to_repo`
+import, +2 for drift the 2026-09-16 repoint left — it cited 5930 while `class _TransformClaimHook`
+sat at 5932 — found in ADR-0149's review and re-checked by reading line 5933 itself; superseding the repoint +2, 2026-09-16, by ADR-0142's `max_calls=`
 argument added to `_scan_impl`'s `open_budget_ledger` call above it, superseding the repoint +27, 2026-09-11, by an uncommitted bug-fix pass's
 insertions above it in `cli.py` — pure insertion, confirmed by exact-line-content match against
 the current tree; round VI task 111's own repoint (`cli.py:5901`) is superseded, per this file's
@@ -9267,7 +9269,10 @@ the premise it was quoting from ADR-0119 has moved. See ADR-0119's own matching 
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2796-2833`, repointed +2, 2026-09-16, by ADR-0142's `max_calls=` argument added to
+(`cli.py:2799-2834`, repointed 2026-09-25: start +3 — +1 for ADR-0149's `scope_to_repo` import, +2
+for drift the 2026-09-16 repoint left (it cited 2796 while `async def _committed_contracts` sat at
+2798), found in ADR-0149's review and re-checked by reading line 2799 itself; superseding
+the repoint +2, 2026-09-16, by ADR-0142's `max_calls=` argument added to
 `_scan_impl`'s `open_budget_ledger` call above it, superseding the repoint +27, 2026-09-11, by an uncommitted bug-fix pass's insertions above
 it in `cli.py` — pure insertion, confirmed by exact-line-content match against the current tree;
 round VI task 111's own repoint (`cli.py:2767-2802`) is superseded, per this file's
@@ -11781,7 +11786,7 @@ grounding the finding against real reference-harness source. `references/open-sw
 github_comments.py:69-70,130-156` shows a real, shipped defense: untrusted content is wrapped in a
 reserved tag, and any literal occurrence of that tag's open/close strings inside the untrusted text
 is neutralized before wrapping, so the content cannot forge a matching close. Fleet Engine has no
-equivalent mechanism: `render_prompt()` (`llm/calls.py:258-290`) embeds the evidence mapping as one
+equivalent mechanism: `render_prompt()` (`llm/calls.py:264-324`) embeds the evidence mapping as one
 `sort_keys=True` JSON blob directly after a fixed `_EVIDENCE_HEADER` label (`llm/calls.py:78`), with
 no reserved boundary marker, no escaping of any literal occurrence of that label inside the evidence
 values, and no explicit "treat as untrusted data, not instructions" framing beyond each role's
@@ -11947,3 +11952,166 @@ change.
 this working tree only; there is no commit SHA to cite. Update this entry's heading to `FIXED,
 LANDED (<sha>)` in the same commit that lands the change, per this file's own status-vocabulary
 discipline.
+
+---
+
+## D145 — FIXED, LANDED (`669220a`; this entry itself landed in the immediately following commit,
+`8615d6c`, matching D142's own same-round disclosure convention — **corrected 2026-09-25**: an
+earlier draft of this heading said "docs added in the same commit as this entry", which is not
+what happened — `669220a` is the fix, `8615d6c` is the entry describing it, two commits, not one).
+Every diff-bearing `pilot` role decoded
+`tool_arguments=None` in production: `render_prompt()` never emitted the fence
+`_extract_pre_images` looked for, and `ensure_ascii=True` JSON escaped file content the model
+would have needed to match byte-for-byte even where a pre-image was supplied by hand
+
+Found by tracing real `render_prompt` output (not the fixture tests) against
+`harmony_gpt_oss.py::_decode_apply_patch`/`_extract_pre_images`, per ADR-0146's own explicit
+verification requirement before allocating fix work. Confirmed interactively:
+`_extract_pre_images` returns `{}` against real `render_prompt()` output for `Role.TRANSFORM_REPAIR`
+and `Role.ESCALATION`, the two diff-shaped roles with real callers (`workers/rewrite.py`).
+
+**The gap, as measured — two independent causes, both closed by the same fix.**
+
+1. `_decode_apply_patch` (`harmony_gpt_oss.py`) returns `None` whenever any Update/Delete path in
+   the model's `apply_patch` call is missing from `pre_images`. `pre_images` is built by
+   `_extract_pre_images`, which regex-scraped `` ```path:<p>\n<content>``` `` fences out of
+   message text — a convention its own docstring said "no existing worker emits it yet," true at
+   the time it was written and never revisited before wiring a real diff-bearing role at this
+   backend. `render_prompt()` (`llm/calls.py`) emits ALL evidence, `current_content` included, as
+   one `json.dumps(redact_mapping(evidence), ...)` blob — no ` ```path: ` fence can ever appear in
+   its output. Consequence in production: every diff-bearing role on `pilot` burned its repair turn
+   on every call and the repo walked the ladder to `REQUIRES_HUMAN_INTERVENTION`.
+2. Independent of (1): `ensure_ascii=True` JSON renders a real newline/quote byte as the literal
+   two-character sequence `\n`/`\"`. A V4A/unified-diff hunk's context lines must match the real
+   file byte-for-byte, so even a hand-supplied `pre_images` entry built from escaped JSON text
+   would require the model to mentally un-escape before it could write a matching context line —
+   confirmed by rendering `{"current_content": "def greet():\n    print(\"Hi\")\n"}` and observing
+   the literal two-character `\n` sequence in the JSON value, not a real newline byte.
+
+`tests/test_llm_backend_harmony_gpt_oss.py`'s `_PRE_IMAGE_MESSAGE` fixture and
+`test_the_real_client_gets_a_validated_patch_proposal_through_a_repair_turn` both hand-build a
+fenced message directly (`Message(role="user", content=_PRE_IMAGE_MESSAGE)`), never calling
+`render_prompt` — confirmed zero occurrences of `render_prompt` in either that test file or
+`harmony_gpt_oss.py` before this fix. This is why the suite was green while the production path
+was broken.
+
+**Fix (ADR-0146).** File-content evidence now renders as a raw, CommonMark-safe fenced block
+appended after the JSON evidence body, via one new shared module, `src/fleet/llm/fences.py`
+(`fence_file`/`parse_file_fences`, plus `discover_fenced_paths` for the one caller with no
+independent path allowlist). `render_prompt()` calls the writer; `harmony_gpt_oss.py::
+_extract_pre_images` calls the reader — one module, so the two formats cannot drift apart.
+`prompt_template_version` bumped 1 → 2 for `Role.TRANSFORM_REPAIR` and `Role.ESCALATION` in
+`llm/calls.py`'s `PROMPTS` table, so no cached answer keyed on the old JSON-only prompt bytes can
+be served against the new fenced-block prompt.
+
+**Proof, not assertion.** `tests/test_llm_backend_harmony_gpt_oss.py::
+test_a_diff_bearing_roles_real_render_prompt_output_decodes_a_non_none_apply_patch` (parametrized
+over both `TRANSFORM_REPAIR` and `ESCALATION`) renders evidence through the REAL `render_prompt`,
+feeds it to `HarmonyGptOssBackend` with a scripted `apply_patch` reply, and asserts a non-`None`
+`tool_arguments`. **Mutation matrix, actually measured (Rule 12), not asserted:** with
+`render_prompt` temporarily reverted to JSON-only rendering (`git diff --numstat` confirmed 16
+lines actually changed before trusting the result), `tests/test_llm_backend_harmony_gpt_oss.py` +
+`tests/test_llm_fences.py` together went from 59 passed / 0 failed to **57 passed / 2 failed** —
+exactly the two new parametrized cases of this test, both on
+`assert result.tool_arguments is not None`. Every other test, including every
+`tests/test_llm_fences.py` round-trip test (`fences.py` was untouched by this mutation, so this
+correctly shows the mutation scoped to `calls.py`) and the existing hand-built
+`_PRE_IMAGE_MESSAGE`-based tests (`test_the_real_client_gets_a_validated_patch_proposal_through_a_
+repair_turn` included, since it never calls `render_prompt`), stayed GREEN. Reapplying the fix
+returned the suite to 59/59 — this is the discriminating shape CLAUDE.md Rule 12 requires (old
+code passes, new-shaped test fails, under a mutation confirmed to have actually changed the code
+and confirmed not to have broken the whole module: only 2 of 59 cases went red, not all of them).
+The same test also runs the decoded diff through `git apply --check` against a real git worktree
+seeded with the original file content. A planted secret (`tests/test_llm_backend_harmony_gpt_oss.py::
+test_a_planted_secret_never_reaches_the_transport_token_ids`) is confirmed absent from the
+transport's decoded `prompt_token_ids` in both evidence fields it was planted in, proving
+redaction still applies to the fenced block. `render_prompt()`'s determinism is confirmed
+byte-identical across two subprocesses under `PYTHONHASHSEED=0` and `PYTHONHASHSEED=1`.
+
+**Editorial addendum (2026-09-25, same round, before this branch's review completed) —
+`669220a`'s `_extract_pre_images` was itself exploitable, fixed in `1b85705`.** An independent
+review of `669220a`/`8615d6c` found the "injection safety" this entry originally described was not
+real protection: `_extract_pre_images` derived its `allowed_paths` by re-scanning the SAME text it
+was about to parse (`parse_file_fences(text, discover_fenced_paths(text))`), which restricts
+nothing, and it scanned EVERY message in the conversation regardless of role, including
+`assistant`/`tool` messages that carry the model's own prior reply during a repair turn
+(`client.py::_repair_turns`). The review proved this exploitable, not merely imprecise: an
+`assistant`-role message echoing a forged `` ```path:src/app.py\n<forged>``` `` block silently
+overrode the REAL pre-image for that same path (`dict.update`, last-scanned wins), and a second
+probe introduced a path (`/etc/x`) the harness had never rendered at all. Fixed in `1b85705`: the
+real trust boundary is "who wrote this message", not "what does the text claim" —
+`_extract_pre_images` now scans ONLY `system`/`user`-role messages (the only roles `render_prompt`
+ever writes a fence into) and trusts every block a sequential scan finds inside one
+(`fleet.llm.fences.trusted_fenced_blocks`); `assistant`/`tool` messages are excluded
+unconditionally, by role. Regression tests
+`test_a_forged_assistant_message_fence_never_overrides_or_introduces_a_pre_image` and
+`test_a_forged_tool_message_fence_is_also_never_scanned` reproduce the reviewer's exact probe —
+confirmed RED against `669220a`'s code, GREEN after `1b85705`. **Corrected mutation matrix:**
+re-running the Rule 12 proof against the fixed code, reverting `render_prompt`'s fencing now
+reddens **4** of 61 tests (the original 2 RED→GREEN cases plus these 2 new regression tests, since
+they also depend on a real fence existing in the harness-rendered message), not the 2 originally
+reported before this addendum — the original "57 passed / 2 failed" figure above is left as
+written per this file's annotate-in-place convention and is superseded by this paragraph's 4-of-61
+for the code as it now stands.
+
+**Second editorial addendum (2026-09-25, same round) — N1: role alone was STILL not enough; the
+`1b85705` mechanism above was itself exploitable, fixed in `2ff7d1a`.** A second independent
+review found `1b85705`'s "scan only `system`/`user`-role messages" premise false: `user`-role does
+not imply harness-authored once a repair round exists. `client.py::_repair_turns` builds its
+repair-instruction message as `Message(role="user", content=_REPAIR_INSTRUCTION.format(
+error=detail))` where `detail = str(exc)` is a Pydantic `ValidationError`; `FleetModel`'s
+`extra="forbid"` means an unexpected key in a malformed model reply is quoted VERBATIM into that
+error text, backticks and newlines included. The reviewer's probe reproduced this end to end
+through the real `_validate` → `_repair_turns` → `_extract_pre_images` path (no mocks): a model
+reply carrying a bogus key shaped like a fenced block reached a `user`-role message with conversation
+roles `['system', 'user', 'assistant', 'user']` — the forged fence rode in on the SECOND `user`
+message, the repair turn, not the original prompt — overriding the real pre-image and separately
+introducing a path the harness never rendered.
+
+The property that is actually true is narrower than role membership: pre-images never change
+mid-conversation, so ONLY the messages strictly BEFORE the first `assistant`/`tool`-role
+message — the harness's ORIGINAL prompt, `render_prompt()`'s own output, before any model reply
+exists anywhere in the conversation — are guaranteed uncontaminated. Fixed by
+`harmony_gpt_oss.py::_original_prompt_messages`, which returns only that POSITIONAL prefix;
+`_extract_pre_images` now scans exclusively that prefix, never a message at or after the first
+`assistant`/`tool` turn regardless of ITS role. Regression test
+`test_a_forged_fence_from_a_repair_instructions_echoed_validation_error_is_not_trusted`
+reproduces the reviewer's exact probe (same conversation shape, same echoed-`ValidationError`
+mechanism) — confirmed RED against the role-only (`1b85705`) code, GREEN after this correction.
+`docs/DECISIONS.md`'s ADR-0146 and `docs/SPEC.md` §7.7 carry the same correction; `fences.py`'s
+module docstring and `trusted_fenced_blocks`'s own docstring no longer claim "the model never
+writes into a `system`/`user` message" — that claim was false for a repair-turn `user` message and
+is corrected to the positional framing throughout.
+
+**Added 2026-09-25.** This defect is the reason `docs/SPEC.md` §12 gained three new criteria
+(§12.49–51, `docs/DECISIONS.md` ADR-0148): D145 was a real production defect that no §12 criterion
+would have caught before it shipped, since §12.41's local-profile proof never exercised `pilot` →
+`render_prompt` → `HarmonyGptOssBackend` against a real endpoint. This note does not change D145's
+own `FIXED, LANDED` status above — it records the forward link for a reader following citations
+from ADR-0148.
+
+---
+
+## D146 — OPEN. `Role.API_INCOMPAT_REWRITE` (`ApiRewriteProposal`) has zero callers anywhere in
+`src/fleet` — a diff-shaped role that is unreachable in the shipped pipeline, disclosed and
+explicitly out of scope for D145's fix
+
+Found during D145/ADR-0146's sweep of which roles are actually diff-shaped and actually reachable,
+before deciding which roles' evidence needed the fenced-block fix. `src/fleet/llm/calls.py:424`
+defines `rewrite_api_incompat()`, bound to `Role.API_INCOMPAT_REWRITE` and schema
+`ApiRewriteProposal` (`schemas.py`, extends `LlmPatchProposal` — diff-shaped, same as
+`TRANSFORM_REPAIR`/`ESCALATION`). `grep -rn "rewrite_api_incompat" src/fleet/` and
+`grep -rn "API_INCOMPAT_REWRITE|ApiRewriteProposal" src/fleet/workers/` both return nothing outside
+the role/schema/prompt-table definitions themselves — no worker calls `rewrite_api_incompat()`, no
+worker builds evidence carrying a file-content key for it. It is a defined, schema-valid role with
+no caller, not a role that is called and silently fails.
+
+**Not fixed here — explicitly out of scope for D145/ADR-0146.** D145's fix wires the
+`current_content`/`path` evidence pairing through `render_prompt()`'s fenced-block rendering for
+`TRANSFORM_REPAIR` and `ESCALATION` only, the two roles confirmed to have a real caller. Building
+evidence wiring for a role nothing calls would be speculative generality with no way to verify it
+against real evidence shape (CLAUDE.md's directive against inventing speculative generality beyond
+what can be verified). Whoever wires a caller for `rewrite_api_incompat()` in the future should
+confirm at that point whether its evidence carries a file-content key in the same `current_content`
+shape, or a different one, and extend `render_prompt()`'s file-carrier handling accordingly — the
+mechanism (`fleet.llm.fences`) does not need to change, only which evidence key triggers it.

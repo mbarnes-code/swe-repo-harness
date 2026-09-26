@@ -113,34 +113,42 @@ profiles:
   # `profiles.pilot` — §15.2 (Real-Repo Pilot Phase) prerequisite: "the corresponding `ModelClient`
   # backend registry entry and local-only pilot profile (mirroring §12.41's existing
   # local-only-profile precedent)". Unlike `local` (three differently-sized models, one per tier),
-  # `pilot` routes all three tiers to ONE dedicated Spark host serving the customer-specified
-  # `nvidia/nemotron-3-super-120b-a12b` for every role. Same `openai_compatible` transport as
-  # `local` — no new backend class, no new abstraction.
-  #
-  # PLACEHOLDER — `base_url` below MUST be edited to the real host once the Spark is selected and
-  # provisioned (§15.2 prerequisite; selecting/provisioning the Spark and serving the model on it
-  # are infrastructure steps outside this repo, done separately by a human). Until then this
-  # profile cannot serve real traffic.
-  #
-  # No `capabilities_override` on any tier, deliberately: per the `local:` block's comment above,
-  # these overrides are the claim that THIS endpoint does better than the backend's honest floor,
-  # and nobody has verified the real Spark server's actual capabilities yet (it isn't provisioned).
-  # So this profile falls back to `openai_compatible`'s declared floor (PROMPTED only) rather than
-  # assert an unverified claim; an operator should add overrides only after confirming what the
-  # live endpoint actually supports.
+  # `pilot` routes all three tiers to ONE dedicated Spark host serving GPT-OSS-120b over Harmony
+  # (ADR-0145) for every role. Uses the dedicated `harmony_gpt_oss` transport (ADR-0145), not
+  # `openai_compatible`: GPT-OSS requires Harmony's token-id wire format, which is not an OpenAI
+  # chat-completions JSON variation.
   pilot:
     HEAVY:
-      - { backend: openai_compatible, model_id: nvidia/nemotron-3-super-120b-a12b, effort: high,
+      - { backend: harmony_gpt_oss, model_id: gpt-oss-120b, effort: high,
           price: free,
           base_url: 'http://pilot-spark.internal:8000/v1' }
     WORKHORSE:
-      - { backend: openai_compatible, model_id: nvidia/nemotron-3-super-120b-a12b, effort: medium,
+      - { backend: harmony_gpt_oss, model_id: gpt-oss-120b, effort: medium,
           price: free,
           base_url: 'http://pilot-spark.internal:8000/v1' }
     CHEAP:
-      - { backend: openai_compatible, model_id: nvidia/nemotron-3-super-120b-a12b, effort: low,
+      - { backend: harmony_gpt_oss, model_id: gpt-oss-120b, effort: low,
           price: free,
           base_url: 'http://pilot-spark.internal:8000/v1' }
-    # No `api_key_env` on any tier — same reasoning as `local`: it is unknown/unverified whether
-    # the eventual Spark server requires one. Add `api_key_env: PILOT_LLM_API_KEY` (a variable
-    # NAME, never a key) if the real server checks one.
+    # `model_id: gpt-oss-120b` (round `pilot-criteria-bringup`, B2) is the REAL served model
+    # family name, not sensitive — it names what `vllm serve --served-model-name gpt-oss-120b`
+    # will launch, never a hostname or IP. `base_url` stays the placeholder below: unlike the
+    # model id, a real Spark hostname/IP must never be committed to this public-mirrored repo.
+    #
+    # PLACEHOLDER — `base_url` must be REPLACED once the Spark host is provisioned (ADR-0145; same
+    # treatment the previous nemotron placeholder had — not a new kind of incompleteness, only a
+    # renamed one), but never by editing it here. Never hand-edit this file with the real host: use an untracked, gitignored
+    # `config/models.local.yaml` instead (see `.gitignore` and `docs/SPEC.md`'s `config/models.yaml`
+    # section for the override file's format) — `FleetSettings.load()` overlays it onto this
+    # committed template at load time, so the real endpoint never touches version control.
+    #
+    # No `capabilities_override` on any tier: harmony_gpt_oss's own declared_capabilities()
+    # already claims TOOL_CALL unconditionally (a fact about the GPT-OSS model family, not this
+    # endpoint) — see that method's docstring in
+    # src/fleet/llm/backends/harmony_gpt_oss.py for why this differs from `local`'s
+    # openai_compatible targets, which DO need overrides to claim anything above the honest
+    # opaque-base_url floor.
+    #
+    # No `api_key_env` — same reasoning as `local`: unknown/unverified whether the eventual Spark
+    # server requires one. Add `api_key_env: PILOT_LLM_API_KEY` (a variable NAME, never a key) if
+    # the real server checks one.

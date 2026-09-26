@@ -84,6 +84,9 @@ def _target_for(backend_name: str, *, suffix: str) -> BackendTarget:
         fields["region"] = f"region-{suffix}"
     if backend_name == "anthropic":
         fields["api_key_env"] = f"PROBE_KEY_{suffix.upper()}"
+    if backend_name == "harmony_gpt_oss":
+        # `declared_capabilities` validates `base_url` first (§13 row 36) and raises without it.
+        fields["base_url"] = f"http://probe-{suffix}.invalid/v1"
     return BackendTarget(**fields)
 
 

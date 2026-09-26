@@ -1,0 +1,915 @@
+"""ADR-0145 `harmony_gpt_oss` — GPT-OSS-120b over Harmony + vLLM's token-id completions endpoint
+(SPEC §7.7, `config/models.yaml`'s `pilot` profile).
+
+GPT-OSS models are trained on OpenAI's Harmony envelope, not on chat-completions JSON
+(`references/harmony/docs/format.md:1-4`), and are RL-trained to emit code edits via a single
+`apply_patch` function tool whose payload is OpenAI's own patch-language text, not a unified diff
+(`references/gpt-oss/gpt_oss/tools/apply_patch.md`). This module:
+
+1. Renders Fleet's neutral `Message` sequence into a Harmony `Conversation` and encodes it to
+   token ids via the `openai-harmony` SDK.
+2. Posts those token ids to vLLM's legacy completions endpoint (NOT chat-completions) via the
+   `openai` SDK's `client.completions` resource — already a core dependency
+   (`pyproject.toml:34`) — and gets token ids back.
+3. Parses the returned tokens back into Harmony `Message`s and, when the negotiated schema has a
+   `[{path, diff}]`-shaped property, decodes an `apply_patch` tool call into that property via
+   `fleet.vcs.apply_patch` and takes the schema's remaining fields from a second round trip (see
+   `invoke()`); otherwise falls back to the ordinary generic `emit_response` tool call every
+   other TOOL_CALL backend already uses.
+
+Three properties this module exists to keep true, matching `openai_compatible.py`'s own three
+(module docstring, `src/fleet/llm/backends/openai_compatible.py:9-33`):
+
+1. **The SDK is quarantined.** The `openai_harmony` import is at MODULE scope, unguarded: on a host
+   without the `harmony` extra the import fails and `client.discover()` leaves this backend
+   unregistered. Everything above the transport moves plain Python values.
+2. **The declared capability floor is fact-checked, not assumed.** See `declared_capabilities`'s
+   own docstring for why this backend declares `TOOL_CALL` unconditionally where
+   `openai_compatible.py` cannot.
+3. **It decides nothing.** No validation, no schema retry, no mode selection — an ambiguous or
+   missing model reply comes back as `tool_arguments=None`, never a raised exception, exactly like
+   `openai_compatible.py::_tool_arguments`'s own "spending a repair on a mangled arguments string
+   is a strictly better outcome than failing the target over" (§7.7).
+
+`git apply` remains the harness's ONLY worktree writer (`src/fleet/vcs/git.py:435`) and
+`FilePatch.diff` remains the ONLY patch representation (`src/fleet/models/tasks.py:204`)
+everywhere outside this file: the `apply_patch`-format text this module decodes never crosses out
+of `invoke()`.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Any, ClassVar, Final, Protocol, cast
+
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
+from openai_harmony import (
+    Author,
+    Conversation,
+    DeveloperContent,
+    HarmonyEncodingName,
+    ReasoningEffort,
+    Role,
+    SystemContent,
+    ToolDescription,
+    load_harmony_encoding,
+)
+from openai_harmony import (
+    Message as HarmonyMessage,
+)
+
+from fleet.llm.client import (
+    BackendReply,
+    FinishReason,
+    LlmError,
+    Message,
+    ModelBackend,
+    TransportError,
+    register_backend,
+)
+from fleet.llm.fences import trusted_fenced_blocks
+from fleet.models.enums import StructuredOutputMode
+from fleet.models.tasks import (
+    BackendTarget,
+    ModelCapabilities,
+    TokenUsage,
+)
+from fleet.vcs.apply_patch import (
+    DiffError,
+    commit_to_file_edits,
+    identify_files_needed,
+    patch_to_commit,
+    text_to_patch,
+)
+
+_MAX_CONTEXT: Final[int] = ModelCapabilities.model_fields["max_context"].default
+_MAX_OUTPUT_TOKENS: Final[int] = ModelCapabilities.model_fields["max_output_tokens"].default
+
+_DECLARED: Final[ModelCapabilities] = ModelCapabilities(
+    supports_tools=True,
+    supports_json_schema=False,
+    supports_system_prompt=True,
+    supports_streaming=False,
+    supports_constrained_decoding=False,
+    max_context=_MAX_CONTEXT,
+    max_output_tokens=_MAX_OUTPUT_TOKENS,
+    structured_output_modes=(StructuredOutputMode.TOOL_CALL, StructuredOutputMode.PROMPTED),
+)
+"""See `declared_capabilities`'s docstring for the fact-checked rationale (Agent Recommendation,
+ADR-0145). `max_context`/`max_output_tokens` are the `ModelCapabilities` defaults, genuinely
+unverified numbers pending a real Spark endpoint — raised per-target via `capabilities_override`
+once measured, matching `config/models.yaml`'s `local` profile precedent."""
+
+
+_TOOL_NAME: Final[str] = "emit_response"
+"""The ordinary generic tool name for a non-diff-shaped schema — matches
+`openai_compatible.py:72` and `vertex.py:92` exactly, so a reader who knows either backend
+recognises this one immediately."""
+
+_APPLY_PATCH_TOOL_NAME: Final[str] = "apply_patch"
+
+_PATCH_RECEIVED: Final[str] = "patch parsed"
+"""The tool result `invoke()` returns for a decoded `apply_patch` call before asking for the
+schema's remaining fields: confirmation only — the diff itself never goes back to the model."""
+
+_REASONING_EFFORT: Final[Mapping[str, ReasoningEffort]] = {
+    "low": ReasoningEffort.LOW,
+    "medium": ReasoningEffort.MEDIUM,
+    "high": ReasoningEffort.HIGH,
+}
+
+# Vendored VERBATIM from references/gpt-oss/gpt_oss/tools/apply_patch.md. `references/` is
+# read-only reference material (CLAUDE.md §5); this is our own copy under src/, so nothing reads
+# `references/` at runtime. Keep in sync by hand if that file's prose ever changes upstream;
+# nothing here auto-syncs it.
+_APPLY_PATCH_INSTRUCTIONS: Final[str] = """When requested to perform coding-related tasks, you \
+MUST adhere to the following criteria when executing the task:
+
+- Use `apply_patch` to edit files.
+- If completing the user's task requires writing or modifying files:
+  - Your code and final answer should follow these _CODING GUIDELINES_:
+    - Avoid unneeded complexity in your solution. Minimize program size.
+    - Keep changes consistent with the style of the existing codebase. Changes should be \
+minimal and focused on the task.
+    - NEVER add copyright or license headers unless specifically requested.
+- Never implement function stubs. Provide complete working implementations.
+
+§ `apply_patch` Specification
+
+Your patch language is a stripped-down, file-oriented diff format designed to be easy to \
+parse and safe to apply. You can think of it as a high-level envelope:
+
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
+
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of three headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Update File: <path> - patch an existing file in place (optionally with a rename).
+
+May be immediately followed by *** Move to: <new path> if you want to rename the file.
+Then one or more “hunks”, each introduced by @@ (optionally followed by a hunk header).
+Within a hunk each line starts with:
+
+- for inserted text,
+* for removed text, or
+  space ( ) for context.
+  At the end of a truncated hunk you can emit *** End of File.
+
+A full patch can combine several operations:
+
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+*** Move to: src/main.py
+@@ def greet():
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
+*** End Patch
+
+It is important to remember:
+
+- You must include a header with your intended action (Add/Delete/Update)
+- You must prefix new lines with `+` even when creating a new file
+"""
+
+_APPLY_PATCH_TOOL: Final[ToolDescription] = ToolDescription.new(
+    _APPLY_PATCH_TOOL_NAME,
+    "Patch a file",
+    parameters={
+        "type": "string",
+        "description": "Formatted patch code",
+        "default": "*** Begin Patch\n*** End Patch\n",
+    },
+)
+"""Mirrors `references/gpt-oss/gpt_oss/chat.py:114-124` exactly: `apply_patch` takes ONE raw
+string argument (the patch text), not an object with a `patch` property — this is a fact about
+how GPT-OSS was trained to call this specific tool, not a Fleet convention."""
+
+
+_LOCAL_DEFS_PREFIX: Final[str] = "#/$defs/"
+
+
+def _resolve_refs(schema: Mapping[str, object]) -> dict[str, object]:
+    """`schema` with every local `{"$ref": "#/$defs/X"}` replaced by a copy of `$defs.X` (nested
+    refs included), and the top-level `$defs` dropped once nothing points into it.
+
+    Pydantic v2's `model_json_schema()` emits a nested model as a `$ref` into `$defs` — which is
+    how every diff-bearing Fleet schema arrives here (`files.items` is
+    `{"$ref": "#/$defs/ProposedFileEdit"}`). Neither this module's structural detection nor
+    Harmony's tool-parameter TypeScript renderer follows a `$ref` (the renderer shows the field as
+    `any`), so both must see the inlined shape. Sibling keys next to a `$ref` (Pydantic puts a
+    field's `description` there) are merged over the resolved copy. A ref that is not a local
+    `$defs` pointer, names a missing entry, or is recursive (already being expanded on the current
+    path) is left in place untouched: this backend reports, it never raises on a schema's shape."""
+    defs_value = schema.get("$defs")
+    defs = defs_value if isinstance(defs_value, Mapping) else {}
+    unresolved: list[str] = []
+
+    def walk(node: object, expanding: frozenset[str]) -> object:
+        if isinstance(node, list):
+            return [walk(item, expanding) for item in node]
+        if not isinstance(node, Mapping):
+            return node
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith(_LOCAL_DEFS_PREFIX):
+            name = ref[len(_LOCAL_DEFS_PREFIX) :]
+            target = defs.get(name)
+            if isinstance(target, Mapping) and name not in expanding:
+                # walk() maps a Mapping to a dict, always.
+                resolved = cast(dict[str, object], walk(target, expanding | {name}))
+                siblings = {k: walk(v, expanding) for k, v in node.items() if k != "$ref"}
+                return {**resolved, **siblings}
+            unresolved.append(ref)
+        return {k: walk(v, expanding) for k, v in node.items()}
+
+    top = {k: v for k, v in schema.items() if k != "$defs"}
+    resolved_top = cast(dict[str, object], walk(top, frozenset()))
+    if unresolved and defs:
+        # A recursive local ref survived: keep `$defs` so it still points somewhere.
+        resolved_top["$defs"] = dict(defs)
+    return resolved_top
+
+
+def _file_edits_property(schema: Mapping[str, object]) -> str | None:
+    """The name of the one top-level property shaped like `[{path: string, diff: string, ...}]`
+    — the `ProposedFileEdit` shape every diff-bearing response schema uses
+    (`src/fleet/llm/schemas.py:176-200`, `215-225`, `227-235`) — or `None` for an ordinary
+    schema. Structural detection, not a hard-coded property name: this module never imports
+    `fleet.llm.schemas` (no backend does; a backend only ever sees the resolved JSON Schema).
+    Refs are resolved first — the real schemas carry `items` as a `$ref`, see `_resolve_refs`."""
+    properties = _resolve_refs(schema).get("properties")
+    if not isinstance(properties, Mapping):
+        return None
+    for name, prop in properties.items():
+        if not isinstance(prop, Mapping) or prop.get("type") != "array":
+            continue
+        items = prop.get("items")
+        if not isinstance(items, Mapping):
+            continue
+        item_properties = items.get("properties")
+        if not isinstance(item_properties, Mapping):
+            continue
+        path_prop = item_properties.get("path")
+        diff_prop = item_properties.get("diff")
+        if (
+            isinstance(path_prop, Mapping)
+            and path_prop.get("type") == "string"
+            and isinstance(diff_prop, Mapping)
+            and diff_prop.get("type") == "string"
+        ):
+            return str(name)
+    return None
+
+
+def _remaining_schema(schema: Mapping[str, object], file_edits_property: str) -> dict[str, object]:
+    """`schema` with `file_edits_property` removed from both `properties` and `required` — the
+    part of the response the model must still answer in plain JSON on the `final` channel,
+    because `apply_patch` supplies the file-edits property instead (`invoke()` merges the two)."""
+    properties_value = schema.get("properties")
+    properties = dict(properties_value) if isinstance(properties_value, Mapping) else {}
+    properties.pop(file_edits_property, None)
+    required_value = schema.get("required")
+    required = (
+        [r for r in required_value if r != file_edits_property]
+        if isinstance(required_value, list)
+        else []
+    )
+    remaining = {k: v for k, v in schema.items() if k not in ("properties", "required")}
+    remaining["properties"] = properties
+    remaining["required"] = required
+    return remaining
+
+
+def _response_format_block(remaining_schema: Mapping[str, object]) -> str:
+    """`# Response Formats` developer-message block, per
+    `references/harmony/docs/format.md:478-491`'s documented convention."""
+    rendered = json.dumps(dict(remaining_schema), sort_keys=True)
+    return f"# Response Formats\n\n## response\n\n{rendered}"
+
+
+def build_conversation(
+    target: BackendTarget,
+    messages: Sequence[Message],
+    schema: Mapping[str, object] | None,
+) -> Conversation:
+    """Fleet's neutral `Message`s -> a Harmony `Conversation`: one `system` message (reasoning
+    effort, never fabricated when `target.effort is None` — mirrors `vertex.py`'s identical
+    `effort` rule), one `developer` message (instructions plus whichever tool this call offers),
+    then the rest of `messages` mapped role-for-role (`system` turns beyond the first are folded
+    into the developer instructions, matching how `client.py::_prepare_messages` already folds
+    multiple system turns for a backend with `supports_system_prompt=False`)."""
+    from openai_harmony import Message as HMessage
+
+    system_content = SystemContent.new()
+    system_content.reasoning_effort = (
+        _REASONING_EFFORT[target.effort] if target.effort is not None else None
+    )
+
+    convo_messages = [HMessage.from_role_and_content(Role.SYSTEM, system_content)]
+
+    systems = [m.content for m in messages if m.role == "system"]
+    rest = [m for m in messages if m.role != "system"]
+
+    instructions = "\n\n".join(systems) if systems else None
+    # Refs resolved once, up front: Harmony's tool-parameter renderer does not follow `$ref`, so
+    # an unresolved nested model would reach the model as `any` (see `_resolve_refs`).
+    resolved = _resolve_refs(schema) if schema is not None else None
+    file_edits_property = _file_edits_property(resolved) if resolved is not None else None
+
+    developer_content = DeveloperContent.new()
+    if resolved is not None and file_edits_property is not None:
+        text = _APPLY_PATCH_INSTRUCTIONS
+        if instructions:
+            text = f"{instructions}\n\n{text}"
+        remaining = _remaining_schema(resolved, file_edits_property)
+        if remaining["properties"]:
+            text = f"{text}\n\n{_response_format_block(remaining)}"
+        developer_content = developer_content.with_instructions(text).with_function_tools(
+            [_APPLY_PATCH_TOOL],
+        )
+    elif resolved is not None:
+        text = instructions or ""
+        developer_content = developer_content.with_instructions(text).with_function_tools(
+            [
+                ToolDescription.new(
+                    _TOOL_NAME,
+                    "Return the answer as this function's arguments.",
+                    parameters=resolved,
+                ),
+            ],
+        )
+    else:
+        developer_content = developer_content.with_instructions(instructions or "")
+
+    convo_messages.append(HMessage.from_role_and_content(Role.DEVELOPER, developer_content))
+    # Fleet's `Message` carries no tool name, and Harmony refuses to render a nameless tool turn
+    # (`HarmonyError: Tools should have a name!`, a RuntimeError that no `LlmError` handler
+    # catches). A `tool` turn here is always `client.py::_repair_turns` answering the one tool
+    # THIS call offers, so it is attributed to that tool.
+    offered_tool = _APPLY_PATCH_TOOL_NAME if file_edits_property is not None else _TOOL_NAME
+    for m in rest:
+        if m.role == "tool":
+            convo_messages.append(_tool_result(offered_tool, m.content))
+            continue
+        role = {"user": Role.USER, "assistant": Role.ASSISTANT}[m.role]
+        convo_messages.append(HMessage.from_role_and_content(role, m.content))
+
+    return Conversation.from_messages(convo_messages)
+
+
+def _tool_result(tool_name: str, content: str) -> HarmonyMessage:
+    """A Harmony tool-result turn, per `references/harmony/docs/format.md`'s
+    `<|start|>functions.{name} to=assistant<|channel|>commentary<|message|>...` convention."""
+    return (
+        HarmonyMessage.from_author_and_content(
+            Author.new(Role.TOOL, f"functions.{tool_name}"), content,
+        )
+        .with_channel("commentary")
+        .with_recipient("assistant")
+    )
+
+
+def _load_encoding() -> object:
+    """The ONE place this module calls `load_harmony_encoding` (four call sites -> one, Rule 2).
+
+    B1 (round `pilot-criteria-bringup`, ADR-0148/§12.50 offline-vocab half): the SDK reads
+    `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR` from `os.environ` itself and falls back to a
+    network fetch when neither is set. Those two vars are set ONCE, process-wide, by
+    `FleetSettings.load()` (`settings.py::_configure_harmony_vocab`, from `llm.harmony_vocab_dir`)
+    before any backend runs — this call trusts that already happened and never re-derives the
+    directory itself, matching this module's own "quarantine the SDK, decide nothing" discipline
+    (module docstring, property 3). Untyped SDK boundary, like every other `load_harmony_encoding`
+    call site in this file before this refactor — `cast` at each of the four call sites, not here,
+    so this helper's own return type stays honestly untyped rather than lying with a `cast`
+    nothing here actually justifies."""
+    return load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+
+
+def render_for_completion(conversation: Conversation) -> list[int]:
+    """`Conversation` -> token ids ready to post as `prompt` to vLLM's completions endpoint."""
+    encoding = _load_encoding()
+    # openai_harmony ships no py.typed marker (see this module's import-untyped note), so the SDK
+    # call resolves to Any; cast matches the sibling backends' own convention for an untyped SDK
+    # boundary (e.g. openai_compatible.py:257, vertex.py:346).
+    tokens = cast(Any, encoding).render_conversation_for_completion(conversation, Role.ASSISTANT)
+    return cast(list[int], tokens)
+
+
+def _tool_call_message(
+    parsed: Sequence[HarmonyMessage], recipient: str,
+) -> HarmonyMessage | None:
+    for message in parsed:
+        if message.recipient == recipient:
+            return message
+    return None
+
+
+def _final_channel_json(parsed: Sequence[HarmonyMessage]) -> dict[str, object] | None:
+    for message in parsed:
+        if message.channel != "final" or message.recipient is not None:
+            continue
+        if not message.content:
+            continue
+        text = message.content[0].text if hasattr(message.content[0], "text") else None
+        if not isinstance(text, str):
+            continue
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
+    return None
+
+
+def _plain_text(parsed: Sequence[HarmonyMessage]) -> str | None:
+    for message in parsed:
+        if message.channel == "final" and message.recipient is None and message.content:
+            content = message.content[0]
+            text = content.text if hasattr(content, "text") else None
+            if isinstance(text, str):
+                return text
+    return None
+
+
+def _call_text(message: HarmonyMessage) -> str:
+    """A tool call's raw argument text, verbatim — what the generic `emit_response` path parses
+    as its JSON arguments object."""
+    content = message.content[0]
+    text = content.text if hasattr(content, "text") else ""
+    return text if isinstance(text, str) else ""
+
+
+def _apply_patch_text(message: HarmonyMessage) -> str:
+    """An `apply_patch` call's patch text. `apply_patch` takes ONE raw string, so a 1-key JSON
+    object is unwrapped — ONLY here: applied to `emit_response`, it turned a single-property
+    schema's correct `{"title": "..."}` into a bare string that then failed `json.loads`."""
+    text = _call_text(message)
+    if text.startswith("{"):
+        # Matches references/gpt-oss/gpt_oss/chat.py:199-206's own unwrap: some servers wrap a
+        # single-string argument as {"<arg name>": "<value>"} JSON.
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if isinstance(parsed, dict) and len(parsed) == 1:
+            return str(next(iter(parsed.values())))
+    return text
+
+
+def _decode_apply_patch(
+    patch_text: str, pre_images: Mapping[str, str],
+) -> list[dict[str, str]] | None:
+    """`apply_patch`-format text -> `[{"path", "diff"}]`, or `None` on ANY failure — a malformed
+    or unresolvable patch is reported as "no answer", never raised (§7.7: a backend decides
+    nothing, including never treating a mangled model reply as a hard failure)."""
+    needed_paths = identify_files_needed(patch_text)
+    if any(path not in pre_images for path in needed_paths):
+        return None
+    orig = {path: pre_images[path] for path in needed_paths}
+    try:
+        patch, _fuzz = text_to_patch(patch_text, orig)
+        commit = patch_to_commit(patch, orig)
+        return commit_to_file_edits(commit)
+    except DiffError:
+        return None
+
+
+def _parse_messages(tokens: Sequence[int]) -> list[HarmonyMessage]:
+    encoding = cast(Any, _load_encoding())
+    try:
+        parsed = encoding.parse_messages_from_completion_tokens(
+            tokens, Role.ASSISTANT, strict=False,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise MalformedHarmonyStream(
+            f"completion token stream did not parse as Harmony messages: {exc}",
+        ) from exc
+    return cast(list[HarmonyMessage], parsed)
+
+
+def _apply_patch_turn(
+    parsed: Sequence[HarmonyMessage], pre_images: Mapping[str, str],
+) -> tuple[list[HarmonyMessage] | None, list[dict[str, str]] | None]:
+    """`(turn, edits)` for the first of a diff-shaped `invoke()`'s two round trips. `turn` is the
+    assistant's messages up to and including its `apply_patch` call (`None` when it made none) —
+    kept whole because Harmony's convention is that the chain-of-thought preceding a tool call is
+    passed back in for the next sampling (`references/harmony/docs/format.md`, "Handling
+    reasoning output in subsequent sampling"). `edits` is `None` when the patch did not decode."""
+    recipient = f"functions.{_APPLY_PATCH_TOOL_NAME}"
+    for index, message in enumerate(parsed):
+        if message.recipient == recipient:
+            edits = _decode_apply_patch(_apply_patch_text(message), pre_images)
+            return list(parsed[: index + 1]), edits
+    return None, None
+
+
+def _remaining_fields(
+    parsed: Sequence[HarmonyMessage], remaining: Mapping[str, object],
+) -> dict[str, object] | None:
+    """The `final`-channel JSON answering `remaining` (the schema minus its file-edits property),
+    or `None` when it is absent, unparseable, or missing a required field."""
+    fields = _final_channel_json(parsed)
+    if fields is None:
+        return None
+    required_value = remaining.get("required")
+    required = set(required_value) if isinstance(required_value, list) else set()
+    return fields if required.issubset(fields) else None
+
+
+def parse_completion(
+    tokens: Sequence[int],
+    schema: Mapping[str, object] | None,
+    *,
+    pre_images: Mapping[str, str],
+) -> tuple[str | None, dict[str, object] | None, FinishReason]:
+    """ONE completion's token ids -> `(text, tool_arguments, finish_reason)`. Reports, decides
+    nothing: an unparseable or ambiguous reply comes back as `tool_arguments=None`, never an
+    exception.
+
+    For a diff-shaped schema this decodes only the `apply_patch` half, so `tool_arguments` holds
+    just the file-edits property: one completion can never also carry the `final` JSON, because
+    `<|call|>` and `<|return|>` are both stop tokens and the sampler halts at whichever comes first.
+    `invoke()` gets the remaining fields from a second round trip."""
+    parsed = _parse_messages(tokens)
+    resolved = _resolve_refs(schema) if schema is not None else None
+    file_edits_property = _file_edits_property(resolved) if resolved is not None else None
+
+    if file_edits_property is not None:
+        turn, edits = _apply_patch_turn(parsed, pre_images)
+        if turn is None:
+            return _plain_text(parsed), None, "stop"
+        if edits is None:
+            return None, None, "tool_call"
+        return None, {file_edits_property: edits}, "tool_call"
+
+    if schema is not None:
+        call = _tool_call_message(parsed, f"functions.{_TOOL_NAME}")
+        if call is None:
+            return _plain_text(parsed), None, "stop"
+        try:
+            arguments = json.loads(_call_text(call))
+        except json.JSONDecodeError:
+            return None, None, "tool_call"
+        return None, (arguments if isinstance(arguments, dict) else None), "tool_call"
+
+    return _plain_text(parsed), None, "stop"
+
+
+class HarmonyTargetMisconfigured(LlmError):
+    """A `BackendTarget` this transport cannot dispatch. A config error, never a failover
+    trigger — moving to the next target would not fix a missing field (matches
+    `openai_compatible.py::TargetMisconfigured`'s identical reasoning)."""
+
+    def __init__(self, target: BackendTarget, field: str, detail: str) -> None:
+        super().__init__(
+            f"harmony_gpt_oss target {target.backend}:{target.model_id} {detail} (field `{field}`)",
+        )
+        self.target = target
+        self.field = field
+
+
+class MissingBaseUrl(HarmonyTargetMisconfigured):
+    """§13 row 36. This backend talks to vLLM's completions endpoint at an operator-configured
+    `base_url` — there is no vendor default, exactly like `openai_compatible.py::MissingBaseUrl`."""
+
+    def __init__(self, target: BackendTarget) -> None:
+        super().__init__(
+            target,
+            "base_url",
+            "declares no endpoint: harmony_gpt_oss has no vendor default to fall back on",
+        )
+
+
+class MissingApiKey(HarmonyTargetMisconfigured):
+    """The target NAMES an `api_key_env` and the environment does not hold it — loud at the point
+    of use, exactly like `openai_compatible.py::MissingApiKey`. A target that needs no key omits
+    `api_key_env` and gets the placeholder."""
+
+    def __init__(self, target: BackendTarget, env_name: str) -> None:
+        super().__init__(
+            target,
+            "api_key_env",
+            f"names environment variable {env_name}, which is unset or empty; export it, or drop "
+            "`api_key_env` if this endpoint needs no key",
+        )
+        self.env_name = env_name
+
+
+class MalformedHarmonyStream(LlmError):
+    """The completion's token stream did not parse as Harmony messages even under permissive
+    (`strict=False`) parsing. Loud, typed, terminal — NOT a `TransportError`: the next target
+    would reproduce the same unreadable stream from this adapter's own decode logic or a
+    genuinely garbled model output, and failing over would hide which one it was (Rule 11,
+    matching `openai_compatible.py::UnmappedFinishReason`'s identical reasoning)."""
+
+
+class TokenCompletionTransport(Protocol):
+    """One round trip to vLLM's completions endpoint, token ids in and out. The seam exists so
+    the encode/decode logic above is exercised without a socket, matching
+    `openai_compatible.py::ChatTransport`'s identical reasoning — the ONLY difference from that
+    Protocol is that this one speaks token ids, never a chat-completions JSON body."""
+
+    async def __call__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model_id: str,
+        prompt_token_ids: Sequence[int],
+        stop_token_ids: Sequence[int],
+        max_tokens: int,
+        timeout_s: float,
+    ) -> Mapping[str, object]: ...
+
+
+_PLACEHOLDER_API_KEY: Final[str] = "not-required"
+
+
+class _VllmCompletionsTransport:
+    """The ONLY object in this module that imports `openai` for the completions call. Reuses the
+    `openai` SDK's LEGACY `client.completions` resource — NOT `client.chat.completions`, which
+    speaks chat-message JSON — because that resource's `prompt` accepts a list of integers.
+    `stop_token_ids`/`skip_special_tokens` are vLLM extensions sent via `extra_body`; this wire
+    contract is not yet verified against a live vLLM server."""
+
+    async def __call__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model_id: str,
+        prompt_token_ids: Sequence[int],
+        stop_token_ids: Sequence[int],
+        max_tokens: int,
+        timeout_s: float,
+    ) -> Mapping[str, object]:
+        client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout_s, max_retries=2)
+        create = cast(
+            Callable[..., Awaitable[object]],
+            client.completions.create,
+        )
+        try:
+            response = await create(
+                model=model_id,
+                prompt=list(prompt_token_ids),
+                max_tokens=max_tokens,
+                extra_body={"stop_token_ids": list(stop_token_ids), "skip_special_tokens": False},
+            )
+        except APITimeoutError as exc:
+            raise TransportError(f"{base_url}: {exc}", trigger="CONNECTION") from exc
+        except APIConnectionError as exc:
+            raise TransportError(f"{base_url}: {exc}", trigger="CONNECTION") from exc
+        except RateLimitError as exc:
+            raise TransportError(f"{base_url}: {exc}", trigger="RATE_LIMIT") from exc
+        except APIStatusError as exc:
+            if exc.status_code >= 500:
+                raise TransportError(
+                    f"{base_url}: HTTP {exc.status_code}: {exc}", trigger="SERVER_ERROR",
+                ) from exc
+            raise LlmError(f"{base_url}: HTTP {exc.status_code}: {exc}") from exc
+        finally:
+            await client.close()
+
+        choice = response.choices[0]  # type: ignore[attr-defined]
+        text = choice.text or ""
+        encoding = cast(Any, _load_encoding())
+        token_ids = encoding.encode(text, allowed_special="all")
+        finish_reason = "length" if choice.finish_reason == "length" else "stop"
+        usage = getattr(response, "usage", None)
+        usage_map = usage.model_dump() if usage is not None else {}
+        return {
+            "token_ids": token_ids,
+            "finish_reason": finish_reason,
+            "stop_reason": None,
+            "usage": usage_map,
+        }
+
+
+_DEFAULT_TRANSPORT: Final[TokenCompletionTransport] = _VllmCompletionsTransport()
+
+
+@register_backend
+class HarmonyGptOssBackend:
+    """`ModelBackend` for GPT-OSS over Harmony. Stateless per call: the endpoint comes off the
+    TARGET, because two targets in one tier may be two different vLLM hosts."""
+
+    name: ClassVar[str] = "harmony_gpt_oss"
+    version: ClassVar[int] = 1
+
+    def __init__(
+        self,
+        transport: TokenCompletionTransport | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
+        """`register_backend` constructs this with `cls()`, so neither collaborator is stored on
+        `self` in the registered case (`vars(inst) == {}`, SPEC §12 item 47) — `invoke`/`_api_key`
+        resolve the shared default transport and `os.environ` lazily instead, matching
+        `openai_compatible.py.__init__`'s identical pattern."""
+        if transport is not None:
+            self._transport = transport
+        if env is not None:
+            self._env = env
+
+    def _api_key(self, target: BackendTarget) -> str:
+        """`api_key_env` is a variable NAME (§11.4). Absent means "this endpoint needs no key" and
+        gets the placeholder; present-but-unset is a loud failure naming the variable — identical
+        to `openai_compatible.py::_api_key`."""
+        env_name = target.api_key_env
+        if not env_name:
+            return _PLACEHOLDER_API_KEY
+        environ = getattr(self, "_env", None)
+        if environ is None:
+            environ = os.environ
+        value = environ.get(env_name, "")
+        if not value:
+            raise MissingApiKey(target, env_name)
+        return value
+
+    def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
+        """Declared, never probed. Validates the target's own required field FIRST (§13 row 36),
+        matching `vertex.py::declared_capabilities`'s identical ordering."""
+        _require_base_url(target)
+        return _DECLARED.model_copy()
+
+    async def invoke(
+        self,
+        target: BackendTarget,
+        messages: Sequence[Message],
+        schema: dict[str, object] | None,
+        mode: StructuredOutputMode,
+        *,
+        max_output_tokens: int,
+        timeout_s: float,
+    ) -> BackendReply:
+        """One turn out, one turn back. See `ModelBackend.invoke`: no validation, no retry on a
+        schema failure, no decision taken from `finish_reason`.
+
+        A diff-shaped schema takes TWO transport round trips inside this one call: the first
+        returns the `apply_patch` call (a completion stops at `<|call|>`, so it can never also
+        hold the `final` JSON), and only when that patch decodes is the call plus a tool result
+        sent back for the second, which answers the schema's remaining fields on the `final`
+        channel. A diff-shaped invoke() may make 2 real transport calls internally; the harness's
+        call-count ceiling (`run_max_llm_calls`, ADR-0142) only counts this as 1."""
+        base_url = _require_base_url(target)
+        api_key = self._api_key(target)
+        encoding = cast(Any, _load_encoding())
+        transport = getattr(self, "_transport", _DEFAULT_TRANSPORT)
+
+        async def round_trip(conversation: Conversation) -> tuple[list[int], Mapping[str, object]]:
+            raw = await transport(
+                base_url=base_url,
+                api_key=api_key,
+                model_id=target.model_id,
+                prompt_token_ids=render_for_completion(conversation),
+                stop_token_ids=encoding.stop_tokens_for_assistant_actions(),
+                max_tokens=max_output_tokens,
+                timeout_s=timeout_s,
+            )
+            token_ids = raw.get("token_ids")
+            if not isinstance(token_ids, Sequence):
+                raise TransportError(
+                    f"{base_url}: harmony_gpt_oss transport returned no token_ids",
+                    trigger="SERVER_ERROR",
+                )
+            return list(token_ids), raw
+
+        conversation = build_conversation(target, messages, schema)
+        token_ids, raw = await round_trip(conversation)
+        usage = _usage(raw, target)
+        pre_images = _extract_pre_images(messages)
+        text, tool_arguments, decoded_finish_reason = parse_completion(
+            token_ids, schema, pre_images=pre_images,
+        )
+
+        resolved = _resolve_refs(schema) if schema is not None else None
+        file_edits_property = _file_edits_property(resolved) if resolved is not None else None
+        if resolved is not None and file_edits_property is not None and tool_arguments is not None:
+            turn, _edits = _apply_patch_turn(_parse_messages(token_ids), pre_images)
+            continuation = Conversation.from_messages(
+                [
+                    *conversation.messages,
+                    *(turn or []),
+                    _tool_result(_APPLY_PATCH_TOOL_NAME, _PATCH_RECEIVED),
+                ],
+            )
+            token_ids, raw = await round_trip(continuation)
+            # Both round trips are billed to this one reply, so token/cost accounting sees the
+            # true 2-call cost even though the call-count ceiling does not.
+            second = _usage(raw, target)
+            usage = usage.model_copy(
+                update={
+                    "input_tokens": usage.input_tokens + second.input_tokens,
+                    "output_tokens": usage.output_tokens + second.output_tokens,
+                    "cache_read_tokens": usage.cache_read_tokens + second.cache_read_tokens,
+                },
+            )
+            fields = _remaining_fields(
+                _parse_messages(token_ids), _remaining_schema(resolved, file_edits_property),
+            )
+            tool_arguments = None if fields is None else {**fields, **tool_arguments}
+
+        finish_reason: FinishReason = (
+            "length" if raw.get("finish_reason") == "length" else decoded_finish_reason
+        )
+        return BackendReply(
+            text=text,
+            tool_arguments=tool_arguments,
+            usage=usage,
+            finish_reason=finish_reason,
+        )
+
+
+def _usage(raw: Mapping[str, object], target: BackendTarget) -> TokenUsage:
+    """The transport's `usage` (the `openai` SDK's completions `CompletionUsage`, dumped) as a
+    `TokenUsage`. `model_id` is the CONFIGURED id, never the served one (see `TokenUsage`)."""
+    usage = raw.get("usage")
+    usage_map: Mapping[str, object] = usage if isinstance(usage, Mapping) else {}
+    details = usage_map.get("prompt_tokens_details")
+    details_map: Mapping[str, object] = details if isinstance(details, Mapping) else {}
+    return TokenUsage(
+        backend=HarmonyGptOssBackend.name,
+        model_id=target.model_id,
+        input_tokens=_count(usage_map.get("prompt_tokens")),
+        output_tokens=_count(usage_map.get("completion_tokens")),
+        cache_read_tokens=_count(details_map.get("cached_tokens")),
+    )
+
+
+def _count(value: object) -> int:
+    """Missing, null or negative read as 0 — a server that omits `usage` must not turn a good
+    reply into a `ValidationError` (`TokenUsage` bounds these `ge=0`), matching
+    `openai_compatible.py::_count`."""
+    return max(value, 0) if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _original_prompt_messages(messages: Sequence[Message]) -> list[Message]:
+    """The prefix of `messages` up to, but NOT including, the first `assistant`/`tool`-role
+    message — i.e. the harness's ORIGINAL prompt, `render_prompt()`'s own output, before any
+    model reply exists anywhere in the conversation.
+
+    **Trust boundary, corrected TWICE after independent review — role alone is not enough.** The
+    first cut derived `allowed_paths` by re-scanning the very same text being parsed
+    (`discover_fenced_paths(text)` fed straight into `parse_file_fences(text, ...)`), which
+    restricts nothing, and scanned every message regardless of role. That was corrected to "scan
+    only `system`/`user`-role messages" (`assistant`/`tool` carry the model's own prior reply,
+    `client.py::_repair_turns`) — still wrong: a SECOND review found a `user`-role message is not
+    always harness-authored either. `_repair_turns` builds its repair-instruction message as
+    `Message(role="user", content=_REPAIR_INSTRUCTION.format(error=detail))` where
+    `detail = str(exc)` is a Pydantic `ValidationError` — and `FleetModel` uses `extra="forbid"`,
+    so an unexpected key in a malformed model reply is quoted VERBATIM into that error text,
+    backticks and newlines included. A model reply carrying a bogus key shaped like
+    `"x\n` ` ``path:src/a.py\nFORGED\n` ` ``"` therefore reaches a `user`-role message this way,
+    with no `assistant`/`tool` message in between it and the text — reproduced end to end through
+    the real `_validate` → `_repair_turns` → `_extract_pre_images` path, no mocks, before this fix.
+
+    The property that is actually true is narrower: pre-images never change mid-conversation (a
+    file's content is fixed at render time), and ONLY the messages that exist BEFORE the first
+    `assistant`/`tool` turn are guaranteed to predate any model output — nothing after that point,
+    `user`-role included, can be trusted, because a later `user` message may quote the model's own
+    prior (possibly adversarial) reply back into its own text. So the boundary is POSITION
+    (everything up to the first non-`system`/`user` message), not role membership by itself; the
+    role check is still needed within that prefix (`system`/`user` only, matching what
+    `render_prompt()` ever actually emits), it is simply no longer sufficient on its own."""
+    trusted: list[Message] = []
+    for message in messages:
+        if message.role not in ("system", "user"):
+            break
+        trusted.append(message)
+    return trusted
+
+
+def _extract_pre_images(messages: Sequence[Message]) -> dict[str, str]:
+    """Pull `fleet.llm.fences`-format fenced blocks out of the CURRENT call's ORIGINAL prompt
+    messages only (`_original_prompt_messages` — see its docstring for the trust boundary and why
+    it is positional, not role-based): the pre-images `apply_patch` hunks are resolved against.
+    `render_prompt()` (`llm/calls.py::render_prompt`, ADR-0146) is the real producer — it renders
+    any evidence file content (currently `TRANSFORM_REPAIR`/`ESCALATION`'s `current_content`) as
+    one of these blocks instead of folding it into the JSON evidence body, always in the first
+    `system`/`user` turn(s), before any repair round exists. Any top-level fenced block a
+    sequential, non-overlapping scan finds inside one of those original messages is legitimate by
+    construction, with no separate allowlist needed (`fleet.llm.fences.trusted_fenced_blocks`)."""
+    images: dict[str, str] = {}
+    for message in _original_prompt_messages(messages):
+        images.update(trusted_fenced_blocks(message.content))
+    return images
+
+
+def _require_base_url(target: BackendTarget) -> str:
+    base_url = target.base_url
+    if not base_url:
+        raise MissingBaseUrl(target)
+    return base_url
+
+
+def _protocol_conformance(backend: HarmonyGptOssBackend) -> ModelBackend:
+    """Compile-time only: `mypy --strict` fails here if this adapter drifts from `ModelBackend`."""
+    return backend

@@ -29,6 +29,7 @@ from typing import Final
 from pydantic import BaseModel, Field, JsonValue
 
 from fleet.llm.client import CallBudget, Message, ModelClient, ModelResponse
+from fleet.llm.fences import fence_file
 from fleet.llm.roles import Role
 from fleet.llm.schemas import (
     ApiRewriteProposal,
@@ -76,6 +77,16 @@ type Evidence = Mapping[str, JsonValue]
 determinism guarantee is enforced by the type rather than asked for in a comment."""
 
 _EVIDENCE_HEADER: Final = "EVIDENCE (JSON, keys sorted):"
+
+_FILE_CONTENT_KEY: Final = "current_content"
+"""The one evidence key verified (`workers/rewrite.py::_evidence`, `TRANSFORM_REPAIR`/`ESCALATION`)
+to carry the literal on-disk content of a named file — always alongside a sibling `"path"` key
+naming it (ADR-0146). `render_prompt` renders this pair as a raw fenced block instead of folding it
+into the JSON evidence blob (see `fleet.llm.fences` for why), and
+`harmony_gpt_oss.py::_extract_pre_images` is its one reader. An evidence mapping carrying this key
+without a string `"path"` sibling is left exactly as it was — the value stays in the JSON body,
+still escaped — a disclosed limitation, not a silent drop: nothing here invents a path a caller
+never supplied."""
 
 
 class PromptTemplate(FleetModel):
@@ -171,6 +182,7 @@ PROMPTS: Final[Mapping[Role, PromptTemplate]] = {
     ),
     Role.TRANSFORM_REPAIR: PromptTemplate(
         role=Role.TRANSFORM_REPAIR,
+        version=3,  # ADR-0146 (v2): fenced raw block. B4 (v3): scope-note line, below.
         system=(
             "You repair a source file whose deterministic rewrite failed, given the failure "
             f"evidence and the current file content. {_RETURN_JSON}"
@@ -178,7 +190,9 @@ PROMPTS: Final[Mapping[Role, PromptTemplate]] = {
         instruction=(
             "Propose the smallest unified diff that fixes the reported failure. Change only what "
             "the evidence justifies. Summarise your approach in one line: that line, never the "
-            "diff, is what a later attempt is shown if this one is refuted."
+            "diff, is what a later attempt is shown if this one is refuted. Only the fenced file "
+            "shown below may be edited: no pre-image is available for any other file you might "
+            "reference, so a patch touching a path outside that fence cannot be resolved."
         ),
     ),
     Role.API_INCOMPAT_REWRITE: PromptTemplate(
@@ -195,6 +209,7 @@ PROMPTS: Final[Mapping[Role, PromptTemplate]] = {
     ),
     Role.ESCALATION: PromptTemplate(
         role=Role.ESCALATION,
+        version=3,  # ADR-0146 (v2): fenced raw block. B4 (v3): scope-note line, below.
         system=(
             "You are the final automated attempt on a task two earlier attempts failed. You are "
             "given the evidence and one-line summaries of the approaches already refuted — never "
@@ -204,7 +219,9 @@ PROMPTS: Final[Mapping[Role, PromptTemplate]] = {
             "Propose a materially different approach from the refuted ones. If the evidence shows "
             "the task needs a human decision, set abandon_recommended and say precisely what the "
             "human must decide: recommending that is a better answer than a patch you do not "
-            "believe in."
+            "believe in. Only the fenced file shown below may be edited: no pre-image is "
+            "available for any other file you might reference, so a patch touching a path "
+            "outside that fence cannot be resolved."
         ),
     ),
     Role.BUILD_AUTHORING: PromptTemplate(
@@ -274,19 +291,40 @@ def render_prompt(role: Role, evidence: Evidence) -> tuple[Message, ...]:
     divergence effect only, never a wrong answer served — the differing bytes just hash to a
     different `prompt_sha256` — but it means this function is no longer pure in the process's own
     environment, only in `evidence`.
+
+    **File content is rendered as a raw fenced block, appended after the JSON body, not folded
+    into it (ADR-0146).** `_FILE_CONTENT_KEY`'s value — when present alongside a string `"path"`
+    sibling — is pulled out of the evidence mapping BEFORE JSON serialisation and rendered via
+    `fleet.llm.fences.fence_file` instead: `ensure_ascii=True` JSON escapes newlines and quotes,
+    which is fine for structured evidence fields but wrong for a diff's context lines, which must
+    match the real file byte-for-byte. Redaction still applies to the fenced content — it is read
+    off the ALREADY-redacted mapping, same as every other evidence field — so this changes WHERE a
+    file's content is rendered, never whether it passes through `redact_mapping()` first. The block
+    is appended after the JSON body so `sort_keys=True` and `ensure_ascii=True` still cover
+    everything else, keeping this function's determinism guarantee unchanged for every other field.
     """
     template = PROMPTS[role]
+    redacted = redact_mapping(evidence)
+    file_content = redacted.get(_FILE_CONTENT_KEY)
+    file_path = redacted.get("path")
+    file_block: str | None = None
+    if isinstance(file_content, str) and isinstance(file_path, str) and file_path:
+        file_block = fence_file(file_path, file_content)
+        redacted = {k: v for k, v in redacted.items() if k != _FILE_CONTENT_KEY}
     body = json.dumps(
-        redact_mapping(evidence),
+        redacted,
         sort_keys=True,
         ensure_ascii=True,
         allow_nan=False,
         indent=2,
         separators=(",", ": "),
     )
+    text = f"{template.instruction}\n\n{_EVIDENCE_HEADER}\n{body}"
+    if file_block is not None:
+        text = f"{text}\n\n{file_block}"
     return (
         Message(role="system", content=template.system),
-        Message(role="user", content=f"{template.instruction}\n\n{_EVIDENCE_HEADER}\n{body}"),
+        Message(role="user", content=text),
     )
 
 

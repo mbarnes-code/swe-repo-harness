@@ -448,6 +448,9 @@ class LlmFindingSink:
                 "output_tokens": call.output_tokens,
                 "cost_usd": call.cost_usd,
                 "latency_ms": call.latency_ms,
+                # ADR-0149/§12.51(i): which endpoint answered — the per-endpoint split of a run
+                # is `jq`-able from here, and nowhere else carries it.
+                "base_url": call.base_url,
             },
             event_uid=event_uid,
             now=self.clock(),
