@@ -12,9 +12,11 @@
 #    NOT a symlink and NOT a fresh resolve. A symlink would make `.venv/bin/fleet` and any
 #    `python -c "import fleet"` import the PRIMARY checkout's src/ (the editable-install .pth is
 #    a static absolute path), i.e. an agent would test code it did not edit. A fresh resolve is
-#    not possible offline and would drift: there is no uv.lock in this repo and every dependency
-#    pin in pyproject.toml is a floor (`>=`), so a re-resolve can install different versions than
-#    the primary is tested against.
+#    not possible offline and would drift. (Corrected 2026-09-25: the original reason given here
+#    was "there is no uv.lock in this repo", which `uv.lock` being tracked at HEAD has falsified.
+#    The decision is unchanged and the reason narrows to the second half: `uv` is not on PATH
+#    outside `.venv/bin/uv` on this host, and a hardlink copy is the only offline path that
+#    guarantees byte-identical versions with the primary.)
 #
 # Usage:  tools/worktree/new-worktree.sh <task-id> [base-ref]
 # Env:    HARNESS_WORKTREE_HOME  override the parent directory for worktrees

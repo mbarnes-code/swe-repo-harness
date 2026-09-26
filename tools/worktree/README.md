@@ -86,14 +86,9 @@ line: `/home/redmage/swe repo harness/src`. Under a symlinked venv:
   `src/`. An agent would edit its own worktree and exercise someone else's code, with nothing
   visible to say so. That is a worse failure than the one being fixed.
 
-**Not `uv sync`.** Two facts, both checked in this repo:
-
-* **there is no `uv.lock`** (contrary to a common assumption — `ls uv.lock` → no such file), and
-* every pin in `pyproject.toml` is a floor (`pydantic>=2.11`, `pytest>=8.3`, …).
-
-So a fresh resolve is a *network* operation that can legitimately install different versions than
-the primary is tested against — lanes would drift from the trunk and from each other. Note also
-that `uv` is not on `PATH` at all on this host; the only copy is `.venv/bin/uv`.
+**Not `uv sync`.** Even with `uv.lock` tracked, provisioning here needs an offline,
+byte-identical environment copied from the primary; a fresh resolve remains a network operation
+and can drift from what the primary is tested against if indexes/caches differ between runs.
 
 The hardlink copy is offline, ~2 seconds, byte-identical to the primary, and — because `sed -i`
 writes a temp file and renames — the rewritten files get fresh inodes rather than corrupting the
