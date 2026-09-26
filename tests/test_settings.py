@@ -1366,8 +1366,8 @@ def test_models_local_yaml_naming_both_endpoint_spellings_fails_loud(tmp_path: P
         ("profiles:\n  default:\n    - HEAVY\n", "profiles.default"),
         # a tier given as a mapping, not a list
         (
-            "profiles:\n  default:\n    HEAVY:\n      backend: anthropic\n"
-            "      model_id: claude-opus-5\n",
+            ("profiles:\n  default:\n    HEAVY:\n      backend: anthropic\n"
+            "      model_id: claude-opus-5\n"),
             "profiles.default.HEAVY",
         ),
         # a non-mapping entry in the tier's list
