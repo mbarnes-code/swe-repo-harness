@@ -89,12 +89,16 @@ def test_unblock_lines_unblocked_entry_verb_and_floor_suffix() -> None:
     real = _unblock_lines(with_floor, dry=False)
     dry = _unblock_lines(with_floor, dry=True)
     assert real == [
-        "  step 6: cleared acme-b from acme-x — its `blocked_by` is empty, so it returns to "
-        "PENDING at floor BUILD"
+        (
+            "  step 6: cleared acme-b from acme-x — its `blocked_by` is empty, so it returns to "
+            "PENDING at floor BUILD"
+        )
     ]
     assert dry == [
-        "  step 6: would clear acme-b from acme-x — its `blocked_by` is empty, so it returns to "
-        "PENDING at floor BUILD"
+        (
+            "  step 6: would clear acme-b from acme-x — its `blocked_by` is empty, so it "
+            "returns to PENDING at floor BUILD"
+        )
     ]
 
     without_floor = {

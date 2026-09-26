@@ -1185,10 +1185,10 @@ def scan(
             opts,
             result,
             [
-                f"run {result['run_id']}: {result['succeeded']} scanned, "
+                (f"run {result['run_id']}: {result['succeeded']} scanned, "
                 f"{len(cast('list[str]', result['skipped']))} skipped, "
                 f"{result['failed']} needing a human "
-                f"({result['edges']} edges over {result['repos']} repos)"
+                f"({result['edges']} edges over {result['repos']} repos)")
             ],
         )
         code = int(str(result["exit_code"]))
@@ -3284,8 +3284,8 @@ def sequence(
             opts,
             result,
             [
-                f"run {result['run_id']}: {result['waves']} waves over "
-                f"{result['repos']} repos ({result['edges']} ordering edges)"
+                (f"run {result['run_id']}: {result['waves']} waves over "
+                f"{result['repos']} repos ({result['edges']} ordering edges)")
             ],
         )
 
@@ -5271,14 +5271,14 @@ def transform(
             opts,
             result,
             [
-                f"run {result['run_id']}: {result['succeeded']} transformed, "
+                (f"run {result['run_id']}: {result['succeeded']} transformed, "
                 f"{result['failed']} needing a human ({result['commits']} commits over "
-                f"{result['repos']} repo(s) in wave(s) {result['waves']})",
+                f"{result['repos']} repo(s) in wave(s) {result['waves']})"),
                 *(
                     [
-                        "warning: the §3.2 parse probe DID NOT RUN for "
+                        ("warning: the §3.2 parse probe DID NOT RUN for "
                         f"{len(unprobed)} item(s) — no rewrite engine is installed, or no "
-                        f"transform rule claims the file: {unprobed[0]}"
+                        f"transform rule claims the file: {unprobed[0]}")
                     ]
                     if unprobed
                     else []
@@ -13223,8 +13223,8 @@ def _build_lines(result: Mapping[str, object]) -> list[str]:
     blocked = cast("list[str]", result["withheld"])
     reconciliations = cast("list[Mapping[str, object]]", result["hoist_rollback_reconciliations"])
     lines = [
-        f"run {result['run_id']}: {result['succeeded']} built, {result['failed']} needing a "
-        f"human over {result['repos']} repo(s) in wave(s) {result['waves']}"
+        (f"run {result['run_id']}: {result['succeeded']} built, {result['failed']} needing a "
+        f"human over {result['repos']} repo(s) in wave(s) {result['waves']}")
     ]
     if blocked:
         lines.append(
@@ -13258,8 +13258,8 @@ def _verify_lines(result: Mapping[str, object]) -> list[str]:
     sampled = sorted(repo for repo, body in reports.items() if body["rdeps_truncated"])
     blocked = cast("list[str]", result["withheld"])
     lines = [
-        f"run {result['run_id']}: {result['succeeded']} verified, {result['failed']} needing a "
-        f"human over {result['repos']} repo(s) in wave(s) {result['waves']}"
+        (f"run {result['run_id']}: {result['succeeded']} verified, {result['failed']} needing a "
+        f"human over {result['repos']} repo(s) in wave(s) {result['waves']}")
     ]
     if blocked:
         lines.append(
@@ -15288,8 +15288,8 @@ def _pr_sync_lines(result: Mapping[str, object]) -> list[str]:
         if outcome.startswith("FAILED:")
     }
     return [
-        f"pr --sync: polled {len(polled)} open PR(s); {len(merged)} newly MERGED, "
-        f"{len(closed)} CLOSED",
+        (f"pr --sync: polled {len(polled)} open PR(s); {len(merged)} newly MERGED, "
+        f"{len(closed)} CLOSED"),
         *(f"  merged {repo}" for repo in merged),
         *(
             [f"  {len(failed_rewrites)} label rewrite(s) FAILED (see label_rewrites for detail):"]
@@ -16186,8 +16186,8 @@ def _pr_lines(result: Mapping[str, object]) -> list[str]:
     held = cast(Mapping[str, Sequence[str]], result["held"])
     drafts = cast(Sequence[str], result["draft"])
     lines = [
-        f"pr: opened {len(opened)} PR(s) ({len(drafts)} draft), held {len(held)}, "
-        f"{len(cast(Sequence[str], result['already_open']))} already open"
+        (f"pr: opened {len(opened)} PR(s) ({len(drafts)} draft), held {len(held)}, "
+        f"{len(cast(Sequence[str], result['already_open']))} already open")
     ]
     lines += [f"  {repo} -> {url}" for repo, url in sorted(opened.items())]
     lines += [
@@ -16525,9 +16525,9 @@ def quarantine(
             opts,
             result,
             [
-                f"{'would quarantine' if dry_run else 'quarantined'} {repo}: "
+                (f"{'would quarantine' if dry_run else 'quarantined'} {repo}: "
                 f"{result['phases_skipped']} phase row(s) SKIPPED, "
-                f"{result['dependents_blocked']} dependent(s) blocked"
+                f"{result['dependents_blocked']} dependent(s) blocked")
             ],
         )
 
@@ -16701,8 +16701,8 @@ def retry(
             opts,
             result,
             [
-                f"{'would reopen' if dry_run else 'reopened'} {repo} "
-                f"(phase {result['phase']}) -> PENDING"
+                (f"{'would reopen' if dry_run else 'reopened'} {repo} "
+                f"(phase {result['phase']}) -> PENDING")
             ],
         )
 
@@ -16808,10 +16808,10 @@ def abort(
             opts,
             result,
             [
-                f"run {result['run_id']} aborted "
+                (f"run {result['run_id']} aborted "
                 f"({'drained' if drain else 'cancelled'}); "
                 f"{result['running_reset']} RUNNING row(s) reset, "
-                f"projection at {result['projection']}"
+                f"projection at {result['projection']}")
             ],
         )
 
@@ -17655,8 +17655,8 @@ def _arbitration_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
     recreated = cast(Sequence[Mapping[str, object]], report["anchors_recreated"])
     verb = "would ask" if dry else "asked"
     out = [
-        f"  step 4: {verb} Git about {candidates} RUNNING task(s); "
-        f"{len(spared)} spared as live"
+        (f"  step 4: {verb} Git about {candidates} RUNNING task(s); "
+        f"{len(spared)} spared as live")
     ]
     for entry in landed:
         adopted = "would adopt" if dry else "adopted"
@@ -17810,8 +17810,8 @@ def _budget_lines(result: Mapping[str, object]) -> list[str]:
     verb = "raised" if result["raise_budget_applied"] else "WOULD raise (nothing written)"
     halt = " and clear the sticky halt" if before["halted"] else ""
     return [
-        f"  --raise-budget: {verb} max_usd ${float(before['max_usd']):.2f} -> "
-        f"${float(cast(float, ceiling)):.2f}{halt}"
+        (f"  --raise-budget: {verb} max_usd ${float(before['max_usd']):.2f} -> "
+        f"${float(cast(float, ceiling)):.2f}{halt}")
     ]
 
 
@@ -17821,8 +17821,8 @@ def _repoll_lines(result: Mapping[str, object]) -> list[str]:
             return []
         case "skipped-dry-run":
             return [
-                "  --repoll-prs: SKIPPED under --dry-run — it is the one network call on this "
-                "verb, and §11.5 promises a resume's reconciliation makes none"
+                ("  --repoll-prs: SKIPPED under --dry-run — it is the one network call on this "
+                "verb, and §11.5 promises a resume's reconciliation makes none")
             ]
         case "failed":
             return [f"  --repoll-prs: FAILED — {result['pr_sync_error']}"]
@@ -19990,9 +19990,9 @@ def gc(
             opts,
             result,
             [
-                f"{'would evict' if dry_run else 'evicted'} "
+                (f"{'would evict' if dry_run else 'evicted'} "
                 f"{result['llm_cache_rows']} llm_cache row(s), "
-                f"{result['event_rows']} event row(s), {result['attempt_rows']} attempt row(s)"
+                f"{result['event_rows']} event row(s), {result['attempt_rows']} attempt row(s)")
             ]
             + ([f"disk: {result['disk_bytes_freed']} bytes freed"] if disk else []),
         )
@@ -20412,8 +20412,8 @@ def stubs_resolve(
                 ]
                 if superseded
                 else [
-                    f"nothing to supersede for provider {provider} "
-                    "(no ACTIVE stub names it, or it is already resolved -- idempotent no-op)"
+                    (f"nothing to supersede for provider {provider} "
+                    "(no ACTIVE stub names it, or it is already resolved -- idempotent no-op)")
                 ]
             )
         _emit(opts, result, lines)

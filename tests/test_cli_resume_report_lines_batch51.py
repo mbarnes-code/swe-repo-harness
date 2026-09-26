@@ -147,8 +147,10 @@ def test_stub_reconcile_lines_renders_abandoned_count_entries_and_held_entries()
     assert real == [
         "  stub_reconcile: abandoned 1 open stub(s) (UnresolvedStub, exit 7)",
         "  stub_reconcile: abandoned acme-a→acme-p@1.0.0",
-        "  stub_reconcile: acme-b→acme-p@2.0.0 held — provider's PR is still open within "
-        "pr.merge_wait_timeout_s",
+        (
+            "  stub_reconcile: acme-b→acme-p@2.0.0 held — provider's PR is still open within "
+            "pr.merge_wait_timeout_s"
+        ),
     ]
     dry = _stub_reconcile_lines({"stub_reconcile": report}, dry=True)
     assert dry[0] == "  stub_reconcile: would abandon 1 open stub(s) (UnresolvedStub, exit 7)"
@@ -208,8 +210,10 @@ def test_floor_lines_appends_evidence_read_only_when_evidence_is_non_empty() -> 
     }
     lines = _floor_lines({"reentry_floors": with_evidence}, dry=False)
     assert lines == [
-        "  step 5: demoted acme-y to floor BUILD — BUILD, VERIFY back to PENDING "
-        "(attempts retained); evidence read scan_ok=True, contracts_ok=False"
+        (
+            "  step 5: demoted acme-y to floor BUILD — BUILD, VERIFY back to PENDING "
+            "(attempts retained); evidence read scan_ok=True, contracts_ok=False"
+        )
     ]
 
     without_evidence = {

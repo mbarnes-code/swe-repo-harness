@@ -1319,8 +1319,10 @@ def test_hoist_broke_owner_matcher_reads_real_quoted_bazel_error_forms() -> None
     cases: list[tuple[str, str, str | None]] = [
         (
             "py.py:143-144 -- external, rules_python pip hub",
-            "no such target '@@rules_python++pip+pypi//:requests': target 'requests' not "
-            "declared in package ''; however, a source directory of this name exists",
+            (
+                "no such target '@@rules_python++pip+pypi//:requests': target 'requests' not "
+                "declared in package ''; however, a source directory of this name exists"
+            ),
             None,
         ),
         (
@@ -1330,8 +1332,10 @@ def test_hoist_broke_owner_matcher_reads_real_quoted_bazel_error_forms() -> None
         ),
         (
             "base.py:486-488 -- external, referenced-by form",
-            "no such package '@@rules_python++pip+pypi//certifi' ... referenced by "
-            "'@@rules_python++pip+pypi_312_requests//:pkg'",
+            (
+                "no such package '@@rules_python++pip+pypi//certifi' ... referenced by "
+                "'@@rules_python++pip+pypi_312_requests//:pkg'"
+            ),
             None,
         ),
         (
@@ -1341,20 +1345,27 @@ def test_hoist_broke_owner_matcher_reads_real_quoted_bazel_error_forms() -> None
         ),
         (
             "js.py:61-63 -- external, aspect_rules_js npm hub",
-            "no such target '@@aspect_rules_js++npm+npm//:left-pad': target 'left-pad' not "
-            "declared in package ''",
+            (
+                "no such target '@@aspect_rules_js++npm+npm//:left-pad': target 'left-pad' not "
+                "declared in package ''"
+            ),
             None,
         ),
         (
             "true positive -- exact package, //<pkg>:<name> form",
-            "ERROR: /work/BUILD.bazel:3:1: no such target '//proto/acme.hub.v1:acme_hub_v1_proto'"
-            ": target 'acme_hub_v1_proto' not declared in package 'proto/acme.hub.v1'",
+            (
+                "ERROR: /work/BUILD.bazel:3:1: no such target "
+                "'//proto/acme.hub.v1:acme_hub_v1_proto'"
+                ": target 'acme_hub_v1_proto' not declared in package 'proto/acme.hub.v1'"
+            ),
             "proto:acme.hub.v1",
         ),
         (
             "true positive -- unprefixed 'no such package' in-tree form",
-            "no such package 'proto/acme.hub.v1': BUILD file not found in any of the following "
-            "directories.",
+            (
+                "no such package 'proto/acme.hub.v1': BUILD file not found in any of the following "
+                "directories."
+            ),
             "proto:acme.hub.v1",
         ),
         (

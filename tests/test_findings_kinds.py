@@ -146,8 +146,8 @@ _PLACEHOLDER: Final = re.compile(r"<[^>]*>")
 #: author having erred. A symbol anchor survives a line growing above it; a line anchor cannot.
 _WORKER_FINDINGS: Final = "worker-findings"
 _INDIRECT_SITES: Final = {
-    ("cli.py", "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
-               "created_at) VALUES (?, ?, ?, 'warn', ?, ?, ?)"): (_WORKER_FINDINGS, 3),
+    ("cli.py", ("INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+               "created_at) VALUES (?, ?, ?, 'warn', ?, ?, ?)")): (_WORKER_FINDINGS, 3),
     # Third site added 2026-08-30 (round M, D80 wiring, `9c20eeb`): `_apply_stub_reconcile`'s
     # `unit()` (`cli.py` ~line 11695) writes `kind=decision.finding.value`, where
     # `decision.finding: StubFinding | None` (`orchestrator/stubs.py:223`) is a dynamically

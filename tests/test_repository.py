@@ -1885,7 +1885,9 @@ async def test_a_naive_datetime_is_refused_rather_than_stored(
     (its wave blocks forever on `blocked_by`) or reaped while live.
     """
     with pytest.raises(RepositoryError, match="naive datetime"):
-        await repo.upsert_phase(RUN, REPO, Phase.SCAN, now=datetime(2026, 8, 9, 12, 0, 0))
+        await repo.upsert_phase(
+            RUN, REPO, Phase.SCAN, now=datetime(2026, 8, 9, 12, 0, 0)  # noqa: DTZ001 - testing rejection
+        )
 
 
 # ======================================================================================

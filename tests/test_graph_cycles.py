@@ -739,8 +739,9 @@ def test_a_rolled_back_hoist_re_sequences_to_atomic_wave() -> None:
     repo_waves = {
         plan.wave_index_by_node[(NodeKind.REPO.value, repo_id)] for repo_id in res2.members
     }
-    assert repo_waves == {0}, "all 6 repos land in the one atomic wave, none pinned to the failed "\
-        "contract's old wave"
+    assert repo_waves == {0}, (
+        "all 6 repos land in the one atomic wave, none pinned to the failed contract's old wave"
+    )
 
 
 async def test_a_rolled_back_hoist_leaves_phases_attempts_unspent_for_every_scc_member(
@@ -1047,8 +1048,9 @@ def test_atomic_wave_emits_one_target_for_the_whole_scc() -> None:
     assert target.member_repo_ids == res.members
     assert target.srcs == ("java/acme-a/Main.java", "java/acme-b/Main.java",
                            "java/acme-c/Main.java")
-    assert target.label == f"//{scc_dest(Ecosystem.MAVEN, res.scc_id, monorepo_dir='java')}:" \
-                           f"{target.name}"
+    assert target.label == (
+        f"//{scc_dest(Ecosystem.MAVEN, res.scc_id, monorepo_dir='java')}:{target.name}"
+    )
     assert ":" not in target.name, "':' is a Bazel label separator, not a target-name character"
     assert plan.standalone_repo_ids == (), "every member here has an intra-SCC inbound edge"
     assert {f.kind for f in plan.findings} == {"CoarseTarget"}

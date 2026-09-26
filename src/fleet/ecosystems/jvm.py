@@ -27,7 +27,11 @@ _SOURCE_ROOTS: Final[tuple[str, ...]] = ("src/main/java/", "src/main/kotlin/", "
 """Maven's Standard Directory Layout, which Gradle's `java` plugin adopts verbatim. The package
 of a class is its path *below* one of these roots — the one fact a `main_class` needs."""
 
-_TEST_SOURCE_ROOTS: Final[tuple[str, ...]] = ("src/test/java/", "src/test/kotlin/", "src/test/scala/")
+_TEST_SOURCE_ROOTS: Final[tuple[str, ...]] = (
+    "src/test/java/",
+    "src/test/kotlin/",
+    "src/test/scala/",
+)
 """The Standard Directory Layout's test half — the one fact a `test_class` needs (D144)."""
 
 

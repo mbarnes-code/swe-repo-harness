@@ -1414,7 +1414,9 @@ def test_naive_datetimes_are_rejected() -> None:
     """A naive timestamp cannot be compared across hosts, so heartbeat staleness — and therefore
     crash detection (§11.5) — would be silently wrong. Reject at the boundary."""
     with pytest.raises(ValidationError, match="tz-aware"):
-        MigrationState(run_id=uuid4(), started_at=datetime(2026, 8, 8, 12, 0, 0))
+        MigrationState(
+            run_id=uuid4(), started_at=datetime(2026, 8, 8, 12, 0, 0)  # noqa: DTZ001 - testing rejection
+        )
 
 
 def test_self_edges_are_rejected() -> None:

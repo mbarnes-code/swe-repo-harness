@@ -1681,10 +1681,10 @@ async def test_the_fleet_build_image_runs_bazels_lookups_as_an_unmapped_uid() ->
         command=(
             "sh",
             "-c",
-            'printf "bazel=%s\\nuser=%s\\npasswd=%s\\n" '
+            ('printf "bazel=%s\\nuser=%s\\npasswd=%s\\n" '
             '"$(command -v bazel)" "$USER" "$(getent passwd 4242 || echo NONE)"; '
             'touch "$HOME/.fleet-writable" && rm -f "$HOME/.fleet-writable" '
-            '&& printf "home_writable=%s\\n" "$HOME"',
+            '&& printf "home_writable=%s\\n" "$HOME"'),
         ),
         network="none",
         user=UNMAPPED_UID,

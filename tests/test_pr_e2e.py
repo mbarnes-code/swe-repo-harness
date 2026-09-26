@@ -875,8 +875,8 @@ def test_pr_attempts_promotion_of_an_already_open_held_pr_once_its_stub_resolves
     assert "acme-lib-py" in body["failed"], body
     assert "could not read the remote tip of" in body["failed"]["acme-lib-py"], body["failed"]
     assert "does not exist" not in body["failed"]["acme-lib-py"], (
-        "D115 is fixed: migrate/acme-lib-py must exist locally by the time this runs, so the "
-        "FIRST precondition check must not be the one that fires", body["failed"]
+        ("D115 is fixed: migrate/acme-lib-py must exist locally by the time this runs, so the "
+        "FIRST precondition check must not be the one that fires"), body["failed"]
     )
     assert body["already_open"] == ["acme-lib-py"], body
     assert body["promoted"] == {}, body
