@@ -911,8 +911,9 @@ def test_a_credential_in_the_model_answer_never_reaches_llm_cache_response_json(
                 )
                 assert len(raw) == 1
                 persisted = str(raw[0][0])
-                assert pat not in persisted, f"a live PAT reached llm_cache.response_json: " \
-                    f"{persisted!r}"
+                assert pat not in persisted, (
+                    f"a live PAT reached llm_cache.response_json: {persisted!r}"
+                )
                 assert "github_pat_" not in persisted
                 assert "«redacted:" in persisted
                 assert "gitea.local" in persisted, "over-redaction destroys the debuggable part"

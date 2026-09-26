@@ -638,3 +638,64 @@ def test_uv_sync_frozen_is_exit_0_offline_on_py312():
             f"wheel cache is cold — see this test's docstring for the cache-warming "
             f"precondition).\n--- stdout ---\n{out.stdout}\n--- stderr ---\n{out.stderr}"
         )
+
+
+def test_a_real_offline_sync_produces_an_importable_fleet():
+    """SPEC §12 item 1 (proven by the sibling test above) is that `uv sync --frozen --offline`
+    exits 0 against the committed `uv.lock`. That is NOT the same property as "the resulting
+    environment can run the code the lock installs it for" — the two diverged for real: a
+    committed `uv.lock` pinned `typer==0.27.2` and `openai==3.5.0` while `src/fleet/cli.py`
+    imported names `typer._click.exceptions` no longer carries under that pin, and
+    `src/fleet/llm/backends/openai_compatible.py` typed a parameter against classic `httpx` when
+    the pinned `openai` now requires `httpx2`. Both sat undetected because nobody had actually
+    run `uv sync --frozen` against the committed lock in a while — the shared `.venv` had quietly
+    drifted to older, still-working versions, and the sibling test above only proves the lock
+    *resolves*, not that the code it installs *imports*. This closes that gap: after the same
+    offline sync, `import fleet.cli` under the SYNCED ENVIRONMENT'S OWN interpreter (never this
+    session's `.venv`, which the resolve-vs-import gap above shows can silently disagree with the
+    committed lock) must succeed.
+
+    Same throwaway-environment isolation as the sibling test (`VIRTUAL_ENV` popped,
+    `UV_PROJECT_ENVIRONMENT` an absolute path outside `REPO_ROOT`), same cache-warming
+    precondition, same `--offline`/`--frozen` flags for the same reasons — see that test's
+    docstring for the full rationale, not re-derived here.
+    """
+    with tempfile.TemporaryDirectory(prefix="fleet-uv-sync-import-check-") as throwaway_env:
+        env = dict(os.environ)
+        env.pop("VIRTUAL_ENV", None)
+        env["UV_PROJECT_ENVIRONMENT"] = throwaway_env
+        sync = subprocess.run(  # noqa: S603 - absolute path from shutil.which, fixed argv
+            [_uv(), "sync", "--frozen", "--offline"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        assert sync.returncode == 0, (
+            f"`uv sync --frozen --offline` exited {sync.returncode} while setting up this "
+            f"test's own throwaway environment — see test_uv_sync_frozen_is_exit_0_offline_on_"
+            f"py312's docstring for the cache-warming precondition this also needs.\n"
+            f"--- stdout ---\n{sync.stdout}\n--- stderr ---\n{sync.stderr}"
+        )
+
+        synced_python = Path(throwaway_env) / "bin" / "python"
+        assert synced_python.exists(), (
+            f"`uv sync` exited 0 but left no interpreter at {synced_python} — cannot check what "
+            f"it produced."
+        )
+
+        imported = subprocess.run(  # noqa: S603 - absolute path, fixed argv
+            [str(synced_python), "-c", "import fleet.cli; print(fleet.cli.__file__)"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert imported.returncode == 0, (
+            f"the environment `uv sync --frozen` just built from the committed uv.lock cannot "
+            f"import fleet.cli: the lock resolves cleanly but the code it installs does not "
+            f"run under it. Sync exited 0 (a resolvable lock), this did not (a working one) — "
+            f"those are different properties; see this test's docstring.\n"
+            f"--- stdout ---\n{imported.stdout}\n--- stderr ---\n{imported.stderr}"
+        )

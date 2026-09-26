@@ -816,8 +816,8 @@ def test_matches_reads_no_files(tmp_path: Path) -> None:
         ("pyproject.toml", "[project\nname = 'x'\n", PythonAdapter()),
         ("requirements.txt", "git+https://example.com/x.git\n", PythonAdapter()),
         ("pom.xml", "<project><dependencies><dependency>", MavenAdapter()),
-        ("pom.xml", "<project><dependencies><dependency><groupId>g</groupId>"
-                    "</dependency></dependencies></project>", MavenAdapter()),
+        ("pom.xml", ("<project><dependencies><dependency><groupId>g</groupId>"
+                    "</dependency></dependencies></project>"), MavenAdapter()),
         ("libs.versions.toml", "[libraries\nx = 1\n", GradleAdapter()),
         ("libs.versions.toml", '[libraries]\nbad = { version = "1.0" }\n', GradleAdapter()),
         ("Cargo.toml", "[dependencies\nserde = '1'\n", CargoAdapter()),

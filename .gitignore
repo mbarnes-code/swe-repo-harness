@@ -105,7 +105,12 @@ tools/bazel-test-root/
 #   https://github.com/langchain-ai/deepagents.git                  @ 1c6d358
 #   https://github.com/langchain-ai/open-swe.git                    @ e712a9e
 #   https://github.com/visa/visa-vulnerability-agentic-harness.git  @ 3d972f6
+#   https://github.com/microsoft/RefactorBench.git                  @ 210b2d1
+#   https://github.com/Einsia/SWE-Refactor-Bench.git                @ 0d5d731
+#   https://github.com/kgrzybek/modular-monolith-with-ddd.git       @ 91c8ef2
 references/*/
+# references/papers/ holds tracked PDFs (arXiv papers), not a git clone -- keep it out of the rule above.
+!references/papers/
 
 # ---- Claude Code per-user local overrides (machine- and session-specific) ----
 .claude/settings.local.json

@@ -490,8 +490,10 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                     repair_evidence = (
                         FailureClass.RULE_MISS,
                         "deterministic rules",
-                        f"no rule produced a change for {unit}; "
-                        f"rules considered: {[r.id for r in pipeline.rules_for(unit)]}",
+                        (
+                            f"no rule produced a change for {unit}; "
+                            f"rules considered: {[r.id for r in pipeline.rules_for(unit)]}"
+                        ),
                     )
                 else:
                     reason = check_diff(

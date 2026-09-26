@@ -528,8 +528,10 @@ def render_body(
         lines += [
             f"> **{SAMPLED_BANNER}**",
             ">",
-            f"> `rdeps_target_count` = {report.rdeps_target_count}; tested "
-            f"{report.rdeps_tested}; `rdeps_sample_seed` = `{_seed_of(payload)}`.",
+            (
+                f"> `rdeps_target_count` = {report.rdeps_target_count}; tested "
+                f"{report.rdeps_tested}; `rdeps_sample_seed` = `{_seed_of(payload)}`."
+            ),
             "> The untested remainder is a disclosed reduction, not a pass.",
             "",
         ]
@@ -544,8 +546,10 @@ def render_body(
     ]
     if payload.contract_id is not None:
         lines += [
-            f"- Hoisted contract: `{payload.contract_id}` "
-            f"(`Hoisted-Contract:` trailer on the merge commit)",
+            (
+                f"- Hoisted contract: `{payload.contract_id}` "
+                f"(`Hoisted-Contract:` trailer on the merge commit)"
+            ),
             f"- Owning repo: `{repo_id}`",
         ]
         if payload.collapsed_carriers:
@@ -566,8 +570,10 @@ def render_body(
         "",
         f"- `bazel build`: {'PASS' if report.build_ok else 'FAIL'}",
         f"- `bazel test` (own): {'PASS' if report.test_ok else 'FAIL'}",
-        f"- rdeps closure: {report.rdeps_target_count} target(s), {report.rdeps_tested} tested, "
-        f"truncated=`{report.rdeps_truncated}`",
+        (
+            f"- rdeps closure: {report.rdeps_target_count} target(s), "
+            f"{report.rdeps_tested} tested, truncated=`{report.rdeps_truncated}`"
+        ),
         f"- rdeps query: `{report.rdeps_query or 'n/a'}`",
         f"- Verdict: **{report.verdict}**",
     ]

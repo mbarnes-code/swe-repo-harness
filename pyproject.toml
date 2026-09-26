@@ -172,6 +172,8 @@ select = [
   "RUF",       # ruff-specific
   "ASYNC",     # async antipatterns
   "S",         # bandit
+  "DTZ",       # datetime must be tz-aware — CLAUDE.md Rule 12's "Round F" naive-utcnow bug class
+  "ISC",       # implicit string concatenation — catches an accidental missing comma
   "ANN",       # missing annotations
   "TRY",       # tryceratops (Rule 11 — fail loud)
 ]
