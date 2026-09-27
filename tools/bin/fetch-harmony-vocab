@@ -6,9 +6,14 @@
 # vocab file`, skipping 29 of tests/test_llm_backend_harmony_gpt_oss.py's 48 items. See ADR-0150.
 #
 # The blob is git-ignored, never vendored (.gitignore: tools/harmony-vocab/*.tiktoken): it is a
-# third-party data file with its own provenance, and the sha256 below -- `openai-harmony`'s own
+# third-party data file with its own provenance, and the pinned sha256 -- `openai-harmony`'s own
 # `expected_hash()` for O200kBase/O200kHarmony, which its loader re-verifies on every offline
 # read -- is what makes a copy trustworthy, not this repository's possession of it.
+#
+# ADR-0151: that hash lives ONCE, in the committed sidecar o200k_base.tiktoken.sha256 next to
+# where the blob installs -- NOT hardcoded here a second time. src/fleet/settings.py's
+# `_configure_harmony_vocab` reads the same file at settings-load time, so a re-pin only ever
+# happens in one place.
 #
 # Idempotent: a present file that hashes right is left alone; a present file that hashes WRONG is
 # reported and NOT overwritten (Rule 11 -- fail loud, never silently replace). Needs network.
@@ -20,9 +25,16 @@ set -euo pipefail
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 
 url=${HARMONY_VOCAB_URL:-https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken}
-expected=446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d
 dest_dir=$repo_root/tools/harmony-vocab
 dest=$dest_dir/o200k_base.tiktoken
+hash_file=$dest_dir/o200k_base.tiktoken.sha256
+
+if [ ! -f "$hash_file" ]; then
+  echo "ERROR: $hash_file is missing -- this checkout is incomplete (ADR-0151 pins the expected" >&2
+  echo "sha256 there, the single source of truth this script and settings.py both read)" >&2
+  exit 1
+fi
+expected=$(cat "$hash_file")
 
 sha256_of() {
   sha256sum "$1" | cut -d' ' -f1

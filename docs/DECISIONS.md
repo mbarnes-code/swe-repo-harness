@@ -16301,3 +16301,133 @@ Consequently the conditional in the request — *"if it does, pin 3.5.0 as a per
 **Rejected alternative: seeding `TIKTOKEN_RS_CACHE_DIR` with the sha1-of-URL filename.** Works today; depends on an undocumented internal filename scheme, and fails silently (back to a download attempt) the day upstream changes it or the base URL moves.
 
 ---
+
+## ADR-0151 — A Harmony-routed profile must fail loud at settings load when no hash-verified vocab resolves; one precedence rule for the two `TIKTOKEN_ENCODINGS_BASE` mechanisms
+
+**Agent Recommendation** (CLAUDE.md Guardrail 1): the shape below was proposed by a prior review
+and implemented as briefed after independent verification; it is not an owner mandate, and any
+future lane may revisit it through the normal ADR process if a real problem surfaces.
+
+**Decision (2026-09-27).**
+
+**1. Finding.** `_configure_harmony_vocab` (`src/fleet/settings.py`, ADR-0148/§12.50) reads
+`config.llm.harmony_vocab_dir` and simply `return`s when it is `None` — no error, regardless of
+whether the active profile actually needs a vocab. `config/models.yaml`'s `pilot` profile routes
+all three tiers (HEAVY/WORKHORSE/CHEAP) to `backend: harmony_gpt_oss`, and `config/` ships no file
+setting `harmony_vocab_dir`. Consequently `FleetSettings.load(--profile pilot)` succeeded silently
+with no vocab configured; `openai-harmony` then falls back to a network download of
+`o200k_base.tiktoken` on the FIRST real backend call — undetected at startup (Rule 11's whole
+point), and a hard failure on an air-gapped host instead of a startup error naming the fix.
+Reproduced directly against the pre-fix function: loading a `harmony_gpt_oss`-routed profile with
+`harmony_vocab_dir` unset and no `TIKTOKEN_*` env vars pre-set returned a valid `FleetSettings`
+with neither `TIKTOKEN_ENCODINGS_BASE` nor `TIKTOKEN_RS_CACHE_DIR` set — the exact silent gap this
+ADR closes. Tracked as **D148** (`docs/INTEGRATION_HONESTY.md`).
+
+**2. Fix — four parts, all in `_configure_harmony_vocab` and its `FleetSettings.load()` call
+site.**
+
+- **Required when routed.** The call site now passes `profile_targets=models.profiles[profile]`
+  — the SAME already-resolved routing table `_check_routing` validates immediately before it,
+  never a second hand-parse of `config/models.yaml`. When ANY tier's target list names
+  `harmony_gpt_oss`, a resolvable vocab directory is mandatory; a profile that never routes there
+  is unaffected and the key stays fully optional (unset ⇒ a true no-op, unchanged from
+  ADR-0148). The call was moved from immediately after `fleet.yaml` validation (before `models.yaml`
+  and the profile even resolve) to immediately after `_check_routing` — so a config with, say, a
+  missing `base_url` or an uninstalled `harmony` extra still gets ITS OWN clearer error first
+  rather than a vocab error masking it.
+- **Default location.** An unset `llm.harmony_vocab_dir` on a routed profile now defaults to
+  `<repo_root>/tools/harmony-vocab/` — computed as `Path(__file__).resolve().parents[2]` from
+  `src/fleet/settings.py`, mirroring `tests/conftest.py`'s own `REPO_ROOT = Path(__file__)
+  .resolve().parents[1]` (one level shallower there, since `tests/` sits directly under the repo
+  root). This is the exact directory `tools/bin/fetch-harmony-vocab` installs into. Any failure
+  against the DEFAULT location names the fetch script in its message; an explicit,
+  operator-chosen `harmony_vocab_dir` that fails validation does not carry that remedy text, since
+  the operator chose the path themselves.
+- **Hash check at load — one source of truth, not two.** `tools/bin/fetch-harmony-vocab` used to
+  hardcode `expected=446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d`
+  (`openai-harmony`'s own `expected_hash()`, ADR-0150). Rather than hardcode that hex string a
+  second time in `settings.py` (CLAUDE.md Rule 2), a plain-text sidecar,
+  `<vocab_dir>/o200k_base.tiktoken.sha256` (64 hex chars, nothing else), now carries it — for the
+  real deployment this is the single committed file `tools/harmony-vocab/o200k_base.tiktoken.sha256`,
+  since the fetch script's `dest_dir` and settings.py's default both resolve to the same
+  directory. The fetch script now reads `expected` from that file instead of its own literal;
+  `_configure_harmony_vocab` computes the resolved vocab file's sha256 (`fleet.util.hashing.
+  sha256_file`, already the codebase's existing wrapper — Rule 8) and compares it against the
+  sidecar's content. A missing sidecar or a mismatch is `ConfigValidationError`, naming the file
+  path and (on mismatch) both the expected and actual hex digests. The sidecar is a small text
+  file, not the 3.6 MB blob, so it is NOT excluded by `.gitignore`'s `tools/harmony-vocab/
+  *.tiktoken` pattern and is committed normally.
+- **One precedence rule for the two `TIKTOKEN_ENCODINGS_BASE` mechanisms.** `tests/conftest.py`
+  does `os.environ.setdefault("TIKTOKEN_ENCODINGS_BASE", str(HARMONY_VOCAB_DIR))` for test
+  bootstrapping (ADR-0148), while `_configure_harmony_vocab` used to do an unconditional
+  `os.environ[...] = vocab_dir` overwrite — the two could disagree with neither side noticing.
+  The rule, in order:
+  - **Runtime:** the resolved config value (explicit `harmony_vocab_dir`, or the default above
+    when routed) is authoritative; `_configure_harmony_vocab` sets `TIKTOKEN_ENCODINGS_BASE` and
+    `TIKTOKEN_RS_CACHE_DIR` to it.
+  - **Operator conflict:** BEFORE overwriting, if `TIKTOKEN_ENCODINGS_BASE` is already present in
+    `os.environ` with a value that DIFFERS from the resolved config path, `_configure_harmony_vocab`
+    raises `ConfigValidationError` naming both values — never a silent override. An export that is
+    absent, or already equal to the resolved value, proceeds normally.
+  - **Tests:** `tests/conftest.py`'s `setdefault` line is unchanged — it exists for tests that
+    never go through `FleetSettings.load()` at all (most of
+    `tests/test_llm_backend_harmony_gpt_oss.py`, which sets `TIKTOKEN_*` directly via
+    `monkeypatch.setenv`, bypassing settings entirely).
+
+**Investigated per this round's brief: does conftest's `setdefault` make the new operator-conflict
+check fire spuriously inside the test suite itself?** Verified rather than assumed, by (a) reading
+every `tests/` file that names `harmony_gpt_oss` (`test_apply_patch.py`, `test_registries_
+stateless.py`, `test_llm_fences.py`, `test_settings.py`, `test_llm_backend_harmony_gpt_oss.py`) —
+only `test_settings.py` calls `FleetSettings.load()` with a Harmony-routed profile at all — and (b)
+tracing `tests/conftest.py`'s own guard: the `setdefault` line only fires when `(HARMONY_VOCAB_DIR
+/ "o200k_base.tiktoken").is_file()` is already true, and even when it is, `HARMONY_VOCAB_DIR` and
+`_DEFAULT_HARMONY_VOCAB_DIR` are BOTH derived from the same repo root pointing at the same
+`tools/harmony-vocab/` directory — so a conftest-set export and this loader's own default
+resolution always name the identical path, which is the "already equal ⇒ not a conflict" branch of
+the rule above, never the conflict branch. `test_settings.py`'s existing Harmony-vocab tests
+already clear both `TIKTOKEN_*` vars via a `monkeypatch`-based `_clear_tiktoken_env` helper before
+exercising an EXPLICIT, test-local `harmony_vocab_dir` (a different path than the real default),
+which is what keeps those tests isolated from whatever conftest set at session start regardless.
+No spurious firing was observed running the full `test_settings.py` file with the real vocab
+fetched into the default location (conftest's `setdefault` active) — `test_matching_tiktoken_
+encodings_base_export_is_not_a_conflict` pins this equal-value non-conflict case as a standing
+regression test.
+
+**3. Rule 12 mutation matrix** (`tests/test_settings.py`; each mutation confirmed to have actually
+changed the file via `git diff --numstat --no-index` against a pre-mutation backup, never `git
+diff HEAD`, before its test result was trusted):
+
+| # | Mutation | Result | Blast radius |
+|---|---|---|---|
+| 1 | `routed = any(...)` → `routed = False` (drop the routed-profile check) | RED: `test_harmony_routed_profile_with_unset_vocab_dir_is_refused_at_startup`, `test_harmony_routed_profile_resolves_the_default_vocab_dir_when_valid` | 85 passed / 2 failed |
+| 2 | `if actual != expected:` → `if False:` (skip the hash comparison) | RED: `test_harmony_vocab_hash_mismatch_is_refused_naming_both_hashes` | 86 passed / 1 failed |
+| 3 | Delete the operator-conflict `if exported is not None and exported != vocab_dir: raise …` block, reverting to the old unconditional `os.environ[...] = vocab_dir` | RED: `test_conflicting_tiktoken_encodings_base_export_is_refused` | 86 passed / 1 failed |
+
+No mutation reddened or greened every test at once (each stayed within 1–2 failures of a ~87-test
+file), so none is the vacuous all-fail/all-pass result Rule 12 warns against; each has a distinct,
+named discriminator. The full `tests/test_settings.py` file was re-run GREEN (87 passed) after
+restoring the fixed source from the pre-mutation backup between mutations.
+
+**4. Deviation from the brief, disclosed.** The brief's suggested hash-file path,
+`tools/harmony-vocab/o200k_base.tiktoken.sha256`, is followed for the real, committed default
+location, but the READ side is generalized: `_configure_harmony_vocab` looks for
+`<resolved_vocab_dir>/o200k_base.tiktoken.sha256` — i.e. the sidecar lives NEXT TO whatever vocab
+file resolves, default or explicit — rather than at one hardcoded absolute path. This was chosen
+because a single fixed absolute path is untestable without either mutating the real repo path
+(cross-test contamination) or leaving the success path of "a valid, hash-verified vocab dir"
+entirely untested; a co-located sidecar lets a test drop a self-contained
+`o200k_base.tiktoken`/`o200k_base.tiktoken.sha256` pair in any `tmp_path` while the real deployment
+still reads from exactly the one committed file the brief named. The pinned VALUE is still sourced
+from exactly one place in the real deployment (`tools/harmony-vocab/o200k_base.tiktoken.sha256`,
+asserted verbatim by `test_the_pinned_hash_sidecar_matches_adr_0150`), so "keep the hash in one
+place" (Rule 2) still holds for the value itself; only its filesystem *location convention* is
+generalized to "beside the vocab file" rather than fixed absolute.
+
+**Not fixed here.** The real `o200k_base.tiktoken` blob is still never vendored (ADR-0150's
+rejected-alternative reasoning is unchanged) — an operator on a fresh, air-gapped clone still runs
+`tools/bin/fetch-harmony-vocab` once, over a network, before a `pilot`-shaped profile will load at
+all. This ADR's fix converts that from a silent, deferred failure into a startup-time
+`ConfigValidationError` naming exactly that command; it does not remove the network dependency
+`fetch-harmony-vocab` itself still has.
+
+---

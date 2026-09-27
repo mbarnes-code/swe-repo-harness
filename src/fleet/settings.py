@@ -45,7 +45,7 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 
 from fleet.models.enums import ContextPolicy, Ecosystem, EdgeKind, ModelTier, TransformTier
 from fleet.models.tasks import BackendTarget, ModelCapabilities, Price
-from fleet.util.hashing import sha256_text
+from fleet.util.hashing import sha256_file, sha256_text
 from fleet.vcs.forge import FORGE_NAMES
 
 __all__ = [
@@ -105,6 +105,25 @@ MODELS_SECTION: Final = "models_profile"
 _HARMONY_VOCAB_FILENAME: Final = "o200k_base.tiktoken"
 _TIKTOKEN_ENCODINGS_BASE_ENV: Final = "TIKTOKEN_ENCODINGS_BASE"
 _TIKTOKEN_RS_CACHE_DIR_ENV: Final = "TIKTOKEN_RS_CACHE_DIR"
+
+#: ADR-0151/D148. The backend name a profile must route to before a vocab dir is REQUIRED rather
+#: than merely validated-if-present.
+_HARMONY_ROUTED_BACKEND: Final = "harmony_gpt_oss"
+
+#: ADR-0151. `tools/bin/fetch-harmony-vocab`'s pinned sha256 for `o200k_base.tiktoken`
+#: (`openai-harmony`'s own `expected_hash()`, per ADR-0150) lives ONCE, in a sidecar file next to
+#: the vocab file itself — never hardcoded a second time here (CLAUDE.md Rule 2's "keep the hash in
+#: one place"). Both the fetch script and this module read it at runtime.
+_HARMONY_VOCAB_HASH_FILENAME: Final = "o200k_base.tiktoken.sha256"
+
+#: `src/fleet/settings.py` -> `src/fleet` -> `src` -> repo root. Mirrors `tests/conftest.py`'s
+#: `REPO_ROOT = Path(__file__).resolve().parents[1]` (one level shallower there: `tests/` sits
+#: directly under the repo root, `settings.py` sits two levels down).
+_REPO_ROOT: Final = Path(__file__).resolve().parents[2]
+
+#: The directory `tools/bin/fetch-harmony-vocab` installs into, and the default a Harmony-routed
+#: profile with no explicit `llm.harmony_vocab_dir` resolves to (ADR-0151).
+_DEFAULT_HARMONY_VOCAB_DIR: Final = _REPO_ROOT / "tools" / "harmony-vocab"
 
 #: B2 (round `pilot-criteria-bringup`). An untracked, gitignored local file carrying REAL `pilot`
 #: endpoint values (`base_url`/`base_urls`, ...; `backend`+`model_id` only name the target) that
@@ -1285,7 +1304,6 @@ class FleetSettings:
         config = cls._validate_fleet_config(
             fleet_path, file_data=file_data, env_data=env_data, cli_data=cli_data
         )
-        _configure_harmony_vocab(config, fleet_path)
 
         repos_data, repos_raw = _read_yaml_mapping(repos_path)
         models_data, models_raw = _read_yaml_mapping(models_path)
@@ -1319,6 +1337,7 @@ class FleetSettings:
 
         backends = tuple(known_backends) if known_backends is not None else SHIPPED_BACKENDS
         _check_routing(config, models, profile, models_path, backends, capabilities)
+        _configure_harmony_vocab(config, fleet_path, profile_targets=models.profiles[profile])
         _check_rule_engines(config, root_dir)
         _check_concurrency_overrides(config, fleet_path)
 
@@ -1468,20 +1487,50 @@ def _refuse_secret_material(path: Path, raw: str, patterns: Mapping[str, str]) -
         )
 
 
-def _configure_harmony_vocab(config: FleetConfig, path: Path) -> None:
-    """ADR-0148/§12.50: point the `openai-harmony` SDK's own vocab-loading env vars at
+def _configure_harmony_vocab(
+    config: FleetConfig,
+    path: Path,
+    *,
+    profile_targets: Mapping[ModelTier, tuple[BackendTarget, ...]],
+) -> None:
+    """ADR-0148/ADR-0151/§12.50: point the `openai-harmony` SDK's own vocab-loading env vars at
     `llm.harmony_vocab_dir` before any `load_harmony_encoding()` call in the process — the SDK
     reads `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR` itself and falls back to a network
     fetch when neither is set. Fails loud HERE, at settings load, naming both the configured path
     and the missing piece, rather than lazily inside the backend's first call (Rule 11) — the
-    harness sets these vars itself; an operator is never asked to export them."""
-    vocab_dir = config.llm.harmony_vocab_dir
-    if vocab_dir is None:
+    harness sets these vars itself; an operator is never asked to export them.
+
+    ADR-0151/D148: an unset `harmony_vocab_dir` used to be silently accepted for EVERY profile,
+    including one that routes to `harmony_gpt_oss` for every tier (`config/models.yaml`'s
+    `pilot`) — the SDK then falls back to a network fetch of `o200k_base.tiktoken`, undetected
+    here and a hard failure on an air-gapped host's first real backend call. `profile_targets` is
+    `models.profiles[profile]` — the SAME already-resolved routing table `_check_routing` just
+    validated, never re-parsed from `config/models.yaml` here. When ANY tier routes to
+    `harmony_gpt_oss`, a valid, hash-verified vocab directory is now REQUIRED: explicit
+    `llm.harmony_vocab_dir`, or — when unset — the default `tools/harmony-vocab/`
+    (`tools/bin/fetch-harmony-vocab`'s own install target). A profile that never routes there is
+    unaffected; the key stays fully optional.
+    """
+    routed = any(
+        target.backend == _HARMONY_ROUTED_BACKEND
+        for targets in profile_targets.values()
+        for target in targets
+    )
+    configured = config.llm.harmony_vocab_dir
+    if configured is None and not routed:
         return
+    using_default = configured is None
+    vocab_dir = configured if configured is not None else str(_DEFAULT_HARMONY_VOCAB_DIR)
+    remedy = (
+        f" the {config.llm.profile!r} profile routes to `{_HARMONY_ROUTED_BACKEND}`; provision "
+        "the default location with `tools/bin/fetch-harmony-vocab`."
+        if using_default
+        else ""
+    )
     directory = Path(vocab_dir)
     if not directory.is_dir():
         raise ConfigValidationError(
-            f"llm.harmony_vocab_dir {vocab_dir!r} does not exist or is not a directory",
+            f"llm.harmony_vocab_dir {vocab_dir!r} does not exist or is not a directory.{remedy}",
             file=path,
             key="llm.harmony_vocab_dir",
         )
@@ -1489,7 +1538,39 @@ def _configure_harmony_vocab(config: FleetConfig, path: Path) -> None:
     if not vocab_file.is_file():
         raise ConfigValidationError(
             f"llm.harmony_vocab_dir {vocab_dir!r} is missing {_HARMONY_VOCAB_FILENAME!r} "
-            "(the Harmony/tiktoken o200k_base vocab file)",
+            f"(the Harmony/tiktoken o200k_base vocab file).{remedy}",
+            file=path,
+            key="llm.harmony_vocab_dir",
+        )
+    hash_file = directory / _HARMONY_VOCAB_HASH_FILENAME
+    if not hash_file.is_file():
+        raise ConfigValidationError(
+            f"llm.harmony_vocab_dir {vocab_dir!r} is missing {_HARMONY_VOCAB_HASH_FILENAME!r} "
+            "— the pinned sha256 digest `tools/bin/fetch-harmony-vocab` installs alongside the "
+            f"vocab file (ADR-0151's single source of truth); without it the file's integrity "
+            f"cannot be verified.{remedy}",
+            file=path,
+            key="llm.harmony_vocab_dir",
+        )
+    expected = hash_file.read_text(encoding="utf-8").strip()
+    actual = sha256_file(vocab_file)
+    if actual != expected:
+        raise ConfigValidationError(
+            f"{vocab_file} sha256 mismatch: expected {expected}, got {actual} — it does not "
+            "match openai-harmony's own pinned o200k_base vocab (ADR-0150); re-run "
+            "`tools/bin/fetch-harmony-vocab` or inspect the file",
+            file=path,
+            key="llm.harmony_vocab_dir",
+        )
+
+    exported = os.environ.get(_TIKTOKEN_ENCODINGS_BASE_ENV)
+    if exported is not None and exported != vocab_dir:
+        raise ConfigValidationError(
+            f"{_TIKTOKEN_ENCODINGS_BASE_ENV} is already exported as {exported!r}, which "
+            f"disagrees with the config-resolved llm.harmony_vocab_dir {vocab_dir!r} — unset the "
+            "environment variable or make it agree with the config; the resolved config value "
+            "is authoritative and the harness refuses to silently override a conflicting export "
+            "(ADR-0151)",
             file=path,
             key="llm.harmony_vocab_dir",
         )

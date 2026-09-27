@@ -12223,3 +12223,38 @@ is an RFC 1918 (private) LAN address, not a secret (no credential, token, or key
 access beyond what already requires being on the operator's own LAN. The new guard test only
 covers tracked-file *content* going forward, not history.
 
+## D148 — FIXED, LANDED (this entry lands in the same commit as the fix). A Harmony-routed profile could load with no vocab configured, silently deferring to a network fetch on the first real call
+
+**Finding.** `_configure_harmony_vocab` (`src/fleet/settings.py`, ADR-0148/§12.50) read
+`config.llm.harmony_vocab_dir` and simply `return`ed when it was `None` — regardless of whether
+the ACTIVE profile actually needed a vocab. `config/models.yaml`'s `pilot` profile routes all
+three tiers (HEAVY/WORKHORSE/CHEAP) to `backend: harmony_gpt_oss`, and `config/` shipped no file
+setting `harmony_vocab_dir`, so `FleetSettings.load(--profile pilot)` succeeded with the tiktoken
+env vars untouched. Reproduced directly against the pre-fix function before any edit: loading a
+`harmony_gpt_oss`-routed profile with `harmony_vocab_dir` unset and no `TIKTOKEN_*` env vars
+pre-set returned a valid `FleetSettings` object with neither `TIKTOKEN_ENCODINGS_BASE` nor
+`TIKTOKEN_RS_CACHE_DIR` set. `openai-harmony`'s loader falls back to a network download of
+`o200k_base.tiktoken` from OpenAI's CDN the first time `load_harmony_encoding()` actually runs —
+on an air-gapped host that resolves nothing, and the failure lands inside a live backend call
+(Rule 11's exact "waves into a run" deferral) instead of at settings load, exit 2, naming the fix.
+
+**Fix.** See ADR-0151 for the full four-part design (required-when-routed, default location,
+single-source-of-truth hash sidecar, one precedence rule for the two `TIKTOKEN_ENCODINGS_BASE`
+mechanisms). In short: `FleetSettings.load()` now passes the active profile's already-resolved
+routing table into `_configure_harmony_vocab`; when any tier names `harmony_gpt_oss`, a
+resolvable, hash-verified vocab directory becomes mandatory (explicit `harmony_vocab_dir`, or the
+default `tools/harmony-vocab/` `tools/bin/fetch-harmony-vocab` installs into), and an operator's
+own conflicting `TIKTOKEN_ENCODINGS_BASE` export is refused loudly rather than silently
+overwritten. `tests/test_settings.py` carries nine new tests (both failure modes named above, the
+non-Harmony-profile no-op path, the default-resolution success path, and a
+`assert_loopback_only()`-guarded belt-and-suspenders check that a successful load attempts no
+network I/O) plus a strengthened version of the pre-existing
+`test_harmony_vocab_dir_points_tiktoken_env_vars_at_the_configured_directory`, whose stub content
+now carries a matching `.sha256` sidecar rather than skipping the hash check entirely.
+
+**What is still not proven, stated plainly.** This does not remove the network dependency
+`tools/bin/fetch-harmony-vocab` itself has — an operator on a fresh, air-gapped clone still runs it
+once, over a network, before a `pilot`-shaped profile will load at all. What changes is WHEN the
+gap surfaces: a startup-time `ConfigValidationError` naming the exact command to run, rather than
+a `HarmonyError` inside a live wave-7 backend call.
+

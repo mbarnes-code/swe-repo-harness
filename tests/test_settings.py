@@ -18,6 +18,7 @@ Every test here answers "why does this matter", not "does this line run":
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import fleet.settings as settings_module
 from fleet.models.enums import ContextPolicy, ModelTier, TransformTier
 from fleet.models.tasks import BackendTarget, Price
 from fleet.settings import (
@@ -50,6 +52,7 @@ from fleet.settings import (
     canonical_json,
     target_price_usd,
 )
+from tests.fixtures.llm.stub_openai_server import assert_loopback_only
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 
@@ -1133,6 +1136,29 @@ def _clear_tiktoken_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TIKTOKEN_RS_CACHE_DIR", raising=False)
 
 
+def _write_vocab_dir(vocab_dir: Path, *, content: bytes = b"stub vocab content\n") -> Path:
+    """A directory holding `o200k_base.tiktoken` plus a matching `.sha256` sidecar (ADR-0151) —
+    the stub content is never the real vocab bytes, but the sidecar always matches IT, which is
+    all `_configure_harmony_vocab` checks; `content` never needs to satisfy the real ADR-0150
+    hash."""
+    vocab_dir.mkdir(parents=True, exist_ok=True)
+    (vocab_dir / "o200k_base.tiktoken").write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    (vocab_dir / "o200k_base.tiktoken.sha256").write_text(digest + "\n", encoding="utf-8")
+    return vocab_dir
+
+
+# The default profile's CHEAP tier, re-pointed at `harmony_gpt_oss` — the fixture ADR-0151's new
+# tests route through so "the active profile routes to `harmony_gpt_oss`" is real, not asserted.
+HARMONY_ROUTED_CHEAP_TARGET = (
+    "    CHEAP:\n"
+    "      - { backend: harmony_gpt_oss, model_id: gpt-oss-120b, effort: low, price: free,\n"
+    "          base_url: 'http://pilot-spark.internal:8000/v1' }\n"
+)
+HARMONY_ROUTED_MODELS_YAML = MODELS_YAML.replace(CHEAP_TARGET, HARMONY_ROUTED_CHEAP_TARGET)
+_HARMONY_KNOWN_BACKENDS = ("anthropic", "openai_compatible", "harmony_gpt_oss")
+
+
 def test_harmony_vocab_dir_unset_touches_neither_tiktoken_env_var(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1148,11 +1174,12 @@ def test_harmony_vocab_dir_points_tiktoken_env_vars_at_the_configured_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """§12.50 offline-vocab half: the HARNESS sets `TIKTOKEN_ENCODINGS_BASE`/`TIKTOKEN_RS_CACHE_DIR`
-    itself from `llm.harmony_vocab_dir` — an operator never exports either into their shell."""
+    itself from `llm.harmony_vocab_dir` — an operator never exports either into their shell.
+
+    ADR-0151 adds a hash-verified sidecar requirement on top of the plain file-exists check this
+    test originally pinned, so the stub content now needs a matching `.sha256` beside it."""
     _clear_tiktoken_env(monkeypatch)
-    vocab_dir = tmp_path / "vocab"
-    vocab_dir.mkdir()
-    (vocab_dir / "o200k_base.tiktoken").write_text("stub vocab content\n", encoding="utf-8")
+    vocab_dir = _write_vocab_dir(tmp_path / "vocab")
     fleet = f"""\
         llm:
           harmony_vocab_dir: {vocab_dir}
@@ -1198,6 +1225,168 @@ def test_harmony_vocab_dir_missing_vocab_file_fails_loud_naming_both(
     assert str(vocab_dir) in message
     assert "o200k_base.tiktoken" in message
     assert "TIKTOKEN_ENCODINGS_BASE" not in os.environ
+
+
+# --------------------------------------------------------------------------------------
+# ADR-0151/D148 — a Harmony-routed profile REQUIRES a hash-verified vocab dir; the two
+# TIKTOKEN_* env-var mechanisms (this loader's, `tests/conftest.py`'s) get one precedence rule.
+# --------------------------------------------------------------------------------------
+
+
+def test_harmony_routed_profile_with_unset_vocab_dir_is_refused_at_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The finding: `pilot` (all three tiers -> `harmony_gpt_oss`) used to load silently with no
+    vocab configured, and the SDK fell back to a network fetch, undetected, until the first real
+    call on an air-gapped host. `harmony_gpt_oss` in ANY tier of the ACTIVE profile now makes a
+    resolvable vocab dir mandatory; the default (`tools/harmony-vocab/`) is monkeypatched to an
+    empty tmp dir so this test does not depend on whether this checkout has actually fetched the
+    real vocab."""
+    _clear_tiktoken_env(monkeypatch)
+    empty_default = tmp_path / "not-provisioned"
+    monkeypatch.setattr(settings_module, "_DEFAULT_HARMONY_VOCAB_DIR", empty_default)
+
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(
+            write_config(tmp_path, models=HARMONY_ROUTED_MODELS_YAML),
+            known_backends=_HARMONY_KNOWN_BACKENDS,
+        )
+    message = str(excinfo.value)
+    assert "harmony_vocab_dir" in message
+    assert "tools/bin/fetch-harmony-vocab" in message
+    assert "TIKTOKEN_ENCODINGS_BASE" not in os.environ
+
+
+def test_non_harmony_profile_still_loads_with_no_vocab_anywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Part 1's other half: a profile that never routes to `harmony_gpt_oss` (the plain `default`
+    profile MODELS_YAML builds) stays fully unaffected — `harmony_vocab_dir` stays optional, and
+    a default location that resolves to nothing is never even consulted."""
+    _clear_tiktoken_env(monkeypatch)
+    monkeypatch.setattr(
+        settings_module, "_DEFAULT_HARMONY_VOCAB_DIR", tmp_path / "not-provisioned"
+    )
+    settings = load(write_config(tmp_path))
+    assert settings.profile == "default"
+    assert "TIKTOKEN_ENCODINGS_BASE" not in os.environ
+    assert "TIKTOKEN_RS_CACHE_DIR" not in os.environ
+
+
+def test_harmony_routed_profile_resolves_the_default_vocab_dir_when_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No explicit `llm.harmony_vocab_dir`, but the profile routes to `harmony_gpt_oss`: the
+    default `tools/harmony-vocab/`-shaped directory is used, exactly as `fetch-harmony-vocab`
+    installs it."""
+    _clear_tiktoken_env(monkeypatch)
+    default_dir = _write_vocab_dir(tmp_path / "default-vocab")
+    monkeypatch.setattr(settings_module, "_DEFAULT_HARMONY_VOCAB_DIR", default_dir)
+
+    load(
+        write_config(tmp_path, models=HARMONY_ROUTED_MODELS_YAML),
+        known_backends=_HARMONY_KNOWN_BACKENDS,
+    )
+    assert os.environ["TIKTOKEN_ENCODINGS_BASE"] == str(default_dir)
+    assert os.environ["TIKTOKEN_RS_CACHE_DIR"] == str(default_dir)
+
+
+def test_harmony_vocab_hash_mismatch_is_refused_naming_both_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A present file with a WRONG hash is a corrupt/tampered/wrong-version vocab, never silently
+    trusted (ADR-0150's own rationale, re-applied at settings load instead of left to the SDK)."""
+    _clear_tiktoken_env(monkeypatch)
+    vocab_dir = tmp_path / "vocab"
+    vocab_dir.mkdir()
+    (vocab_dir / "o200k_base.tiktoken").write_bytes(b"real bytes")
+    (vocab_dir / "o200k_base.tiktoken.sha256").write_text("f" * 64 + "\n", encoding="utf-8")
+    fleet = f"llm:\n  harmony_vocab_dir: {vocab_dir}\n"
+
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(write_config(tmp_path, fleet=fleet))
+    message = str(excinfo.value)
+    assert "f" * 64 in message                                         # expected
+    assert hashlib.sha256(b"real bytes").hexdigest() in message        # actual
+    assert "TIKTOKEN_ENCODINGS_BASE" not in os.environ
+
+
+def test_harmony_vocab_missing_hash_sidecar_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The vocab file present with NO `.sha256` beside it cannot be verified at all — refused
+    rather than trusted on faith."""
+    _clear_tiktoken_env(monkeypatch)
+    vocab_dir = tmp_path / "vocab"
+    vocab_dir.mkdir()
+    (vocab_dir / "o200k_base.tiktoken").write_bytes(b"real bytes")
+    fleet = f"llm:\n  harmony_vocab_dir: {vocab_dir}\n"
+
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(write_config(tmp_path, fleet=fleet))
+    assert "o200k_base.tiktoken.sha256" in str(excinfo.value)
+    assert "TIKTOKEN_ENCODINGS_BASE" not in os.environ
+
+
+def test_conflicting_tiktoken_encodings_base_export_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Part 4's operator-conflict rule: an operator who has already exported
+    `TIKTOKEN_ENCODINGS_BASE` to a DIFFERENT directory than the config resolves to must be told
+    loudly, naming both values, rather than have the harness silently override their export."""
+    vocab_dir = _write_vocab_dir(tmp_path / "vocab")
+    other_dir = tmp_path / "operator-exported-elsewhere"
+    other_dir.mkdir()
+    monkeypatch.setenv("TIKTOKEN_ENCODINGS_BASE", str(other_dir))
+    fleet = f"llm:\n  harmony_vocab_dir: {vocab_dir}\n"
+
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(write_config(tmp_path, fleet=fleet))
+    message = str(excinfo.value)
+    assert str(other_dir) in message
+    assert str(vocab_dir) in message
+    assert os.environ["TIKTOKEN_ENCODINGS_BASE"] == str(other_dir), "never silently overwritten"
+
+
+def test_matching_tiktoken_encodings_base_export_is_not_a_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the precedence rule: an export that already AGREES with the
+    config-resolved path is not a conflict — this is what makes `tests/conftest.py`'s own
+    session-wide `setdefault` safe once the default vocab dir is actually provisioned, per this
+    round's investigation (see the task report; re-verified here as a standing regression test)."""
+    vocab_dir = _write_vocab_dir(tmp_path / "vocab")
+    monkeypatch.setenv("TIKTOKEN_ENCODINGS_BASE", str(vocab_dir))
+    fleet = f"llm:\n  harmony_vocab_dir: {vocab_dir}\n"
+
+    load(write_config(tmp_path, fleet=fleet))  # must not raise
+    assert os.environ["TIKTOKEN_ENCODINGS_BASE"] == str(vocab_dir)
+
+
+def test_harmony_vocab_load_success_attempts_no_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Belt-and-suspenders: a successful, hash-verified load must never itself open a socket —
+    reusing `assert_loopback_only()` (`tests/fixtures/llm/stub_openai_server.py`), the suite's
+    existing real-socket network-block instrument, rather than inventing a second mechanism."""
+    _clear_tiktoken_env(monkeypatch)
+    vocab_dir = _write_vocab_dir(tmp_path / "vocab")
+    fleet = f"llm:\n  harmony_vocab_dir: {vocab_dir}\n"
+
+    with assert_loopback_only() as guard:
+        load(write_config(tmp_path, fleet=fleet))
+    assert guard.blocked_attempts == []
+
+
+def test_the_pinned_hash_sidecar_matches_adr_0150() -> None:
+    """The real, committed `tools/harmony-vocab/o200k_base.tiktoken.sha256` (this task's single
+    source of truth file) must still carry ADR-0150's pinned digest — the one
+    `tools/bin/fetch-harmony-vocab` used to hardcode a second time before ADR-0151."""
+    repo_root = Path(__file__).resolve().parents[1]
+    hash_file = repo_root / "tools" / "harmony-vocab" / "o200k_base.tiktoken.sha256"
+    assert hash_file.is_file(), f"{hash_file} must be committed (ADR-0151 single source of truth)"
+    digest = hash_file.read_text(encoding="utf-8").strip()
+    assert digest == "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
 
 
 # --------------------------------------------------------------------------------------
