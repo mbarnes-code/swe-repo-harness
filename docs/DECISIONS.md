@@ -16302,6 +16302,98 @@ Consequently the conditional in the request — *"if it does, pin 3.5.0 as a per
 
 ---
 
+**Amended 2026-09-27 — re-adjudicated at openai 3.18.0.** Dependabot merged a further `openai`
+bump since this ADR's original 3.17.0 measurement; `pyproject.toml` and `uv.lock` now floor/pin at
+**`openai>=3.18.0`**, and the installed interpreter measured `openai.__version__ == "3.18.0"`
+(`.venv/bin/python -c "import openai; print(openai.__version__)"`, this round). The original
+adjudication's own scope statement ("measured for these two versions, not proven for every future
+one") means 3.18.0 needed its own run, not an inference from 3.17.0's result. Baseline is the SAME
+`openai==3.5.0` this ADR originally compared against; `openai-harmony` is the same `0.0.8`
+throughout (confirmed installed via `uv sync --extra harmony` into `.venv`, which added
+`openai-harmony==0.0.8` with no change to the already-current `openai==3.18.0`).
+
+**Reused vs. adapted, disclosed.** ADR-0150's original wire-level and error-taxonomy differentials
+were run as ad-hoc scripts in throwaway venvs, not committed as `tests/` fixtures, so there was no
+committed script to reuse verbatim — new equivalent scripts were written this round
+(`_VllmCompletionsTransport`-driving, same shape: `httpx.MockTransport`, real `openai`
+SDK, only the socket replaced) and are the reusable artifact going forward. The original ADR also
+never named its exact "13 openai/harmony-touching test files" list in any committed file (checked:
+neither `docs/PROGRESS.md`'s nor `docs/INTEGRATION_HONESTY.md`'s D147 entries, added in the same
+commit, `e288e9a`, list file names). Rather than guess at that list, method 1 below used a freshly
+derived, disclosed predicate — broader than "13," a superset by construction — so the comparison
+is at least as strong as the original, not narrower.
+
+- **Test suite (method 1, adapted).** Predicate: every test file that imports `openai`/
+  `openai_harmony` directly, imports a `fleet.llm.backends.openai_compatible`/`harmony_gpt_oss`
+  module object, or exercises a REAL registered `openai_compatible`/`harmony_gpt_oss` backend
+  instance's methods (not merely a `BackendTarget(backend="openai_compatible", ...)` string tag in
+  an unrelated fixture) — 22 files, listed in this round's scratch notes, a strict superset of the
+  narrower set ADR-0150 does not itself name. Two interpreters differing ONLY in `openai` version:
+  a fresh venv with `openai==3.5.0` (all other packages pinned identical to `.venv`'s `pip freeze`,
+  plus `fleet` installed editable with `--no-deps` so subprocess-spawning tests resolve `fleet`
+  exactly as `.venv` does) vs. `.venv` itself (`openai==3.18.0`). **1009 passed / 0 failed under
+  each**, no skips, whole files, no `-k` filter. (First pass under the throwaway venv showed 4
+  failures — `test_state_repository_imports_first_in_a_fresh_interpreter`,
+  `test_a_missing_sdk_leaves_the_backend_unregistered` ×2, `test_render_prompt_is_byte_identical_
+  across_pythonhashseed` — all four spawn a bare `python -c` subprocess; root cause was a missing
+  editable install of `fleet` in the throwaway venv, NOT an `openai` behavior difference. Fixed by
+  `pip install --no-deps -e .` into that venv; re-run was clean. Disclosed per Rule 12/Guardrail 6:
+  an all-fail-shaped result on a narrow, structurally-related subset was investigated before being
+  trusted, not written off as "probably the version.")
+- **Wire-level differential (method 2, re-run).** Real `_VllmCompletionsTransport.__call__` (the
+  only object in `harmony_gpt_oss.py` that imports `openai`) driven through `httpx.MockTransport`,
+  capturing method/URL/request-JSON-body/returned-mapping. **Byte-identical** between 3.5.0 and
+  3.18.0 in every captured field. `User-Agent` and `X-Stainless-*` headers were excluded from the
+  comparison and that exclusion is disclosed here rather than silent: those headers embed the
+  installed SDK's own version string by design and trivially "differ" between any two `openai`
+  versions regardless of wire compatibility. Validated against a synthetic fault before being
+  trusted (Guardrail 6): flipping `skip_special_tokens` `False`→`True` in a copy of
+  `harmony_gpt_oss.py` (confirmed as an actual 1-line change via `git diff --numstat --no-index`
+  against a pre-mutation backup) moved both the captured request body and its `content-length`
+  header — the probe is not blind. Source restored from backup and confirmed clean
+  (`git diff --stat` empty) after.
+- **Error-taxonomy differential (method 3, re-run).** Same seven cases as the original (HTTP
+  500/503/429/400/404, a synthetic connect error, a synthetic read timeout) through the real SDK.
+  **Identical mapping under both versions**: 500/503→`TransportError(trigger=SERVER_ERROR)`,
+  429→`TransportError(trigger=RATE_LIMIT)`, connect/timeout→`TransportError(trigger=CONNECTION)`,
+  400/404→`LlmError`. Validated against a synthetic fault: moving the `>= 500` threshold to
+  `>= 599` (confirmed a real 1-line change the same way) moved exactly the 500 and 503 cases from
+  `TransportError`/`SERVER_ERROR` to `LlmError` — 2 of 7 cases discriminated, matching the original
+  ADR's own report of this same validation. Source restored and confirmed clean after.
+
+**Conclusion unchanged: no Harmony formatting or error-handling regression at `openai` 3.18.0
+relative to the 3.5.0 baseline.** The reasoning in the original decision (`openai` is only the HTTP
+transport for vLLM's legacy completions endpoint; `openai-harmony`, a Rust extension, renders and
+parses the Harmony envelope) is unaffected by which patch/minor of `openai` is installed, and this
+round's three measurements are consistent with that reasoning holding at 3.18.0 too. `pyproject.
+toml` and `uv.lock` remain unpinned above their existing floor (`openai>=3.18.0` is itself already
+a floor, not a ceiling) — this amendment adds no new pin. **This is measured for 3.5.0 vs. 3.18.0,
+not proven for every future version** — the same scope statement the original ADR made, carried
+forward rather than silently dropped.
+
+**Dependabot grouping + label (this round, `.github/dependabot.yml`).** `openai` and
+`openai-harmony` now sit in their own `uv` `updates` entry (`allow`-scoped to just those two names,
+`groups:` bundling them into one PR when both move together), carrying the label
+`needs-harmony-readjudication`. Verified against GitHub's own Dependabot configuration-options doc
+(fetched this round) before writing this: `labels:` at the top level of an `updates` entry applies
+to **all** pull requests that entry raises, and a `groups:` sub-block has **no label field of its
+own** — per-group labels are not supported by the schema. The `allow`-scoped second entry is the
+best achievable approximation given that constraint: it is the closest a config-only mechanism gets
+to a "this dependency's PRs carry this label" rule, because the entry can never raise a PR for
+anything else, not because groups gained a labeling feature they do not have. A sibling `ignore`-scoped
+entry covers the rest of the `uv` ecosystem so the two entries don't double-propose the same bump.
+
+**Stated honestly, not implied otherwise: Dependabot cannot enforce "do not merge automatically."**
+Nothing in `dependabot.yml` blocks a merge — the label is a visual marker for a human or for CI
+policy to key off, not a technical gate. The actual enforcement is CLAUDE.md's operator-merges-
+between-rounds single-writer process rule (landed this round, `cc4f141`) plus this label making an
+`openai`/`openai-harmony` PR visually distinguishable from any other Dependabot PR. A future round
+could add a CI check that fails on the presence of this label without an accompanying ADR-0150
+amendment commit in the same PR, but that is not built here — naming it as a possible future
+strengthening, not claiming it exists.
+
+---
+
 ## ADR-0151 — A Harmony-routed profile must fail loud at settings load when no hash-verified vocab resolves; one precedence rule for the two `TIKTOKEN_ENCODINGS_BASE` mechanisms
 
 **Agent Recommendation** (CLAUDE.md Guardrail 1): the shape below was proposed by a prior review

@@ -5,7 +5,43 @@
 
 version: 2
 updates:
+  # This ecosystem is split into two `updates` entries rather than one entry with a `groups:`
+  # sub-block, because `labels:` applies to ALL pull requests from an entry and cannot be scoped
+  # to a single group (verified against the doc linked above, 2026-09-27 — GitHub's own
+  # description of `groups` gives it no per-group `labels` field, and states "Specify your own
+  # labels for all pull requests raised for a package manager" for the entry-level option). An
+  # `allow`-scoped entry is the closest achievable approximation: this entry only ever proposes
+  # updates for the two named packages, so the label it carries is scoped by construction rather
+  # than by a schema feature that does not exist.
   - package-ecosystem: "uv" # See documentation for possible values
     directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
+    allow:
+      - dependency-name: "openai"
+      - dependency-name: "openai-harmony"
+    groups:
+      # Bundle the two into one PR when both move together — they are the SDK and the Harmony
+      # tokeniser/formatting library the harness's `harmony_gpt_oss` backend depends on jointly
+      # (docs/DECISIONS.md ADR-0150).
+      openai-harmony-sdks:
+        patterns:
+          - "openai"
+          - "openai-harmony"
+    labels:
+      - "needs-harmony-readjudication"
+    # ADR-0150 measured that an `openai`/`openai-harmony` bump can silently change Harmony
+    # (gpt-oss) response formatting or wire behavior with no test failure to flag it — the label
+    # above is a visual marker only; Dependabot itself has no merge gate. Do not auto-merge a PR
+    # carrying this label until CLAUDE.md's re-adjudication method (re-run the three ADR-0150
+    # measurements) has been repeated at the new pinned version and the result recorded as an
+    # amendment to ADR-0150 (or a new D-entry if a regression is found).
+
+  - package-ecosystem: "uv" # See documentation for possible values
+    directory: "/" # Location of package manifests
+    schedule:
+      interval: "weekly"
+    ignore:
+      # Covered by the entry above instead, which carries the Harmony re-adjudication label.
+      - dependency-name: "openai"
+      - dependency-name: "openai-harmony"
