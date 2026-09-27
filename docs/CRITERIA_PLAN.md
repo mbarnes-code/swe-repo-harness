@@ -4459,3 +4459,42 @@ entry for the two residuals (contracts-registry fork; backends-statelessness imp
 adjudicate) a future round must pick up. §10 (closed round R) and §23/§28/§1 (round S) are not
 part of the original list above and should be checked against their own `docs/PROGRESS.md`
 checkpoints before re-dispatch, not against this stale sentence.
+
+---
+
+## Round C — C0 checklist (added 2026-09-27, "Round C preconditions" round)
+
+**Status:** waiting on Merci's checklist. This section did not exist before this commit — a
+repo-wide search for "Round C" and "C0" at the anchor ref (`438e19d`) found no dedicated section
+and no occurrence of the string "C0" anywhere in `docs/CRITERIA_PLAN.md`, `docs/PROGRESS.md`, or
+`docs/DECISIONS.md`; only inline prose pointing at future "Round C, real hardware" work in §12.51's
+own done-bar item 4 and §12.49/§12.50's live legs. This is the first time a checklist by this name
+exists in this file.
+
+1. Run `tools/bin/fetch-harmony-vocab` once on Makoto. It needs network once. (The script now reads
+   its expected sha256 from a sidecar file, `<vocab_dir>/o200k_base.tiktoken.sha256`, rather than a
+   hardcoded literal — see ADR-0151.)
+2. Copy the verified `o200k_base.tiktoken` file (and its `.sha256` sidecar) to both Sparks for the
+   vLLM servers.
+3. Leave `llm.harmony_vocab_dir` at ADR-0151's default (`tools/harmony-vocab/`), or set it
+   explicitly in `config/fleet.yaml`.
+4. Confirm `fleet` settings load with `--profile pilot` and vocab-host egress blocked. ADR-0151/D148
+   (this round) make this fail loud with a `ConfigValidationError` naming `llm.harmony_vocab_dir`
+   instead of silently falling back to a network fetch — the `pilot` profile no longer loads at all
+   without a valid, hash-verified vocab directory.
+
+**Disclosed gap, not fabricated.** The brief dispatching this round described "the rest of C0" as
+"pinned image digest, served model name, prefix caching, SM121 flags, reachability, the
+`fleet-baseline` image for D136," calling it "unchanged" — implying a pre-existing checklist. None
+was found. Targeted greps for `SM121`, `prefix caching`, `served model name`, and `pinned image
+digest` across `docs/*.md` returned no checklist matches (`served model name` appears once, in
+`docs/SPEC.md:6938`, as an unrelated aside about `gpt-oss-120b` not being sensitive — not a
+checklist item). `fleet-baseline` in this repo refers to a *different* image
+(`docker/fleet-baseline.Dockerfile`, D136's worktree-provisioning image, `docs/INTEGRATION_HONESTY.md`
+~line 11417-11470) — nothing ties it to a Spark/pilot deployment readiness check. §12.49's own done
+bar already requires its live-conformance report to record, per endpoint, container image digest,
+vLLM version, launch flags, and case counts (committed under `docs/evidence/`) — that may be what
+"pinned image digest" and "SM121 flags" refer to, but this is not verified, only plausible.
+**Recommendation: Merci should confirm or supply the rest of C0 directly**, rather than have a
+future round guess at unwritten content. It is carried forward here as unresolved, not silently
+dropped.

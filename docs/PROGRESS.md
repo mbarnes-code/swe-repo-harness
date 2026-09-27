@@ -12014,3 +12014,197 @@ touched.
 
 **Next subagent task.** A criteria-closing round against `docs/CRITERIA_PLAN.md`, opening with a
 direct re-measurement of §12 (`<n> of 48`), per the Rule 13 debt disclosed above.
+
+---
+
+## Checkpoint — 2026-09-27 — Round C preconditions (P1-P6): Harmony fail-loud, single-writer rule, dependency re-adjudication, address sweep
+
+**Starting ref.** `438e19d` (HEAD exactly, not just an ancestor — confirmed via
+`git rev-parse HEAD` and `git merge-base --is-ancestor 438e19d HEAD`). Per this round's own new
+single-writer rule (P2, below): `git fetch --all` was run before dispatching any work. The
+`github` remote fetched cleanly and confirmed `github/main` = `438e19d`, no drift. The `origin`
+remote (local Gitea) **failed to fetch** — `fatal: could not read Username for 'http://localhost:3001'`
+(no cached credentials in this session) — so only half of "fetch all remotes" was actually
+satisfied. Disclosed rather than silently treated as done; a future round should either provision
+Gitea credentials for the session or record why that's out of scope.
+
+**What was completed.** Five implementation tasks from the dispatching brief, run **strictly
+sequentially** (one subagent at a time, each committed before the next was dispatched) — a
+deliberate ruling (see below), not an oversight, because three of the five touch
+`docs/DECISIONS.md` and/or `docs/INTEGRATION_HONESTY.md` and concurrent lanes editing those files
+is exactly the hazard this round's own P2 exists to close.
+
+1. **P2 — single-writer process rule** (commit `cc4f141`). Added the owner-approved single-writer
+   bullet to `CLAUDE.md` §3, dated 2026-09-26. New `tests/test_no_duplicate_heading_numbers.py`
+   (11 tests) form-agnostically detects duplicate ADR headings in `docs/DECISIONS.md` and duplicate
+   D headings in `docs/INTEGRATION_HONESTY.md` (unioning its three heading forms, correctly treating
+   a real multi-form single entry — D75 — as one, not a duplicate). Rule 12 mutation matrix: 3
+   mutations, each reddened at least one fixture test, verified via diff-against-backup (not
+   `git diff HEAD`).
+2. **P5 — RFC 1918 address sweep** (commit `29c70a9`, **D149**). All 19 private-range IP literals at
+   the anchor ref replaced with RFC 5737 documentation addresses (`10.0.0.5/6`→`192.0.2.5/6` in
+   `docs/SPEC.md`/`tests/test_settings.py`; `10.255.255.1`→`203.0.113.1` in
+   `tests/test_llm_openai_stub_server_e2e.py`, incidentally correcting a docstring that had
+   mislabeled a non-TEST-NET-3 address as TEST-NET-3; `192.168.1.12:3001`→`198.51.100.1:3001` plus
+   username `redmage`→`acme-owner` in `src/fleet/vcs/gitea.py`/`tests/test_gitea.py`). New guard
+   test `tests/test_no_private_addresses_in_tracked_files.py` sweeps every `git ls-files`-tracked
+   file; empty allowlist; excludes its own file from the sweep (disclosed: its fixtures necessarily
+   contain literal RFC1918 strings to exercise each regex branch). Rule 12 mutation matrix: 3
+   mutations (172-range, 192.168-range, 10-range), each reddened a dedicated fixture test, plus a
+   boundary control (172.15/172.32 must not match) and a public-IP control (8.8.8.8 must not
+   match) — no vacuous all-pass/all-fail result. Git history still contains the old address
+   (not rewritten; RFC 1918, low severity, disclosed in D149).
+3. **P1 — Harmony vocab fail-loud fix** (commit `3bcfa93`, **ADR-0151**, **D148**). A profile
+   routing any tier to `harmony_gpt_oss` (today: `pilot`, all three tiers) now fails loud
+   (`ConfigValidationError`, key `llm.harmony_vocab_dir`) at settings load if no valid,
+   hash-verified vocab directory resolves, instead of silently allowing `openai-harmony` to fall
+   back to a network fetch at first use. Default location
+   `<repo_root>/tools/harmony-vocab/`. The sha256 expected hash is no longer duplicated between
+   `tools/bin/fetch-harmony-vocab` and `settings.py` — both now read one sidecar file,
+   `<vocab_dir>/o200k_base.tiktoken.sha256` (a disclosed, reasoned deviation from the brief's literal
+   suggestion of one fixed path: co-locating the hash with the vocab file makes both the failure
+   path and the success path testable against an arbitrary `tmp_path`, not just the real repo
+   directory — accepted). Operator/config precedence rule (recorded in ADR-0151): config
+   (explicit or defaulted) is authoritative; if the operator has already exported a *different*
+   `TIKTOKEN_ENCODINGS_BASE`, settings load fails loud naming both values; `tests/conftest.py`'s
+   own `setdefault` line is untouched (non-settings-load test paths only) — verified, not assumed,
+   that it can never spuriously conflict, since both resolve to the same default directory. Rule 12
+   mutation matrix: 3 mutations (drop routed-profile check, skip hash comparison, revert to
+   unconditional overwrite), each reddened 1-2 of 87 tests in `tests/test_settings.py`, none
+   all-fail/all-pass.
+4. **P4 — dependency re-adjudication** (commit `d1b075f`). ADR-0150's three-method adjudication
+   (test-suite diff, wire-level `httpx.MockTransport` differential, error-taxonomy differential)
+   re-run at the actually-installed `openai==3.18.0` against ADR-0150's original 3.5.0 baseline: no
+   Harmony formatting regression found (1009 tests across 22 files, both versions, 0 failures;
+   wire-level byte-identical; error-taxonomy identical across 7 cases; both differentials validated
+   against a synthetic fault before being trusted, per Guardrail 6). Appended as a dated
+   "Amended 2026-09-27" section to the existing ADR-0150 entry — no new ADR number. Original
+   differential scripts from ADR-0150 were not found committed anywhere (they were ad-hoc/
+   uncommitted the first time); this round's re-adjudication disclosed that gap rather than
+   silently re-deriving a narrower method.
+   `.github/dependabot.yml`: `openai`/`openai-harmony` split into their own `allow`-scoped update
+   entry, grouped, labeled `needs-harmony-readjudication`, with the rest of the `uv` ecosystem
+   `ignore`-scoped away from them in a second entry — a disclosed workaround, not a full solution:
+   verified against GitHub's own dependabot config-options doc that `labels:` applies to an entire
+   `updates` entry, not to one `groups:` sub-block, so per-group labels are not supported by the
+   schema. Dependabot itself still cannot block a merge; enforcement is P2's single-writer rule plus
+   this label's visibility, stated as such in the ADR rather than implied as a technical gate.
+5. **P6 — Round C / C0 checklist** (docs-only, written directly by the orchestrator into
+   `docs/CRITERIA_PLAN.md`, no separate commit-worthy code). No "Round C" or "C0" section existed
+   anywhere in the docs before this — confirmed by a targeted search across
+   `docs/CRITERIA_PLAN.md`/`docs/PROGRESS.md`/`docs/DECISIONS.md`, contrary to what the dispatching
+   brief's phrasing implied. Added the 4 confirmed checklist items (run
+   `tools/bin/fetch-harmony-vocab` once on Makoto; copy the verified vocab + its `.sha256` sidecar to
+   both Sparks; leave `llm.harmony_vocab_dir` at ADR-0151's default or set it explicitly; confirm
+   `fleet` settings load under `--profile pilot` with vocab-host egress blocked). **Disclosed gap,
+   not fabricated:** the brief's "rest of C0" (pinned image digest, served model name, prefix
+   caching, SM121 flags, reachability, "the `fleet-baseline` image for D136") does not exist as a
+   checklist anywhere in this repo's docs — targeted greps for those exact terms found no matches
+   (one unrelated aside in `docs/SPEC.md:6938`), and `fleet-baseline` refers to a different image
+   (D136's worktree-provisioning image, not a Spark/pilot deployment image). §12.49's own done bar
+   already requires recording container image digest/vLLM version/launch flags in its live evidence
+   report, which may be what was meant — flagged as plausible, not verified. **Recommendation to
+   Merci: confirm or supply the rest of C0 directly** rather than have a future round guess.
+   Preconditions-only (P3): not implemented as code; the operator-facing findings are below.
+
+**P3 — operator write-up (no `.claude/` files touched by this round).**
+- Commit `140f870` (titled as an unrelated ruff-rules change) added a `hooks.PreToolUse` block to
+  the **shared, tracked** `.claude/settings.json`, running
+  `/home/redmage/.local/bin/graphify hook-guard search|read` before every Bash/Grep/Read/Glob call
+  — an absolute path private to this operator's machine. Every other clone or worktree inherits
+  this and will error or misbehave when that path doesn't exist. **Recommended: move the `hooks`
+  block to `.claude/settings.local.json`**, confirmed already gitignored
+  (`.gitignore:116`, exact-literal match) and already present untracked in the working tree
+  (10583 bytes) — this is a config change for Merci to make, not this round.
+- The same commit changed a `deny` rule from `Bash(curl:*|*sh)` to `Bash(curl*|*sh)`. Per Claude
+  Code's own permission-rule documentation (fetched live this round): `:*` is a trailing-wildcard
+  shorthand **only when it is the last thing in the pattern** (the doc's own worked counter-example
+  is `Bash(git:* push)`, where a literal colon follows because something comes after it); the doc
+  describes `|` **only** as a command-separator used to split a compound shell command into
+  subcommands for independent matching, with no documented or worked example of `|` acting as
+  pattern-level alternation inside one rule string. By direct analogy to the documented
+  `git:* push` case, in `curl:*|*sh` the `:*` is followed by `|*sh`, so the colon is plausibly
+  literal rather than a wildcard suffix in both the old and new forms, and since a real
+  `curl ... | sh` invocation is split into two subcommands neither of which contains a literal `|`
+  character, it's plausible neither form of this deny rule ever matched a real curl-pipe-to-shell
+  invocation — **this is inferred by analogy, not confirmed against a worked example matching this
+  exact shape**, and is reported as such rather than asserted as settled behavior.
+  **Recommendation: Merci verify empirically** (e.g. check for a Claude Code startup warning about
+  an unreachable/malformed permission pattern) before trusting this rule as a working guard.
+
+**Rule 13 ruling (ADR/D numbers not required for a process ruling; recorded here per the brief's
+own instruction that "the orchestrator makes the ruling").** The round immediately preceding this
+one (Harmony/D147/ADR-0150, 2026-09-25) was already explicitly disclosed as a no-criterion,
+defect-fix-plus-adjudication round. This round (P1-P6) also moves no §12 criterion from unmet to
+met — §12.49-51 remain `OPEN`, unchanged, and none of P1-P6 was scoped to close them (P1 is
+explicitly a *precondition* the brief itself says is needed before §12.50's "offline at the LLM
+layer" claim can be made honestly; actually meeting §12.49-51 needs live Spark hardware, out of
+scope here). Two standalone no-criterion rounds in a row would violate Rule 13's plain text. Per the
+brief's own framing and the precedent it cites (B1-B4 being treated as one accounting unit),
+**this round is ruled to form one Rule-13 accounting unit together with the future Round C**: the
+unit as a whole is what closes §12.49-51, this round is that unit's precondition half, and it is
+therefore not counted as a second standalone hardening round. This ruling is provisional on Round C
+actually landing and actually closing those three criteria — if Round C is later deferred
+indefinitely or fails to close them, this accounting-unit framing should be revisited rather than
+treated as having permanently discharged Rule 13 for this stretch.
+
+**§12 count: N = 51, unchanged this round; MET status not re-verified.** No criterion count claim
+beyond what Round B's checkpoint already re-measured directly.
+
+**Full suite — what ran, what was found, what was fixed.** One full session,
+`.venv/bin/pytest tests/ -q`, run to completion at `d1b075f` (all 4 implementation commits landed):
+**15 failed, 3131 passed, 9 skipped, 0 xfail, 1179.90s (19m39s)**. Breakdown of all 15, none left
+unexplained:
+- **1 pre-existing, unrelated:** `tests/test_lint_gate.py::test_ruff_format_check_dirty_count_matches_the_pinned_baseline`
+  (121 dirty files vs. pinned baseline 120) — confirmed pre-existing at `cc4f141`, before P5/P1/P4's
+  work, by the P5 implementer's own re-measurement at a pristine detached worktree.
+- **3 pre-existing, unrelated:** `tests/test_integration_honesty_citations.py` (citation drift +
+  a stated-vs-derived census mismatch) — confirmed pre-existing the same way.
+- **11 caused by this round, and repaired by this round (disclosed, not hidden):** every
+  `tests/test_build_e2e.py` real-Bazel test plus
+  `tests/test_eligible_contract_units.py::test_a_failed_contract_is_never_re_ingested_by_build`
+  failed with fixture repos ending `ExitCode.REQUIRES_HUMAN_INTERVENTION`. Root-caused by a
+  dispatched debugging subagent (not guessed): the P4 implementer's `uv sync --extra harmony`
+  collaterally removed `git-filter-repo` from the shared `.venv` — it was never declared in
+  `pyproject.toml`/`uv.lock` (an out-of-band install, same as this repo's other worktrees carry it),
+  and a plain `uv sync` prunes anything not in the lockfile by default. **Confirmed NOT a code
+  regression**: `git show --stat` on all 4 of this round's commits touches only docs, tests,
+  `CLAUDE.md`, `settings.py`, `gitea.py`, `tools/bin/fetch-harmony-vocab`, and
+  `.github/dependabot.yml` — none touch `pyproject.toml`, `uv.lock`, or any dependency
+  configuration. Decisively reproduced (fail → pass with a scratch PATH shim, no primary `.venv`
+  changes) before any fix was applied. **Fixed by the orchestrator directly** (an environment
+  repair, not a code change — nothing to commit or review):
+  `.venv/bin/python -m pip install git-filter-repo` (v2.47.0), matching its known out-of-band,
+  non-lockfile-managed install pattern. **Re-verified, not assumed fixed:** a 5-test sample spanning
+  Python/Rust/JS fixtures and the contract-units test —
+  `test_two_python_repos_with_different_pypi_dependencies_both_build`,
+  `test_two_rust_repos_in_one_wave_both_build`,
+  `test_two_js_repos_with_different_npm_dependencies_both_build`,
+  `test_eligible_contract_units.py::test_a_failed_contract_is_never_re_ingested_by_build`,
+  `test_the_resolved_lock_carries_the_transitive_closure` — **5 passed**, with a clean `bazel disk`
+  line (`peak 4.85 GiB (ceiling 6 GiB) · residual output bases 0 bytes · repository cache kept
+  2988 MiB`), matching CLAUDE.md §6's green criterion. The remaining 6 of the 11 were not
+  individually re-run after the fix; they were traced to the identical root cause by the debugging
+  subagent (spot-checked against 2 of them directly) and are treated as fixed by the same repair,
+  not independently re-verified — disclosed as the scope actually covered, not implied as fully
+  re-run. **Recommendation for a future round, not implemented here (Rule 3 scope discipline):**
+  declare `git-filter-repo` in `pyproject.toml` as a dev dependency, or document that a plain
+  `uv sync` (without `--inexact`) is unsafe against any out-of-band-installed tool in `.venv`, so
+  this class of collateral damage can't recur silently.
+
+**Rulings this round (form-agnostic ADR/D allocation, measured at dispatch, not carried forward):**
+next free ADR number was **0151** (max found: ADR-0150, verified substantive, not a stub);
+next free D number was **148** (max found: D147, verified substantive). Allocated: ADR-0151 (P1),
+D148 (P1), D149 (P5). D150 was reserved contingent on a P4 regression finding; none was found, so
+D150 remains unused and free for the next round to allocate. All four implementation tasks were
+dispatched **strictly sequentially**, one subagent at a time, each committing before the next was
+dispatched — ruled necessary given the real file-overlap risk (P1 and P4 both touch
+`docs/DECISIONS.md`; P1 and P5 both touch `docs/INTEGRATION_HONESTY.md`) and P2's own point about
+concurrent-lane hazards on shared docs files.
+
+**Next subagent task.** Round C itself, gated on Merci's C0 checklist (docs/CRITERIA_PLAN.md,
+new section added this round) — specifically Merci confirming or supplying the "rest of C0" this
+round could not locate, and provisioning the Harmony vocab per the checklist's items 1-4. Once C0
+is confirmed complete, Round C is the live half of this round's Rule-13 accounting unit and should
+open with the live-hardware work against §12.49-51 (recommended order per §12.51's own entry:
+stub-only legs of §12.51 first, then §12.49, then §12.50, then §12.51 (i)'s live leg last).
