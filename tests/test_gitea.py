@@ -337,12 +337,12 @@ def test_non_json_from_the_forge_raises_rather_than_reporting_unchanged() -> Non
 
 def test_the_pr_url_is_parsed_by_path_so_gitea_s_ROOT_URL_host_is_irrelevant() -> None:
     """WHY: Gitea stamps `html_url` from its configured `ROOT_URL` — on this box
-    `http://192.168.1.12:3001` even when the harness talks to `http://localhost:3001`. A driver
+    `http://198.51.100.1:3001` even when the harness talks to `http://localhost:3001`. A driver
     that rebuilt the API call from the stored URL's host would poll an address the operator never
     configured (and a container-internal hostname would not resolve at all).
     """
-    ref = GT.parse_pr_url("http://192.168.1.12:3001/redmage/acme-billing/pulls/42")
-    assert (ref.owner, ref.repo, ref.index) == ("redmage", "acme-billing", 42)
+    ref = GT.parse_pr_url("http://198.51.100.1:3001/acme-owner/acme-billing/pulls/42")
+    assert (ref.owner, ref.repo, ref.index) == ("acme-owner", "acme-billing", 42)
 
 
 def test_a_url_that_is_not_a_pull_request_raises() -> None:

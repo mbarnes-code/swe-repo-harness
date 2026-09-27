@@ -12167,3 +12167,59 @@ unverified exactly as `harmony_gpt_oss.py`'s own `_VllmCompletionsTransport` doc
 the `LLM backends (Anthropic / OpenAI-compatible)` row's **FAKE, correctly** verdict is untouched
 by this entry.
 
+## D149 — FIXED, LANDED (this entry lands in the same commit as the fix). Real LAN address and Gitea username exposed in tracked files of this public repo
+
+**Finding.** A repo-wide sweep at commit `438e19d`
+(`git grep -nE '\b(10\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])|192\.168)\.[0-9]{1,3}\.[0-9]{1,3}\b'`)
+found 19 RFC 1918 (private-range) IP literals hardcoded in tracked files of this public GitHub
+repo. Seventeen were harmless placeholder/test literals (two 10.0.0.x-style addresses, last octet
+5 and 6, as example Spark `base_url` values in `docs/SPEC.md` and their mirrors in
+`tests/test_settings.py`; an unreachable 10.x "off-loopback" literal (last three octets 255, 255,
+1) in `tests/test_llm_openai_stub_server_e2e.py`, used for a network guard test whose own
+docstring already claimed "TEST-NET-3" even though that literal was never actually in that RFC
+5737 range). Two were a real exposure: the operator's actual LAN address (a 192.168.x.x host,
+port 3001, a real self-hosted Gitea instance) paired with their actual Gitea username (the
+literal string this operator uses on that host), in a docstring in `src/fleet/vcs/gitea.py` and a
+test fixture/assertion in `tests/test_gitea.py`. (Exact pre-fix literals are deliberately not
+re-quoted here in dotted-quad form -- see the note on this entry's own self-reference below.)
+
+**Fix.** All 19 literals replaced with RFC 5737 documentation-range addresses, which read as
+unambiguously fake and can never resolve to a real host: the two 10.0.0.x Spark placeholders
+became `192.0.2.5` and `192.0.2.6` (RFC 5737 TEST-NET-1) in `docs/SPEC.md` and
+`tests/test_settings.py`; the 10.x off-loopback literal became `203.0.113.1` (RFC 5737 TEST-NET-3,
+matching the docstring's pre-existing claim) in `tests/test_llm_openai_stub_server_e2e.py`; the
+real LAN address became `198.51.100.1:3001` (RFC 5737 TEST-NET-2) in `src/fleet/vcs/gitea.py` and
+`tests/test_gitea.py`, where the real username was also replaced with the neutral placeholder
+`acme-owner` (a docstring example URL and one test's URL/assertion).
+
+A new structural guard, `tests/test_no_private_addresses_in_tracked_files.py`, enumerates every
+`git ls-files`-tracked file and asserts none contains an RFC 1918 literal (same regex as the sweep
+above, as a pure function `_find_private_ip_hits`), reporting `file:line` on failure. Mutation
+matrix (each mutation confirmed to actually change the file via a diff against a pre-mutation
+backup, not `git diff HEAD`, per Rule 12): dropping the `172\.(1[6-9]|2[0-9]|3[01])` branch
+reddens `test_matches_the_172_16_through_31_range` (8 other unit tests stay green); narrowing the
+`192\.168` branch to `192\.168\.1` reddens `test_matches_the_192_168_range_beyond_the_first_subnet`
+(8 stay green); dropping the `10\.[0-9]{1,3}` branch reddens the 3 tests that exercise it
+(`test_matches_the_10_range`, `test_reports_the_correct_line_number_for_a_hit_past_the_first_line`,
+`test_reports_every_hit_on_a_line_with_more_than_one`; 6 stay green). No mutation reddened or
+greened every test at once, so none is the vacuous all-fail/all-pass result Rule 12 warns against.
+
+**Self-reference, disclosed rather than hidden.** The guard's own unit-test fixtures necessarily
+contain literal RFC 1918 strings (e.g. a fixture built around a 172.16-31.x.x-range literal to
+prove the 172 branch fires) — that is what makes the detector's branches mutation-testable at all.
+The integration test therefore excludes its own file (`tests/test_no_private_addresses_in_tracked_
+files.py`) from the repo-wide sweep by exact relative path, with a comment at the exclusion site
+explaining why: those literals are inert test data exercising `_find_private_ip_hits` directly,
+never a real address, and the unit tests above are what actually checks them. The same
+self-reference bit this very entry during drafting — an earlier draft quoted the fixed literals in
+dotted-quad form for readability, which the guard test (once this file is `git add`ed) correctly
+flagged as new violations in `docs/INTEGRATION_HONESTY.md` itself; the prose above was rewritten to
+describe the old values without reproducing them in matching form, which is why it reads as
+somewhat roundabout.
+
+**Not fixed, and explicitly out of scope.** Git history still contains the pre-fix commits
+carrying the real LAN address and username — rewriting history was judged not worth it here: this
+is an RFC 1918 (private) LAN address, not a secret (no credential, token, or key), and it grants no
+access beyond what already requires being on the operator's own LAN. The new guard test only
+covers tracked-file *content* going forward, not history.
+

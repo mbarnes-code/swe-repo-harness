@@ -6942,9 +6942,9 @@ and IS committed). An operator with real endpoint values creates `config/models.
 ```yaml
 profiles:
   pilot:
-    HEAVY:     [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://10.0.0.5:8000/v1' } ]
-    WORKHORSE: [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://10.0.0.5:8000/v1' } ]
-    CHEAP:     [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://10.0.0.6:8000/v1' } ]
+    HEAVY:     [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://192.0.2.5:8000/v1' } ]
+    WORKHORSE: [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://192.0.2.5:8000/v1' } ]
+    CHEAP:     [ { backend: harmony_gpt_oss, model_id: gpt-oss-120b, base_url: 'http://192.0.2.6:8000/v1' } ]
 ```
 
 `FleetSettings.load()` reads this file (if present) and, for each override entry, matches it to a

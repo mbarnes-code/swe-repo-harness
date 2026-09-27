@@ -139,10 +139,10 @@ class PrRef:
 
 
 def parse_pr_url(url: str) -> PrRef:
-    """`http://host:3001/redmage/proj/pulls/7` → `PrRef("redmage", "proj", 7)`.
+    """`http://host:3001/acme-owner/proj/pulls/7` → `PrRef("acme-owner", "proj", 7)`.
 
     Only the PATH is used. Gitea stamps `html_url` from its configured `ROOT_URL`, which on this
-    operator's box is `http://192.168.1.12:3001` even when the harness talks to
+    operator's box is `http://198.51.100.1:3001` even when the harness talks to
     `http://localhost:3001` — so a driver that rebuilt the API call from the stored URL's host
     would poll an address the operator never configured, and a container-internal hostname would
     not resolve at all. The configured `base_url` always wins; the URL supplies identity only.

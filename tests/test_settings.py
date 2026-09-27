@@ -1220,12 +1220,13 @@ def test_models_local_yaml_overlays_a_field_onto_the_template_target(tmp_path: P
     config_dir = write_config(tmp_path)
     (config_dir / "models.local.yaml").write_text(
         "profiles:\n  default:\n    HEAVY:\n"
-        "      - { backend: anthropic, model_id: claude-opus-5, base_url: 'http://10.0.0.5/v1' }\n",
+        "      - { backend: anthropic, model_id: claude-opus-5,\n"
+        "          base_url: 'http://192.0.2.5/v1' }\n",
         encoding="utf-8",
     )
     settings = load(config_dir)
     target = settings.models.profiles["default"]["HEAVY"][0]
-    assert target.base_url == "http://10.0.0.5/v1"
+    assert target.base_url == "http://192.0.2.5/v1"
     assert target.model_id == "claude-opus-5"
     assert target.api_key_env == "ANTHROPIC_API_KEY"
     assert target.price == Price(in_per_mtok=5.0, out_per_mtok=25.0)
@@ -1281,7 +1282,7 @@ def test_models_local_yaml_matching_no_template_target_fails_loud(tmp_path: Path
     (config_dir / "models.local.yaml").write_text(
         "profiles:\n  default:\n    HEAVY:\n"
         "      - { backend: anthropic, model_id: claude-opus-5-typo, "
-        "base_url: 'http://10.0.0.5/v1' }\n",
+        "base_url: 'http://192.0.2.5/v1' }\n",
         encoding="utf-8",
     )
     with pytest.raises(ConfigValidationError) as excinfo:
@@ -1296,7 +1297,7 @@ def test_models_local_yaml_override_missing_identity_fields_fails_loud(tmp_path:
     either has no way to name which template target it means."""
     config_dir = write_config(tmp_path)
     (config_dir / "models.local.yaml").write_text(
-        "profiles:\n  default:\n    HEAVY:\n      - { base_url: 'http://10.0.0.5/v1' }\n",
+        "profiles:\n  default:\n    HEAVY:\n      - { base_url: 'http://192.0.2.5/v1' }\n",
         encoding="utf-8",
     )
     with pytest.raises(ConfigValidationError) as excinfo:
@@ -1332,11 +1333,11 @@ def test_models_local_yaml_base_urls_replaces_the_template_base_url(tmp_path: Pa
     (config_dir / "models.local.yaml").write_text(
         "profiles:\n  local:\n    HEAVY:\n"
         "      - { backend: openai_compatible, model_id: local-heavy,\n"
-        "          base_urls: ['http://10.0.0.5/v1', 'http://10.0.0.6/v1'] }\n",
+        "          base_urls: ['http://192.0.2.5/v1', 'http://192.0.2.6/v1'] }\n",
         encoding="utf-8",
     )
     target = load(config_dir).models.profiles["local"]["HEAVY"][0]
-    assert target.base_urls == ("http://10.0.0.5/v1", "http://10.0.0.6/v1")
+    assert target.base_urls == ("http://192.0.2.5/v1", "http://192.0.2.6/v1")
     assert target.base_url is None
     assert target.api_key_env == "LOCAL_LLM_API_KEY"
 
@@ -1348,7 +1349,7 @@ def test_models_local_yaml_naming_both_endpoint_spellings_fails_loud(tmp_path: P
     (config_dir / "models.local.yaml").write_text(
         "profiles:\n  local:\n    HEAVY:\n"
         "      - { backend: openai_compatible, model_id: local-heavy, base_url: 'http://x/v1',\n"
-        "          base_urls: ['http://10.0.0.5/v1', 'http://10.0.0.6/v1'] }\n",
+        "          base_urls: ['http://192.0.2.5/v1', 'http://192.0.2.6/v1'] }\n",
         encoding="utf-8",
     )
     with pytest.raises((ConfigValidationError, ValidationError)):
@@ -1408,7 +1409,7 @@ def test_models_local_yaml_ambiguous_identity_fails_loud(tmp_path: Path) -> None
     assert load(config_dir).models.profiles["pair"]["HEAVY"][1].base_url.endswith("8002/v1")  # type: ignore[union-attr]
     (config_dir / "models.local.yaml").write_text(
         "profiles:\n  pair:\n    HEAVY:\n"
-        "      - { backend: openai_compatible, model_id: twin, base_url: 'http://10.0.0.5/v1' }\n",
+        "      - { backend: openai_compatible, model_id: twin, base_url: 'http://192.0.2.5/v1' }\n",
         encoding="utf-8",
     )
     with pytest.raises(ConfigValidationError) as excinfo:

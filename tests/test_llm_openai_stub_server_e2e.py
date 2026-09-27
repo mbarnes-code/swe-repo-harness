@@ -153,14 +153,14 @@ def test_the_stub_server_records_every_request_it_answers() -> None:
 
 
 def test_the_loopback_guard_catches_a_genuine_off_loopback_attempt() -> None:
-    """The real transport, pointed at a non-loopback LITERAL IP (`10.255.255.1` — a TEST-NET-3
+    """The real transport, pointed at a non-loopback LITERAL IP (`203.0.113.1` — a TEST-NET-3
     address, RFC 5737, never routable) so the failure is deterministic and needs no DNS lookup,
     no real network reachability, and no flakiness. If `assert_loopback_only()` were a no-op, this
     call would instead hang or fail with a `ConnectionRefused`/timeout from the SDK's own retry
     logic — NOT with `blocked_attempts` populated — so the assertion on `blocked_attempts` is what
     proves the GUARD fired, not merely that the call failed for some other reason."""
     backend = oc.OpenAICompatibleBackend(oc._SdkTransport(max_retries=0), env={})
-    off_target = _stub_target("http://10.255.255.1:65535/v1")
+    off_target = _stub_target("http://203.0.113.1:65535/v1")
 
     with assert_loopback_only() as guard, pytest.raises(Exception):  # noqa: B017
         asyncio.run(
@@ -178,7 +178,7 @@ def test_the_loopback_guard_catches_a_genuine_off_loopback_attempt() -> None:
         "the guard never fired: the connection reached the socket layer unblocked"
     )
     blocked_host = guard.blocked_attempts[0][0]
-    assert blocked_host == "10.255.255.1"
+    assert blocked_host == "203.0.113.1"
 
 
 def test_the_guard_is_scoped_to_its_own_context_manager() -> None:
@@ -241,9 +241,9 @@ def test_the_loopback_guard_still_catches_a_genuine_violation_after_the_unix_soc
         s.settimeout(2.0)
         try:
             with pytest.raises(OffLoopbackConnectionAttempt):
-                s.connect(("10.255.255.1", 65535))
+                s.connect(("203.0.113.1", 65535))
         finally:
             s.close()
 
     assert len(guard.blocked_attempts) == 1
-    assert guard.blocked_attempts[0][0] == "10.255.255.1"
+    assert guard.blocked_attempts[0][0] == "203.0.113.1"
