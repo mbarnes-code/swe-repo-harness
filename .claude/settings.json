@@ -64,27 +64,5 @@
       "Bash(.venv/bin/mypy *)",
       "Bash(.venv/bin/ruff check src/ tests/)"
     ]
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|Grep",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/home/redmage/.local/bin/graphify hook-guard search"
-          }
-        ]
-      },
-      {
-        "matcher": "Read|Glob",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/home/redmage/.local/bin/graphify hook-guard read"
-          }
-        ]
-      }
-    ]
   }
 }
