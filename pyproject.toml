@@ -56,7 +56,7 @@ dev = [
   # redden (or quiet) an untouched tree with no local change to explain it. `tools/bin/security-
   # scan` runs all three (plus gitleaks, a separate Go binary — see that script and ADR-0141).
   "bandit==1.9.4",
-  "semgrep==1.177.0",
+  "semgrep==1.178.0",
   "pip-audit==2.10.1",
 ]
 
@@ -80,7 +80,7 @@ dev = [
   "mypy>=1.13",
   # ADR-0141 security-scanning toolchain — same exact-pin reasoning as ruff above.
   "bandit==1.9.4",
-  "semgrep==1.177.0",
+  "semgrep==1.178.0",
   "pip-audit==2.10.1",
 ]
 
