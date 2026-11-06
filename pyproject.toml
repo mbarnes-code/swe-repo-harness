@@ -26,7 +26,7 @@ classifiers = [
 # is absent simply does not register and is a startup error only if the ACTIVE profile names it.
 dependencies = [
   "pydantic>=2.13.5,<3",
-  "pydantic-settings>=2.7",
+  "pydantic-settings>=2.16.2",
   "typer>=0.15",
   "aiosqlite>=0.20",
   "structlog>=24.4",
