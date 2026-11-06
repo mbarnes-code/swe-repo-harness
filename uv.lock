@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -767,7 +767,7 @@ requires-dist = [
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.168.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "networkx", specifier = ">=3.7" },
-    { name = "openai", specifier = ">=3.18.0" },
+    { name = "openai", specifier = ">=3.43.0" },
     { name = "openai-harmony", marker = "extra == 'harmony'", specifier = ">=0.0.8" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = "==2.10.1" },
     { name = "pydantic", specifier = ">=2.13.5,<3" },
@@ -1681,7 +1681,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "3.18.0"
+version = "3.43.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1691,9 +1691,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1b/7b/a960e698f7126f31113764d7b441d7fe73caada32b6e65c6ca42c5343265/openai-3.18.0.tar.gz", hash = "sha256:780946991bc825f110ddde12c8c84885dd012ae64143d56d494922b7bb879b78", size = 1711178, upload-time = "2026-09-22T18:26:31.81Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ff/f7/2e8ca7ab9554656e831de49aed53aa8067e96015432b3078cff01966c3ae/openai-3.43.0.tar.gz", hash = "sha256:b5e6880586709df7ba002d0a2d4b97b960fc8fa6696a8abe29fbcf24ed2edd67", size = 2375647, upload-time = "2026-11-03T18:07:00.927Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5e/c3/262e12d6dc544e215c3f4f76525b0fadf749f8092e525772b9f868d89ea9/openai-3.18.0-py3-none-any.whl", hash = "sha256:31f170b59865cbf35ceb15699bd33b190fa660eb2f36591c74a161afc67152e7", size = 2068693, upload-time = "2026-09-22T18:26:29.518Z" },
+    { url = "https://files.pythonhosted.org/packages/26/f4/d00b8d6205916e7c89711d86cf70c2d930fc069c596cb2bb47884bc67392/openai-3.43.0-py3-none-any.whl", hash = "sha256:d8dfc6a187b587769f56fc00c7b8d2cb7715e65583d587eee0f0a99c6cf49d12", size = 2408178, upload-time = "2026-11-03T18:06:58.828Z" },
 ]
 
 [[package]]
